@@ -2,6 +2,7 @@ package main
 
 import (
 	"pdfnest-backend/internal/conversion"
+	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
 	"pdfnest-backend/internal/structure"
@@ -36,9 +37,15 @@ func main() {
 	structureController := structure.NewController(structureService)
 	structure.RegisterRoutes(apiGroup, structureController)
 
+	// Domain 4: Document Conversion (PDF to Img / Img to PDF)
 	conversionService := conversion.NewService()
 	conversionController := conversion.NewController(conversionService)
 	conversion.RegisterRoutes(apiGroup, conversionController)
+
+	// Domain 5: Extraction (PDF to Text)
+	ocrService := ocr.NewService()
+	ocrController := ocr.NewController(ocrService)
+	ocr.RegisterRoutes(apiGroup, ocrController)
 
 	err := app.Listen(":8080")
 	if err != nil {

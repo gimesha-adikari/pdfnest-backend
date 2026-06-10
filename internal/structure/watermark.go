@@ -10,13 +10,21 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
-func (s *structureService) WatermarkPDF(inputPath string, text string, description string) (string, error) {
+func (s *structureService) WatermarkPDF(inputPath string, text string, imagePath string, description string) (string, error) {
 	tempDir := os.TempDir()
 	outputFile := "watermarked-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
 	config := model.NewDefaultConfiguration()
 
-	wm, err := api.TextWatermark(text, description, true, false, types.POINTS)
+	var wm *model.Watermark
+	var err error
+
+	if imagePath != "" {
+		wm, err = api.ImageWatermark(imagePath, description, true, false, types.POINTS)
+	} else {
+		wm, err = api.TextWatermark(text, description, true, false, types.POINTS)
+	}
+
 	if err != nil {
 		return "", err
 	}

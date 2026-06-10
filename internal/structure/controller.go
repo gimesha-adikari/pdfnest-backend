@@ -244,42 +244,48 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
-	text := c.FormValue("text")
-	if text == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Watermark text parameter missing")
-	}
-
-	description := c.FormValue("description")
-	if description == "" {
-		description = "font:Helvetica, pos:c, rot:45, scale:1.0, op:0.5"
-	}
-
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source document container asset")
+		return c.Status(fiber.StatusBadRequest).SendString("Missing target source PDF document container file asset")
 	}
+
+	text := c.FormValue("text")
+	description := c.FormValue("description")
 
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, uuid.New().String()+fileHeader.Filename)
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to generate backend file instance workspace")
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace source environment blocks")
 	}
 	defer func(name string) {
 		err := os.Remove(name)
 		if err != nil {
-
+			return
 		}
 	}(inputPath)
 
-	outputPath, err := ctrl.service.WatermarkPDF(inputPath, text, description)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Watermark processing failure: " + err.Error())
-	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
-
+	var imagePath string
+	imgHeader, err := c.FormFile("watermarkImage")
+	if err == nil && imgHeader != nil {
+		imagePath = filepath.Join(tempDir, uuid.New().String()+"-"+imgHeader.Filename)
+		if err := c.SaveFile(imgHeader, imagePath); err != nil {
+			return c.Status(fiber.StatusInternalServerError).SendString("Failed to process attached watermark graphic asset")
 		}
+		defer func(name string) {
+			err := os.Remove(name)
+			if err != nil {
+				return
+			}
+		}(imagePath)
+	}
+
+	outputPath, err := ctrl.service.WatermarkPDF(inputPath, text, imagePath, description)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).SendString("Watermark generation engine failure: " + err.Error())
+	}
+
+	defer func(name string) {
+		_ = os.Remove(name)
 	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")

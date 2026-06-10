@@ -6,7 +6,7 @@ type Service interface {
 	RotatePDF(inputPath string, rotations map[string]int) (string, error)
 	DeletePDFPages(inputPath string, pagesToDelete []string) (string, error)
 	ReorderPDFPages(inputPath string, sequence []string) (string, error)
-	WatermarkPDF(inputPath string, text string, description string) (string, error)
+	WatermarkPDF(inputPath string, text string, imagePath string, description string) (string, error)
 	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string) (string, error)
 }
