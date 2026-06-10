@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 
@@ -25,12 +26,13 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Failed to save source PDF for OCR processing at %s: %v", inputPath, err)
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace memory environment")
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
 
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary uploaded OCR input PDF at %s: %v", name, err)
 		}
 	}(inputPath)
 
@@ -38,10 +40,10 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("OCR process routine failure: " + err.Error())
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
 
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary OCR output text file at %s: %v", name, err)
 		}
 	}(txtOutputPath)
 
@@ -63,37 +65,31 @@ func (ctrl *Controller) ConvertImagesToTextPDF(c *fiber.Ctx) error {
 	tempDir := os.TempDir()
 	var temporaryImagePaths []string
 
+	defer func() {
+		for _, path := range temporaryImagePaths {
+			if err := os.Remove(path); err != nil {
+				log.Printf("[CLEANUP WARNING] Failed to delete temporary input image at %s: %v", path, err)
+			}
+		}
+	}()
+
 	for _, fileHeader := range files {
 		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
-			for _, path := range temporaryImagePaths {
-				err := os.Remove(path)
-				if err != nil {
-					return err
-				}
-			}
+			log.Printf("[SERVER ERROR] Failed to allocate file to workspace path %s: %v", uniquePath, err)
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace processing paths")
 		}
 		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
 	}
 
-	defer func() {
-		for _, path := range temporaryImagePaths {
-			err := os.Remove(path)
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	outputPath, err := ctrl.service.ImageToTextPDF(temporaryImagePaths)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Smart image extraction pipeline broke down: " + err.Error())
 	}
+
 	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
-			return
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary compiled searchable PDF at %s: %v", name, err)
 		}
 	}(outputPath)
 

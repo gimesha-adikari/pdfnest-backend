@@ -1,6 +1,7 @@
 package optimize
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 
@@ -23,29 +24,31 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Failed to save target compression PDF to path %s: %v", inputPath, err)
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to initialize workspace file")
 	}
+
 	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
-			_ = err
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary unoptimized input PDF at %s: %v", name, err)
 		}
 	}(inputPath)
 
 	outputPath, err := ctrl.service.OptimizePDF(inputPath)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Compression processing failure")
+		return c.Status(fiber.StatusInternalServerError).SendString("Compression processing failure: " + err.Error())
 	}
+
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary optimized output PDF at %s: %v", name, err)
+		}
+	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")
-	err = c.Download(outputPath)
 
-	err = os.Remove(outputPath)
-	if err != nil {
-		return err
-	}
-	return err
+	return c.Download(outputPath)
 }

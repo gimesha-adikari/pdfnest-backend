@@ -1,6 +1,7 @@
 package conversion
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 
@@ -30,37 +31,31 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 	tempDir := os.TempDir()
 	var temporaryImagePaths []string
 
+	defer func() {
+		for _, path := range temporaryImagePaths {
+			if err := os.Remove(path); err != nil {
+				log.Printf("[CLEANUP WARNING] Failed to delete temporary input image at %s: %v", path, err)
+			}
+		}
+	}()
+
 	for _, fileHeader := range files {
 		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
-			for _, path := range temporaryImagePaths {
-				err := os.Remove(path)
-				if err != nil {
-					return err
-				}
-			}
+			log.Printf("[SERVER ERROR] Failed to save multipart file to unique path %s: %v", uniquePath, err)
 			return c.Status(fiber.StatusInternalServerError).SendString("Failed to initialize system allocation paths")
 		}
 		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
 	}
 
-	defer func() {
-		for _, path := range temporaryImagePaths {
-			err := os.Remove(path)
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	outputPath, err := ctrl.service.ImagesToPDF(temporaryImagePaths)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("Image matrix processing pipeline failure: " + err.Error())
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
 
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary compiled output PDF at %s: %v", name, err)
 		}
 	}(outputPath)
 
@@ -77,12 +72,13 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Failed to save source PDF target upload path %s: %v", inputPath, err)
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace memory environment")
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
 
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary uploaded input PDF at %s: %v", name, err)
 		}
 	}(inputPath)
 
@@ -90,10 +86,10 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).SendString("PDF extraction routine failure: " + err.Error())
 	}
-	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
 
+	defer func(name string) {
+		if err := os.Remove(name); err != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary output ZIP file archive at %s: %v", name, err)
 		}
 	}(zipOutputPath)
 

@@ -13,4 +13,5 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	structureGroup.Post("/watermark", ctrl.Watermark)
 	structureGroup.Post("/add-page-numbers", ctrl.AddPageNumbers)
 	structureGroup.Post("/update-metadata", ctrl.UpdateMetadata)
+	structureGroup.Post("/metadata/fetch", ctrl.FetchMetadata)
 }

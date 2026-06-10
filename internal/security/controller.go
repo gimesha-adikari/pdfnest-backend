@@ -1,6 +1,7 @@
 package security
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 
@@ -28,30 +29,32 @@ func (ctrl *Controller) Lock(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Failed to save security input target path %s: %v", inputPath, err)
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to process workspace file")
 	}
+
 	defer func(name string) {
 		if removeErr := os.Remove(name); removeErr != nil {
-			_ = removeErr
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary input PDF at %s: %v", name, removeErr)
 		}
 	}(inputPath)
 
 	outputPath, err := ctrl.service.EncryptPDF(inputPath, password)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Error executing encryption engine")
+		return c.Status(fiber.StatusInternalServerError).SendString("Error executing encryption engine: " + err.Error())
 	}
+
+	defer func(name string) {
+		if removeErr := os.Remove(name); removeErr != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary encrypted output PDF at %s: %v", name, removeErr)
+		}
+	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")
-	err = c.Download(outputPath)
-
-	err = os.Remove(outputPath)
-	if err != nil {
-		return err
-	}
-	return err
+	return c.Download(outputPath)
 }
 
 func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
@@ -66,15 +69,16 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Failed to save security unlock target path %s: %v", inputPath, err)
 		return c.Status(fiber.StatusInternalServerError).SendString("Failed to initialize workspace file")
 	}
+
 	defer func(name string) {
-		err := os.Remove(name)
-		if err != nil {
-			_ = err
+		if removeErr := os.Remove(name); removeErr != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary locked input PDF at %s: %v", name, removeErr)
 		}
 	}(inputPath)
 
@@ -83,12 +87,12 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).SendString("Invalid security password or corrupted document structure")
 	}
 
-	c.Set("Content-Type", "application/pdf")
-	err = c.Download(outputPath)
+	defer func(name string) {
+		if removeErr := os.Remove(name); removeErr != nil {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary decrypted output PDF at %s: %v", name, removeErr)
+		}
+	}(outputPath)
 
-	err = os.Remove(outputPath)
-	if err != nil {
-		return err
-	}
-	return err
+	c.Set("Content-Type", "application/pdf")
+	return c.Download(outputPath)
 }
