@@ -1,12 +1,12 @@
 package optimize
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/google/uuid"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
 type Service interface {
@@ -24,13 +24,32 @@ func (s *optimizeService) OptimizePDF(inputPath string) (string, error) {
 	outputFile := "compressed-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
 
-	config := model.NewDefaultConfiguration()
+	cmd := exec.Command("gs",
+		"-dNOPAUSE",
+		"-dBATCH",
+		"-dSAFER",
+		"-sDEVICE=pdfwrite",
+		"-dCompatibilityLevel=1.4",
+		"-dPDFSETTINGS=/ebook",
+		"-dColorImageDownsampleType=/Bicubic",
+		"-dColorImageResolution=150",
+		"-dGrayImageDownsampleType=/Bicubic",
+		"-dGrayImageResolution=150",
+		"-dMonoImageDownsampleType=/Bicubic",
+		"-dMonoImageResolution=150",
+		"-sOutputFile="+outputPath,
+		inputPath,
+	)
 
-	config.Optimize = true
+	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("ghostscript compression failure: %v, trace: %s", err, string(output))
+	}
 
-	err := api.OptimizeFile(inputPath, outputPath, config)
-	if err != nil {
-		return "", err
+	fi, err := os.Stat(outputPath)
+	if err != nil || fi.Size() == 0 {
+		_ = os.Remove(outputPath)
+		return "", fmt.Errorf("compression output file was empty or unreadable")
 	}
 
 	return outputPath, nil

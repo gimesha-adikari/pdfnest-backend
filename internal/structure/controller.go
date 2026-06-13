@@ -19,15 +19,26 @@ func NewController(s Service) *Controller {
 	return &Controller{service: s}
 }
 
+type APIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 	form, err := c.MultipartForm()
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid multipart form transmission")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "INVALID_MULTIPART_FORM",
+			Message: "Invalid multipart form transmission.",
+		})
 	}
 
 	files := form.File["files"]
 	if len(files) < 2 {
-		return c.Status(fiber.StatusBadRequest).SendString("At least two PDF files are required to merge")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "INSUFFICIENT_FILES",
+			Message: "At least two PDF files are required to execute a merge operation.",
+		})
 	}
 
 	tempDir := os.TempDir()
@@ -35,59 +46,75 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 
 	defer func() {
 		for _, path := range inputPaths {
-			if err := os.Remove(path); err != nil {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				log.Printf("[CLEANUP WARNING] Merge: Failed to delete temporary input file at %s: %v", path, err)
 			}
 		}
 	}()
 
 	for _, fileHeader := range files {
-		inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+		inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 		if err := c.SaveFile(fileHeader, inputPath); err != nil {
 			log.Printf("[SERVER ERROR] Merge: Failed to save multipart file to path %s: %v", inputPath, err)
-			return c.Status(fiber.StatusInternalServerError).SendString("Failed to initialize file compilation array")
+			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+				Code:    "DISK_WRITE_FAILURE",
+				Message: "Failed to initialize staging area for file compilation.",
+			})
 		}
 		inputPaths = append(inputPaths, inputPath)
 	}
 
 	outputPath, err := ctrl.service.MergePDFs(inputPaths)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Compilation engine processing failure: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "COMPILATION_ENGINE_FAILED",
+			Message: "Merge execution pipeline failure: " + err.Error(),
+		})
 	}
 
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Merge: Failed to delete output PDF at %s: %v", name, err)
-		}
-	}(outputPath)
-
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("merged_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] Merge: Failed to delete output PDF at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) Split(c *fiber.Ctx) error {
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Page selection configuration is required")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_PAGE_SELECTION",
+			Message: "Page selection parameters are required for extraction.",
+		})
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document file")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing source PDF document file parameter.",
+		})
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] Split: Failed to save uploaded file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to process workspace file")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to allocate scratch file parameters.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Split: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] Split: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	pageSelection := strings.Split(pagesRaw, ",")
 	for i, v := range pageSelection {
@@ -96,86 +123,115 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 
 	outputPath, err := ctrl.service.SplitPDF(inputPath, pageSelection)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Extraction engine processing failure or invalid page index syntax: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "EXTRACTION_ENGINE_FAILED",
+			Message: "Extraction routine failure or invalid page index syntax: " + err.Error(),
+		})
 	}
 
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Split: Failed to delete output split file at %s: %v", name, err)
-		}
-	}(outputPath)
-
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("split_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] Split: Failed to delete output split file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 	rotationsRaw := c.FormValue("rotations")
 	if rotationsRaw == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Rotation configuration configuration is required")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_ROTATION_CONFIG",
+			Message: "Rotation metric mapping layout configuration is required.",
+		})
 	}
 
 	var rotations map[string]int
 	if err := json.Unmarshal([]byte(rotationsRaw), &rotations); err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Invalid rotation matrix structure mapping")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MALFORMED_JSON_MATRIX",
+			Message: "Invalid rotation matrix data layout structure mapping.",
+		})
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document file")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing target PDF context file vector.",
+		})
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] Rotate: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to save temporary asset container")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to commit operational asset to temporary block disk maps.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Rotate: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] Rotate: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	outputPath, err := ctrl.service.RotatePDF(inputPath, rotations)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Rotation engine routine execution failure: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "ROTATION_ENGINE_FAILED",
+			Message: "Rotation transformation engine crash outcome: " + err.Error(),
+		})
 	}
 
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Rotate: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
-
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("rotated_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] Rotate: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Page values targeted for deletion are required")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_PAGE_METADATA",
+			Message: "Target indexes chosen for removal operations must be populated.",
+		})
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document file")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing target PDF payload context asset.",
+		})
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] DeletePages: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to isolate temporary structural container")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to isolate document file structure allocation paths.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	pagesToDelete := strings.Split(pagesRaw, ",")
 	for i, v := range pagesToDelete {
@@ -184,108 +240,142 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 
 	outputPath, err := ctrl.service.DeletePDFPages(inputPath, pagesToDelete)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Deletion engine routine execution failure or out of bounds page index syntax: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DELETION_ENGINE_FAILED",
+			Message: "Deletion pipeline failure or page index boundary violation: " + err.Error(),
+		})
 	}
 
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
-
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("modified_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 	sequenceRaw := c.FormValue("sequence")
 	if sequenceRaw == "" {
-		return c.Status(fiber.StatusBadRequest).SendString("Sequence data missing")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_SEQUENCE_MAP",
+			Message: "Structural sequencing mapping configuration targets cannot be blank.",
+		})
 	}
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("File missing")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Required tracking document stream missing.",
+		})
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] ReorderPages: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Could not save file")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Could not write target asset structure down standard disk registers.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	sequence := strings.Split(sequenceRaw, ",")
+	for i, v := range sequence {
+		sequence[i] = strings.TrimSpace(v)
+	}
 
 	outputPath, err := ctrl.service.ReorderPDFPages(inputPath, sequence)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Reorder failed: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "REORDER_ENGINE_FAILED",
+			Message: "Reordering sequence transaction failed: " + err.Error(),
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("reordered_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing target source PDF document container file asset")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing baseline target PDF configuration document.",
+		})
 	}
 
 	text := c.FormValue("text")
 	description := c.FormValue("description")
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] Watermark: Failed to save source file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace source environment blocks")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to isolate document frame maps.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Watermark: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] Watermark: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	var imagePath string
 	imgHeader, err := c.FormFile("watermarkImage")
 	if err == nil && imgHeader != nil {
-		imagePath = filepath.Join(tempDir, uuid.New().String()+"-"+imgHeader.Filename)
+		imagePath = filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(imgHeader.Filename))
 		if err := c.SaveFile(imgHeader, imagePath); err != nil {
 			log.Printf("[SERVER ERROR] Watermark: Failed to save graphic asset %s: %v", imagePath, err)
-			return c.Status(fiber.StatusInternalServerError).SendString("Failed to process attached watermark graphic asset")
+			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+				Code:    "GRAPHIC_WRITE_FAILURE",
+				Message: "Failed to process attached structural watermark graphic overlay component.",
+			})
 		}
-		defer func(name string) {
-			if err := os.Remove(name); err != nil {
-				log.Printf("[CLEANUP WARNING] Watermark: Failed to delete watermark image asset at %s: %v", name, err)
+		defer func() {
+			if err := os.Remove(imagePath); err != nil && !os.IsNotExist(err) {
+				log.Printf("[CLEANUP WARNING] Watermark: Failed to delete watermark image asset at %s: %v", imagePath, err)
 			}
-		}(imagePath)
+		}()
 	}
 
 	outputPath, err := ctrl.service.WatermarkPDF(inputPath, text, imagePath, description)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Watermark generation engine failure: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "WATERMARK_ENGINE_FAILED",
+			Message: "Watermark creation pipeline run error: " + err.Error(),
+		})
 	}
 
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] Watermark: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
-
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("watermarked_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] Watermark: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
@@ -296,39 +386,53 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document file container asset")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing core target workspace file reference.",
+		})
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] AddPageNumbers: Failed to save uploaded input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace memory environment")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to parse underlying document file handle arrays.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	outputPath, err := ctrl.service.AddPageNumbersPDF(inputPath, description)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Page number compilation layer routine failure: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "PAGINATION_ENGINE_FAILED",
+			Message: "Page numbering layer insertion failure: " + err.Error(),
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("paginated_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document file container asset")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Core target configuration file container artifact is missing.",
+		})
 	}
 
 	password := c.FormValue("password")
@@ -348,54 +452,71 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] UpdateMetadata: Failed to save uploaded file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate workspace memory environment")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to capture properties frame reference maps.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete input file at %s: %v", name, err)
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete input file at %s: %v", inputPath, err)
 		}
-	}(inputPath)
+	}()
 
 	outputPath, err := ctrl.service.UpdateMetadataPDF(inputPath, metadata, password)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).SendString("Metadata compilation failure: " + err.Error())
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "METADATA_ENGINE_FAILED",
+			Message: "Metadata catalog reconstruction matrix execution error: " + err.Error(),
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
-			log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete output file at %s: %v", name, err)
-		}
-	}(outputPath)
 
 	c.Set("Content-Type", "application/pdf")
-	return c.Download(outputPath)
+	c.Attachment("updated_metadata_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete output file at %s: %v", outputPath, cleanupErr)
+	}
+
+	return err
 }
 
 func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		return c.Status(fiber.StatusBadRequest).SendString("Missing source PDF document")
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing target PDF document structure.",
+		})
 	}
 
 	password := c.FormValue("password")
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+fileHeader.Filename)
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		log.Printf("[SERVER ERROR] FetchMetadata: Failed to save file: %v", err)
-		return c.Status(fiber.StatusInternalServerError).SendString("Failed to allocate environment")
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to isolate document meta headers.",
+		})
 	}
-	defer func(name string) {
-		if err := os.Remove(name); err != nil {
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
 			log.Printf("[CLEANUP WARNING] FetchMetadata: Failed to delete input file: %v", err)
 		}
-	}(inputPath)
+	}()
 
 	properties, err := ctrl.service.GetMetadataPDF(inputPath, password)
 	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).SendString("Decryption error or unreadable metadata table: " + err.Error())
+		return c.Status(fiber.StatusUnauthorized).JSON(APIError{
+			Code:    "DECRYPTION_METADATA_FAILED",
+			Message: "Decryption runtime fault or unauthorized meta table structural mapping: " + err.Error(),
+		})
 	}
 
 	return c.JSON(properties)

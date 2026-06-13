@@ -17,32 +17,28 @@ func (s *ocrService) ExtractTextFromPDF(inputPath string) (string, error) {
 
 	workDir := filepath.Join(tempDir, "ocr-workspace-"+sessionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create sandbox workspace tracking scope: %w", err)
 	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			return
-		}
-	}(workDir) // Clean up images automatically when finished
+	defer os.RemoveAll(workDir)
 
 	outputTextPath := filepath.Join(tempDir, "extracted-text-"+sessionID+".txt")
 
 	gsCmd := exec.Command("gs",
 		"-dNOPAUSE",
 		"-dBATCH",
-		"-sDEVICE=png16m",
-		"-r150",
+		"-dSAFER",
+		"-sDEVICE=pnggray",
+		"-r300",
 		"-sOutputFile="+filepath.Join(workDir, "page-%03d.png"),
 		inputPath,
 	)
 	if output, err := gsCmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("ghostscript rendering failed: %v, output: %s", err, string(output))
+		return "", fmt.Errorf("ghostscript raster engine failed: %v, trace: %s", err, string(output))
 	}
 
 	dirEntries, err := os.ReadDir(workDir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed checking working frame index: %w", err)
 	}
 
 	var fileNames []string
@@ -55,35 +51,50 @@ func (s *ocrService) ExtractTextFromPDF(inputPath string) (string, error) {
 
 	txtFile, err := os.Create(outputTextPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed creating output plain text sink: %w", err)
 	}
-	defer func(txtFile *os.File) {
-		err := txtFile.Close()
-		if err != nil {
-			return
+
+	var fileClosed bool
+	defer func() {
+		if !fileClosed {
+			txtFile.Close()
 		}
-	}(txtFile)
+	}()
 
 	for i, name := range fileNames {
 		imgPath := filepath.Join(workDir, name)
 
-		tessCmd := exec.Command("tesseract", imgPath, "stdout")
+		tessCmd := exec.Command("tesseract",
+			imgPath,
+			"stdout",
+			"--oem", "1",
+			"--psm", "1",
+		)
 		var outBuffer bytes.Buffer
+		var errBuffer bytes.Buffer
 		tessCmd.Stdout = &outBuffer
+		tessCmd.Stderr = &errBuffer
 
 		if err := tessCmd.Run(); err != nil {
-			return "", fmt.Errorf("tesseract failed on page %d: %v", i+1, err)
+			continue
 		}
 
-		pageHeader := fmt.Sprintf("\n--- PAGE %d ---\n\n", i+1)
+		pageHeader := fmt.Sprintf("--- START OF PAGE %d ---\n", i+1)
 		if _, err := txtFile.WriteString(pageHeader); err != nil {
-			return "", err
+			return "", fmt.Errorf("failed writing page structure header: %w", err)
 		}
 
 		if _, err := txtFile.Write(outBuffer.Bytes()); err != nil {
-			return "", err
+			return "", fmt.Errorf("failed committing text streams down file systems: %w", err)
 		}
+
+		_, _ = txtFile.WriteString("\n--- END OF PAGE ---\n\n")
 	}
+
+	if err := txtFile.Close(); err != nil {
+		return "", fmt.Errorf("failed finalizing file modifications: %w", err)
+	}
+	fileClosed = true
 
 	return outputTextPath, nil
 }

@@ -12,26 +12,23 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *imagesService) PdfToImagesBackend(inputPath string) (string, error) {
+func (s *ConversionService) PdfToImagesBackend(inputPath string) (string, error) {
 	tempDir := os.TempDir()
-
 	sessionID := uuid.New().String()
+
 	workDir := filepath.Join(tempDir, "pdf-raster-"+sessionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to build internal sandbox workspace directory: %w", err)
 	}
-	defer func(path string) {
-		err := os.RemoveAll(path)
-		if err != nil {
-			_ = err
-		}
-	}(workDir)
+
+	defer os.RemoveAll(workDir)
 
 	outputZipPath := filepath.Join(tempDir, "extracted-"+sessionID+".zip")
 
 	cmd := exec.Command("gs",
 		"-dNOPAUSE",
 		"-dBATCH",
+		"-dSAFER",
 		"-sDEVICE=jpeg",
 		"-r200",
 		"-sOutputFile="+filepath.Join(workDir, "page-%03d.jpg"),
@@ -39,16 +36,16 @@ func (s *imagesService) PdfToImagesBackend(inputPath string) (string, error) {
 	)
 
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("ghostscript rendering engine failed: %v, output: %s", err, string(output))
+		return "", fmt.Errorf("ghostscript rendering engine failed: %v, trace: %s", err, string(output))
 	}
 
 	dirEntries, err := os.ReadDir(workDir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed scanning internal sandbox raster directory: %w", err)
 	}
 
 	if len(dirEntries) == 0 {
-		return "", fmt.Errorf("could not extract pages from document container (empty or corrupt)")
+		return "", fmt.Errorf("could not extract pages from document container (empty or corrupt canvas layer)")
 	}
 
 	var fileNames []string
@@ -61,51 +58,54 @@ func (s *imagesService) PdfToImagesBackend(inputPath string) (string, error) {
 
 	zipFile, err := os.Create(outputZipPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create baseline platform zip wrapper: %w", err)
 	}
-	defer func(zipFile *os.File) {
-		err := zipFile.Close()
-		if err != nil {
-			_ = err
+
+	var zipClosed bool
+	defer func() {
+		if !zipClosed {
+			zipFile.Close()
 		}
-	}(zipFile)
+	}()
 
 	archive := zip.NewWriter(zipFile)
-	defer func(archive *zip.Writer) {
-		err := archive.Close()
-		if err != nil {
-			_ = err
-		}
-	}(archive)
 
 	for _, name := range fileNames {
 		filePath := filepath.Join(workDir, name)
-		fileToZip, err := os.Open(filePath)
-		if err != nil {
-			return "", err
-		}
 
-		writer, err := archive.Create(name)
-		if err != nil {
-			err := fileToZip.Close()
-			if err != nil {
-				return "", err
-			}
-			return "", err
-		}
-
-		if _, err := io.Copy(writer, fileToZip); err != nil {
-			err := fileToZip.Close()
-			if err != nil {
-				return "", err
-			}
-			return "", err
-		}
-		err = fileToZip.Close()
-		if err != nil {
+		if err := appendFileToZip(archive, filePath, name); err != nil {
+			archive.Close()
 			return "", err
 		}
 	}
 
+	if err := archive.Close(); err != nil {
+		return "", fmt.Errorf("failed finalizing operational target archive wrapper: %w", err)
+	}
+
+	zipClosed = true
+	if err := zipFile.Close(); err != nil {
+		return "", fmt.Errorf("failed locking underlying target file descriptor handles: %w", err)
+	}
+
 	return outputZipPath, nil
+}
+
+func appendFileToZip(archive *zip.Writer, srcPath, internalName string) error {
+	fileToZip, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("failed opening intermediate target frame: %w", err)
+	}
+	defer fileToZip.Close()
+
+	writer, err := archive.Create(internalName)
+	if err != nil {
+		return fmt.Errorf("failed initializing inner archive index segment: %w", err)
+	}
+
+	if _, err := io.Copy(writer, fileToZip); err != nil {
+		return fmt.Errorf("failed copying block segments inside zip compression layout: %w", err)
+	}
+
+	return nil
 }

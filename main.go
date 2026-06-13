@@ -1,6 +1,11 @@
 package main
 
 import (
+	"log"
+	"os"
+	"pdfnest-backend/internal/edit"
+	"time"
+
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
@@ -10,15 +15,33 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 func main() {
 	app := fiber.New(fiber.Config{
-		BodyLimit: 100 * 1024 * 1024,
+		BodyLimit:    100 * 1024 * 1024,
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 120 * time.Second,
 	})
 
-	app.Use(cors.New())
-	app.Use(logger.New())
+	app.Use(recover.New())
+
+	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if allowedOrigins == "" {
+		allowedOrigins = "http://localhost:3000"
+	}
+
+	app.Use(cors.New(cors.Config{
+		AllowOrigins:     allowedOrigins,
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
+		AllowCredentials: true,
+	}))
+
+	app.Use(logger.New(logger.Config{
+		Format: "[${time}] ${status} - ${method} ${path} (${latency})\n",
+	}))
 
 	apiGroup := app.Group("/api")
 
@@ -47,8 +70,18 @@ func main() {
 	ocrController := ocr.NewController(ocrService)
 	ocr.RegisterRoutes(apiGroup, ocrController)
 
-	err := app.Listen(":8080")
-	if err != nil {
-		return
+	// Domain 6: Edit (PDF edit)
+	editService := edit.NewService()
+	editController := edit.NewController(editService)
+	edit.RegisterRoutes(apiGroup, editController)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("PDFNest Engine starting securely on port %s...", port)
+	if err := app.Listen(":" + port); err != nil {
+		log.Fatalf("Critical engine boot runtime error: %v", err)
 	}
 }
