@@ -2,7 +2,6 @@
 package edit
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,8 +10,8 @@ import (
 )
 
 type Service interface {
-	ExtractHTML(pdfPath string) (string, error)
-	CompilePDF(html string) (string, error)
+	ExtractLayout(pdfPath string) ([]byte, error)
+	CompileLayout(originalPdf string, payload []byte) (string, error)
 }
 
 type service struct{}
@@ -21,56 +20,28 @@ func NewService() Service {
 	return &service{}
 }
 
-func (s *service) ExtractHTML(pdfPath string) (string, error) {
-	output, err := runPythonScript(
-		"scripts/pdf_to_html.py",
-		pdfPath,
-	)
-
+func (s *service) ExtractLayout(pdfPath string) ([]byte, error) {
+	// Call layout mapping script
+	output, err := runPythonScript("scripts/pdf_to_layout.py", pdfPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	var result struct {
-		Success bool   `json:"success"`
-		HTML    string `json:"html"`
-		Error   string `json:"error"`
-	}
-
-	if err := json.Unmarshal(output, &result); err != nil {
-		return "", err
-	}
-
-	if !result.Success {
-		return "", fmt.Errorf(result.Error)
-	}
-
-	return result.HTML, nil
+	return output, nil
 }
 
-func (s *service) CompilePDF(html string) (string, error) {
-	tempHtmlPath := filepath.Join(
-		os.TempDir(),
-		uuid.New().String()+".html",
-	)
-
-	if err := os.WriteFile(tempHtmlPath, []byte(html), 0644); err != nil {
+func (s *service) CompileLayout(originalPdf string, payload []byte) (string, error) {
+	// Write modified frontend text json to a temporary data track
+	tempJsonPath := filepath.Join(os.TempDir(), uuid.New().String()+".json")
+	if err := os.WriteFile(tempJsonPath, payload, 0644); err != nil {
 		return "", err
 	}
+	defer os.Remove(tempJsonPath)
 
-	outPdfPath := filepath.Join(
-		os.TempDir(),
-		fmt.Sprintf("edited_%s.pdf", uuid.New().String()),
-	)
+	outPdfName := fmt.Sprintf("precision_edited_%s.pdf", uuid.New().String())
+	outPdfPath := filepath.Join(os.TempDir(), outPdfName)
 
-	_, err := runPythonScript(
-		"scripts/html_to_pdf.py",
-		tempHtmlPath,
-		outPdfPath,
-	)
-
-	os.Remove(tempHtmlPath)
-
+	// Call patching script: (originalPdf, outputPdf, modificationsJson)
+	_, err := runPythonScript("scripts/patch_pdf_layout.py", originalPdf, outPdfPath, tempJsonPath)
 	if err != nil {
 		return "", err
 	}

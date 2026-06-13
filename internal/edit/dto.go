@@ -5,5 +5,7 @@ type CompileRequest struct {
 }
 
 type ExtractResponse struct {
-	HTML string `json:"html"`
+	Success bool   `json:"success"`
+	HTML    string `json:"html"`
+	Error   string `json:"error"`
 }
