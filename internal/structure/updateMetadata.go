@@ -2,15 +2,42 @@ package structure
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
+
+// Helper function to detect and decode UTF-16 Byte Order Marks (BOM) in PDF strings
+func decodePdfString(s string) string {
+	b := []byte(s)
+
+	// Check for UTF-16 Big Endian BOM (FE FF) - Standard for PDFs
+	if len(b) >= 2 && b[0] == 0xFE && b[1] == 0xFF {
+		u16 := make([]uint16, (len(b)-2)/2)
+		for i := 0; i < len(u16); i++ {
+			u16[i] = binary.BigEndian.Uint16(b[2+(i*2):])
+		}
+		return string(utf16.Decode(u16))
+	}
+
+	// Check for UTF-16 Little Endian BOM (FF FE) - Rare, but good to handle
+	if len(b) >= 2 && b[0] == 0xFF && b[1] == 0xFE {
+		u16 := make([]uint16, (len(b)-2)/2)
+		for i := 0; i < len(u16); i++ {
+			u16[i] = binary.LittleEndian.Uint16(b[2+(i*2):])
+		}
+		return string(utf16.Decode(u16))
+	}
+
+	return s
+}
 
 func (s *structureService) UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error) {
 	tempDir := os.TempDir()
@@ -73,15 +100,16 @@ func (s *structureService) GetMetadataPDF(inputPath string, password string) (ma
 			val := strings.TrimSpace(line[idx+1:])
 			val = strings.Trim(val, `"'()`)
 
+			// Decode UTF-16 properties if present
 			switch strings.ToLower(key) {
 			case "title":
-				resultMap["title"] = val
+				resultMap["title"] = decodePdfString(val)
 			case "author":
-				resultMap["author"] = val
+				resultMap["author"] = decodePdfString(val)
 			case "subject":
-				resultMap["subject"] = val
+				resultMap["subject"] = decodePdfString(val)
 			case "keywords":
-				resultMap["keywords"] = val
+				resultMap["keywords"] = decodePdfString(val)
 			}
 		}
 	}
@@ -127,9 +155,13 @@ func extractPdfTagValue(line, pdfTag, xmlTag string) string {
 		idx := strings.Index(line, pdfTag)
 		sub := line[idx+len(pdfTag):]
 		start := strings.Index(sub, "(")
-		end := strings.LastIndex(sub, ")")
-		if start != -1 && end != -1 && end > start {
-			val = sub[start+1 : end]
+
+		if start != -1 {
+			subAfterStart := sub[start+1:]
+			end := strings.Index(subAfterStart, ")")
+			if end != -1 {
+				val = subAfterStart[:end]
+			}
 		}
 	} else if strings.Contains(line, xmlTag) {
 		startTag := fmt.Sprintf("<%s>", xmlTag)
@@ -154,5 +186,5 @@ func extractPdfTagValue(line, pdfTag, xmlTag string) string {
 		}
 	}
 
-	return strings.TrimSpace(val)
+	return decodePdfString(strings.TrimSpace(val))
 }

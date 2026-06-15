@@ -1,9 +1,11 @@
 package conversion
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/tasks"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -323,4 +325,113 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 
 	defer func() { _ = os.Remove(outputPath) }()
 	return err
+}
+
+func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
+	targetURL := c.FormValue("url")
+	if targetURL == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Missing input target webpage 'url' field resource string parameter.",
+		})
+	}
+
+	taskId := uuid.New().String()
+	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating sandboxed headless rendering nodes...", "")
+
+	opts := PrintOptions{}
+	if paperSize := c.FormValue("paperSize"); paperSize != "" {
+		opts.PaperSize = paperSize
+	}
+	if marginStr := c.FormValue("marginTop"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginTop = m
+		}
+	}
+	if marginStr := c.FormValue("marginBottom"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginBottom = m
+		}
+	}
+	if marginStr := c.FormValue("marginLeft"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginLeft = m
+		}
+	}
+	if marginStr := c.FormValue("marginRight"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginRight = m
+		}
+	}
+
+	go func(id, target string, printOpts PrintOptions) {
+		defer func() {
+			if r := recover(); r != nil {
+				tasks.Registry.Set(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r))
+			}
+		}()
+
+		tasks.Registry.Set(id, "PROCESSING", 35, "Spawning layout canvas compilation layers...", "")
+
+		outPath, err := ctrl.service.HtmlToPdf(target, printOpts)
+		if err != nil {
+			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			return
+		}
+
+		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+	}(taskId, targetURL, opts)
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+}
+
+func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Missing input target Markdown file resource payload.",
+		})
+	}
+
+	taskId := uuid.New().String()
+	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing compilation text nodes...", "")
+
+	tempDir := os.TempDir()
+	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(fileHeader.Filename))
+	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		tasks.Registry.Set(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.")
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Disk caching allocation error"})
+	}
+
+	opts := PrintOptions{}
+	if marginStr := c.FormValue("marginTop"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginTop = m
+		}
+	}
+	if marginStr := c.FormValue("marginBottom"); marginStr != "" {
+		if m, err := strconv.ParseFloat(marginStr, 64); err == nil {
+			opts.MarginBottom = m
+		}
+	}
+
+	go func(id, srcPath string, printOpts PrintOptions) {
+		defer func() {
+			_ = os.Remove(srcPath)
+			if r := recover(); r != nil {
+				tasks.Registry.Set(id, "FAILED", 0, "", "Text compilation parser structural error.")
+			}
+		}()
+
+		tasks.Registry.Set(id, "PROCESSING", 40, "Parsing tokens and injecting layout styling variables...", "")
+
+		outPath, err := ctrl.service.MarkdownToPdf(srcPath, printOpts)
+		if err != nil {
+			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			return
+		}
+
+		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+	}(taskId, inputPath, opts)
+
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }

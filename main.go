@@ -3,14 +3,14 @@ package main
 import (
 	"log"
 	"os"
-	"pdfnest-backend/internal/edit"
-	"time"
-
 	"pdfnest-backend/internal/conversion"
+	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
 	"pdfnest-backend/internal/structure"
+	"pdfnest-backend/internal/tasks"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -27,6 +27,8 @@ func main() {
 
 	app.Use(recover.New())
 
+	tasks.StartCleanupWorker(5*time.Minute, 30*time.Minute)
+
 	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
 	if allowedOrigins == "" {
 		allowedOrigins = "http://localhost:3000"
@@ -42,6 +44,9 @@ func main() {
 	app.Use(logger.New(logger.Config{
 		Format: "[${time}] ${status} - ${method} ${path} (${latency})\n",
 	}))
+
+	// Register Task Subsystem Core Routing Before Domain Context Groups
+	tasks.RegisterRoutes(app)
 
 	apiGroup := app.Group("/api")
 
@@ -82,6 +87,6 @@ func main() {
 
 	log.Printf("PDFNest Engine starting securely on port %s...", port)
 	if err := app.Listen(":" + port); err != nil {
-		log.Fatalf("Critical engine boot runtime error: %v", err)
+		log.Fatalf("Server dynamic socket capture failed: %v", err)
 	}
 }
