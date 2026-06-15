@@ -5,7 +5,6 @@ import json
 
 
 def get_pixel_bg_hex(page, x, y):
-    """Samples the exact pixel color at specific page coordinates by rendering a tiny visual patch."""
     try:
         sample_rect = fitz.Rect(x, y, x + 2, y + 2)
         pix = page.get_pixmap(clip=sample_rect, matrix=fitz.Matrix(1, 1))
@@ -18,10 +17,8 @@ def get_pixel_bg_hex(page, x, y):
 
 
 def rgb_tuple_to_hex(rgb_tuple):
-    """Converts PyMuPDF's 0-1 float RGB tuple from text spans to a web HEX string."""
     if not rgb_tuple or len(rgb_tuple) < 3:
         return "#000000"
-    # PyMuPDF sometimes returns a single integer for grayscale, handle both
     if isinstance(rgb_tuple, (int, float)):
         val = max(0, min(255, int(rgb_tuple * 255)))
         return f"#{val:02x}{val:02x}{val:02x}"
@@ -63,18 +60,14 @@ def extract_pdf_layout(input_pdf_path):
                         line_text = ""
                         font_size = 12
                         font_name = "sans-serif"
-                        text_color_hex = "#000000"  # Default fallback
+                        text_color_hex = "#000000"
 
                         spans = line.get("spans", [])
                         if spans:
-                            # Read the font color metric from the first span segment directly
                             first_span = spans[0]
-                            # PyMuPDF packs color as an integer encoding or sRGB color tuple
                             if "color" in first_span:
-                                # Convert PyMuPDF integer color to RGB float tuple
                                 float_rgb = fitz.utils.getColorList()[0]  # default
                                 try:
-                                    # Get RGB tuple from integer color channel
                                     c_int = first_span["color"]
                                     r = ((c_int >> 16) & 255) / 255.0
                                     g = ((c_int >> 8) & 255) / 255.0
@@ -98,7 +91,7 @@ def extract_pdf_layout(input_pdf_path):
                                 "size": font_size,
                                 "font": font_name,
                                 "bg_color": bg_hex,
-                                "text_color": text_color_hex  # Added structural property field
+                                "text_color": text_color_hex
                             })
             pages_data.append(page_data)
 

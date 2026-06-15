@@ -1,11 +1,9 @@
-# file: scripts/patch_pdf_layout.py
-import fitz  # PyMuPDF
+import fitz
 import sys
 import json
 
 
 def hex_to_rgb(hex_str):
-    """Converts a web hex string back into a 0-1 float tuple for PyMuPDF color registers."""
     try:
         hex_str = hex_str.lstrip('#')
         lv = len(hex_str)
@@ -30,7 +28,6 @@ def patch_pdf(input_pdf_path, output_pdf_path, pages_json_path):
             page = doc[page_num - 1]
             elements = page_data.get("elements", [])
 
-            # Phase A: Clear old paths using matching background colors
             for element in elements:
                 x0, y0 = element.get("x"), element.get("y")
                 w, h = element.get("width"), element.get("height")
@@ -43,7 +40,6 @@ def patch_pdf(input_pdf_path, output_pdf_path, pages_json_path):
                 rect = fitz.Rect(x0 - 2, y0 - 1, x0 + w + 4, y0 + h + 2)
                 page.draw_rect(rect, color=color_rgb, fill=color_rgb, overlay=True)
 
-            # Phase B: Inject updated strings using matching original text colors
             for element in elements:
                 x0, y0 = element.get("x"), element.get("y")
                 h = element.get("height")
@@ -61,7 +57,7 @@ def patch_pdf(input_pdf_path, output_pdf_path, pages_json_path):
                     text_val,
                     fontsize=element.get("size", 11),
                     fontname="helv",
-                    color=font_rgb  # Injecting true color channel properties perfectly!
+                    color=font_rgb
                 )
 
         doc.save(output_pdf_path)

@@ -435,3 +435,36 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
+
+func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		file, err := c.FormFile("file")
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PDF file is required"})
+		}
+
+		tempDir := "./temp_uploads"
+		os.MkdirAll(tempDir, os.ModePerm)
+
+		fileID := uuid.New().String()
+		inputPdfPath := filepath.Join(tempDir, fmt.Sprintf("%s.pdf", fileID))
+		outputFilePath := filepath.Join(tempDir, fmt.Sprintf("%s.%s", fileID, targetFormat))
+
+		defer os.Remove(inputPdfPath)
+		defer os.Remove(outputFilePath)
+
+		if err := c.SaveFile(file, inputPdfPath); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save file"})
+		}
+
+		err = ProcessOfficeConversion(targetFormat, inputPdfPath, outputFilePath)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Conversion failed: " + err.Error()})
+		}
+
+		c.Set("Content-Type", "application/octet-stream")
+		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", file.Filename, targetFormat))
+
+		return c.SendFile(outputFilePath)
+	}
+}

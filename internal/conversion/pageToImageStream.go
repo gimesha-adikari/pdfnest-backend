@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gen2brain/go-fitz"
 	"github.com/google/uuid"
@@ -21,24 +22,41 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 	defer src.Close()
 
 	tempDir := os.TempDir()
-	tempFileName := fmt.Sprintf("pdfnest-preview-%s.pdf", uuid.New().String())
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if ext == "" {
+		ext = ".pdf"
+	}
+
+	tempFileName := fmt.Sprintf("pdfnest-preview-%s%s", uuid.New().String(), ext)
 	tempFilePath := filepath.Join(tempDir, tempFileName)
 
 	dst, err := os.Create(tempFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate disk memory space for temporary vector context: %v", err)
 	}
-	defer func() {
-		dst.Close()
-		os.Remove(tempFilePath)
-	}()
+
+	defer os.Remove(tempFilePath)
 
 	if _, err = io.Copy(dst, src); err != nil {
+		dst.Close()
 		return nil, fmt.Errorf("disk write failure on payload compilation pass: %v", err)
 	}
 	dst.Close()
 
-	doc, err := fitz.New(tempFilePath)
+	targetPdfPath := tempFilePath
+
+	if ext != ".pdf" {
+		compiledPdfPath, err := s.OfficeToPdf(tempFilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile office document for preview generation: %v", err)
+		}
+		targetPdfPath = compiledPdfPath
+
+		defer os.Remove(targetPdfPath)
+	}
+
+	doc, err := fitz.New(targetPdfPath)
 	if err != nil {
 		return nil, fmt.Errorf("raster engine initialization failure on target container tree: %v", err)
 	}
@@ -52,14 +70,14 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 	dpi := 72.0 * scale
 	img, err := doc.ImageDPI(adjustedPage, dpi)
 	if err != nil {
-		return nil, fmt.Errorf("vector translation framework crash on page raster assignment: %v", err)
+		return nil, fmt.Errorf("raster image compression calculation pass rejected: %v", err)
 	}
 
-	var buffer bytes.Buffer
-	err = jpeg.Encode(&buffer, img, &jpeg.Options{Quality: 85})
+	var buf bytes.Buffer
+	err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85})
 	if err != nil {
-		return nil, fmt.Errorf("failed to compress memory matrices data stream to JPEG output: %v", err)
+		return nil, fmt.Errorf("image encoding failure on data virtualization pass: %v", err)
 	}
 
-	return buffer.Bytes(), nil
+	return buf.Bytes(), nil
 }

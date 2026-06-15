@@ -1,11 +1,9 @@
-# file: scripts/html_to_pdf.py
 import sys
 import json
 from weasyprint import HTML, CSS
 
 def compile_pdf(input_html_path, output_pdf_path):
     try:
-        # Enforce strict print page templates for clean reflow compilation
         print_styles = CSS(string='''
             @page {
                 size: A4;
@@ -56,7 +54,6 @@ def compile_pdf(input_html_path, output_pdf_path):
         with open(input_html_path, 'r', encoding='utf-8') as f:
             raw_html = f.read()
 
-        # WeasyPrint parses inline base64 images and semantic markup perfectly
         HTML(string=raw_html).write_pdf(output_pdf_path, stylesheets=[print_styles])
         print(json.dumps({"success": True}))
 
