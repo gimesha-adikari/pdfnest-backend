@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/admin"
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/billing"
@@ -19,9 +20,18 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Warning: No .env file found. Falling back to system environment variables.")
+	}
+
+	config.ConnectDB()
+
 	app := fiber.New(fiber.Config{
 		BodyLimit:    100 * 1024 * 1024,
 		ReadTimeout:  60 * time.Second,

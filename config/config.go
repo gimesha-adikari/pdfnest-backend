@@ -28,17 +28,21 @@ type Subscription struct {
 	UserID               string    `gorm:"type:uuid;index;not null"`
 	PaddleCustomerID     string    `gorm:"type:varchar(255);uniqueIndex"`
 	PaddleSubscriptionID string    `gorm:"type:varchar(255);uniqueIndex"`
-	Status               string    `gorm:"type:varchar(50);not null"`       // 'active', 'past_due', 'canceled'
-	PlanTier             string    `gorm:"type:varchar(50);default:'free'"` // 'free', 'pro'
+	Status               string    `gorm:"type:varchar(50);not null"`       // 'active', 'canceled', 'past_due'
+	Tier                 string    `gorm:"type:varchar(50);default:'free'"` // 'free' or 'pro'
 	CurrentPeriodEnd     time.Time `gorm:"not null"`
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type Transaction struct {
-	ID                  string  `gorm:"type:uuid;primaryKey"`
+	ID                  string  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
 	UserID              string  `gorm:"type:uuid;index;not null"`
+	SubscriptionID      string  `gorm:"type:uuid;index"`
+	PaddleTransactionID string  `gorm:"type:varchar(255);uniqueIndex"`
 	Amount              float64 `gorm:"type:decimal(10,2);not null"`
-	PaddleTransactionID string  `gorm:"type:varchar(255);uniqueIndex;not null"`
-	Status              string  `gorm:"type:varchar(50);not null"` // 'completed', 'failed'
+	Currency            string  `gorm:"type:varchar(10);not null"`
+	Status              string  `gorm:"type:varchar(50);not null"` // 'completed', 'refunded'
 	CreatedAt           time.Time
 }
 

@@ -51,8 +51,7 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   err.Error(),
-		})
+			"error":   "An unexpected error occurred while processing the document. Please try again."})
 	}
 
 	var mappedResponse map[string]interface{}

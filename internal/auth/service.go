@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gofiber/fiber/v2/log"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/api/idtoken"
@@ -35,7 +36,7 @@ func (s *authService) VerifyPassword(hashed, password string) error {
 func (s *authService) GenerateToken(userID, role string) (string, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		secret = "super-secret-fallback-token-key"
+		log.Fatal("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is missing. Halting startup.")
 	}
 
 	claims := jwt.MapClaims{

@@ -7,39 +7,38 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-type LimitConfig struct {
-	MaxDailyUses int
-}
-
-var PlanLimits = map[string]LimitConfig{
-	"free": {MaxDailyUses: 5},
-	"pro":  {MaxDailyUses: 500},
-}
-
 func EnforceLimits() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		userID := c.Locals("user_id").(string)
 
 		var sub config.Subscription
-		err := config.DB.Where("user_id = ? AND status = 'active'", userID).First(&sub).Error
-		tier := "free"
-		if err == nil {
-			tier = sub.PlanTier
+		if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err != nil {
+			return c.Status(403).JSON(fiber.Map{"error": "Account subscription missing"})
 		}
 
-		limits := PlanLimits[tier]
+		if sub.Tier == "pro" && time.Now().After(sub.CurrentPeriodEnd) {
+			sub.Tier = "free"
+			sub.Status = "expired"
+			config.DB.Save(&sub)
+		}
 
-		now := time.Now()
-		startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		limit := 5
+		if sub.Tier == "pro" {
+			limit = 500
+		}
 
-		var currentUsage int64
+		var usageCount int64
+		today := time.Now().Truncate(24 * time.Hour)
+
 		config.DB.Model(&config.UsageLog{}).
-			Where("user_id = ? AND created_at >= ?", userID, startOfToday).
-			Count(&currentUsage)
+			Where("user_id = ? AND created_at >= ?", userID, today).
+			Count(&usageCount)
 
-		if currentUsage >= int64(limits.MaxDailyUses) {
+		if int(usageCount) >= limit {
 			return c.Status(429).JSON(fiber.Map{
-				"error": "Daily usage limit reached. Please upgrade your subscription plan to continue.",
+				"error": "Daily limit reached. Please upgrade to continue.",
+				"tier":  sub.Tier,
+				"limit": limit,
 			})
 		}
 

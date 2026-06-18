@@ -11,4 +11,6 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 
 	adminGroup.Get("/users", ctrl.ListUsers)
 	adminGroup.Patch("/users/:id/ban", ctrl.ToggleBanUser)
+	adminGroup.Get("/subscriptions", ctrl.ListSubscriptions)
+	adminGroup.Patch("/users/:id/tier", ctrl.UpdateUserTier)
 }

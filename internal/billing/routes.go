@@ -1,8 +1,15 @@
 package billing
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"pdfnest-backend/internal/middleware"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	// NOTE: This explicitly avoids auth guards because Paddle servers trigger it down open lines securely
 	router.Post("/billing/webhook", ctrl.HandleWebhook)
+
+	billingGroup := router.Group("/billing", middleware.Protect()) // Assuming Protect() verifies JWT
+	billingGroup.Get("/status", ctrl.GetSubscriptionStatus)
+	billingGroup.Get("/transactions", ctrl.GetTransactionHistory)
 }

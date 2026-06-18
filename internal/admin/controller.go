@@ -2,6 +2,7 @@ package admin
 
 import (
 	"pdfnest-backend/config"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -36,4 +37,39 @@ func (ctrl *Controller) ToggleBanUser(c *fiber.Ctx) error {
 
 	config.DB.Save(&user)
 	return c.JSON(fiber.Map{"status": "success", "updated_status": user.Status})
+}
+
+// Add this to internal/admin/controller.go
+
+func (ctrl *Controller) ListSubscriptions(c *fiber.Ctx) error {
+	var subscriptions []config.Subscription
+	if err := config.DB.Find(&subscriptions).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to retrieve subscriptions"})
+	}
+	return c.JSON(subscriptions)
+}
+
+func (ctrl *Controller) UpdateUserTier(c *fiber.Ctx) error {
+	targetID := c.Params("id")
+
+	var req struct {
+		Tier string `json:"tier"`
+	}
+
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
+	}
+
+	var sub config.Subscription
+	if err := config.DB.Where("user_id = ?", targetID).First(&sub).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"error": "Subscription not found for user"})
+	}
+
+	sub.Tier = req.Tier
+	if req.Tier == "pro" {
+		sub.CurrentPeriodEnd = time.Now().AddDate(1, 0, 0)
+	}
+
+	config.DB.Save(&sub)
+	return c.JSON(fiber.Map{"status": "success", "new_tier": sub.Tier})
 }

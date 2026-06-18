@@ -413,7 +413,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	go func(id, target string, printOpts PrintOptions) {
+	go func(id, target string, printOpts PrintOptions, uID string) {
 		defer func() {
 			if r := recover(); r != nil {
 				tasks.Registry.Set(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r))
@@ -430,13 +430,16 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(userID, "html_to_pdf")
-	}(taskId, targetURL, opts)
+		config.LogToolUsage(uID, "html_to_pdf")
+	}(taskId, targetURL, opts, userID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -466,7 +469,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	go func(id, srcPath string, printOpts PrintOptions) {
+	go func(id, srcPath string, printOpts PrintOptions, uID string) {
 		defer func() {
 			_ = os.Remove(srcPath)
 			if r := recover(); r != nil {
@@ -484,14 +487,17 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(taskId, "markdown_to_pdf")
-	}(taskId, inputPath, opts)
+		config.LogToolUsage(uID, "markdown_to_pdf")
+	}(taskId, inputPath, opts, userID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+
+		userID := c.Locals("user_id").(string)
+
 		file, err := c.FormFile("file")
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PDF file is required"})
@@ -515,6 +521,8 @@ func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Conversion failed: " + err.Error()})
 		}
+
+		config.LogToolUsage(userID, "pdf_to_"+targetFormat)
 
 		c.Set("Content-Type", "application/octet-stream")
 		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", file.Filename, targetFormat))

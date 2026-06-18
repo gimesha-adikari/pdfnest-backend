@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/log"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -16,7 +17,8 @@ func Protect() fiber.Handler {
 
 		secret := os.Getenv("JWT_SECRET")
 		if secret == "" {
-			secret = "super-secret-fallback-token-key"
+			log.Fatal("CRITICAL SECURITY ERROR: JWT_SECRET is missing during auth check.")
+			return c.Status(500).JSON(fiber.Map{"error": "Internal server configuration error"})
 		}
 
 		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {

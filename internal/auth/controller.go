@@ -47,13 +47,12 @@ func (ctrl *Controller) Register(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "User email context already exists inside registers"})
 	}
 
-	// Initialize default baseline Free Subscription allocation track parameters
 	freeSub := config.Subscription{
 		ID:               uuid.New().String(),
 		UserID:           user.ID,
 		Status:           "active",
-		PlanTier:         "free",
-		CurrentPeriodEnd: time.Now().AddDate(10, 0, 0), // Infinite window baseline layout limits
+		Tier:             "free", // Fixed from PlanTier
+		CurrentPeriodEnd: time.Now().AddDate(10, 0, 0),
 	}
 	config.DB.Create(&freeSub)
 
@@ -84,13 +83,12 @@ func (ctrl *Controller) Login(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Token signature key validation generation error failed"})
 	}
 
-	// Deploy as an HttpOnly Cookie payload to defend clients from script attacks natively
 	c.Cookie(&fiber.Cookie{
 		Name:     "auth_token",
 		Value:    token,
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: true,
-		Secure:   true, // Forces encryption pipeline routing transfers implicitly
+		Secure:   true,
 		SameSite: "Lax",
 	})
 
@@ -103,25 +101,22 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid payload"})
 	}
 
-	// 1. Verify the token with Google
 	claims, err := ctrl.service.VerifyGoogleToken(c.Context(), req.IDToken)
 	if err != nil {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid Google authentication token"})
 	}
 
 	email := claims["email"].(string)
-	googleID := claims["sub"].(string) // Google's unique identifier for this user
+	googleID := claims["sub"].(string)
 
 	var user config.User
-	// 2. Check if this user has logged in with Google before, or if their email already exists via local signup
 	err = config.DB.Where("google_id = ? OR email = ?", googleID, email).First(&user).Error
 
 	if err != nil {
-		// User does not exist! Create a new account automatically (OAuth Sign Up)
 		user = config.User{
 			ID:       uuid.New().String(),
 			Email:    email,
-			GoogleID: googleID, // No password hash needed
+			GoogleID: googleID,
 			Role:     "user",
 			Status:   "active",
 		}
@@ -130,17 +125,15 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"error": "Failed creating account via Google context"})
 		}
 
-		// Initialize default baseline Free Subscription allocation track parameters
 		freeSub := config.Subscription{
 			ID:               uuid.New().String(),
 			UserID:           user.ID,
 			Status:           "active",
-			PlanTier:         "free",
+			Tier:             "free", // Fixed from PlanTier
 			CurrentPeriodEnd: time.Now().AddDate(10, 0, 0),
 		}
 		config.DB.Create(&freeSub)
 	} else {
-		// If they signed up locally first, link their Google ID to their account now
 		if user.GoogleID == "" {
 			user.GoogleID = googleID
 			config.DB.Save(&user)
@@ -151,7 +144,6 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return c.Status(403).JSON(fiber.Map{"error": "This profile account access level is currently suspended"})
 	}
 
-	// 3. Issue your app's own standard session token cookie
 	token, err := ctrl.service.GenerateToken(user.ID, user.Role)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Token signature key validation generation error failed"})
