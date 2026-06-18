@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,6 +25,9 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Lock(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	password := c.FormValue("password")
 	if password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -74,10 +78,16 @@ func (ctrl *Controller) Lock(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary encrypted PDF at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "locked")
+	}
 	return err
 }
 
 func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	password := c.FormValue("password")
 	if password == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -128,17 +138,23 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary decrypted PDF at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "unlocked")
+	}
+
 	return err
 }
 
 func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing target file stream"})
 	}
 
 	keywordsStr := c.FormValue("keywords")
-	// Allow empty keywords if custom drawing zones are provided instead
 	var keywords []string
 	if keywordsStr != "" {
 		rawKeywords := strings.Split(keywordsStr, ",")
@@ -150,20 +166,17 @@ func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
 		}
 	}
 
-	// Capture the JSON coordinates string array passed from the frontend canvas handler
 	boxesStr := c.FormValue("boxes")
 	if keywordsStr == "" && (boxesStr == "" || boxesStr == "[]") {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Provide either text keywords or drag manual redact areas."})
 	}
 
-	// Save temp staging asset file to system scratch directory
 	tempInPath := filepath.Join(os.TempDir(), fileHeader.Filename)
 	if err := c.SaveFile(fileHeader, tempInPath); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Workspace directory file locked"})
 	}
 	defer os.Remove(tempInPath)
 
-	// Execute multi-page global service logic pipeline with drawing support bounds
 	outFileName, err := h.service.RedactPageText(tempInPath, os.TempDir(), keywords, boxesStr)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
@@ -171,6 +184,8 @@ func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
 
 	fullOutPath := filepath.Join(os.TempDir(), outFileName)
 	defer os.Remove(fullOutPath)
+
+	config.LogToolUsage(userID, "redact")
 
 	return c.Download(fullOutPath)
 }

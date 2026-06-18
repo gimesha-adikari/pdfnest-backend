@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -25,6 +26,9 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Merge(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -80,10 +84,17 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Merge: Failed to delete output PDF at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "merge")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) Split(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -137,10 +148,17 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Split: Failed to delete output split file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "split")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	rotationsRaw := c.FormValue("rotations")
 	if rotationsRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -197,10 +215,17 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Rotate: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "rotate")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -254,10 +279,17 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "delete")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	sequenceRaw := c.FormValue("sequence")
 	if sequenceRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -311,10 +343,17 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "reorder")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -375,10 +414,17 @@ func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Watermark: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "watermark")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	description := c.FormValue("description")
 	if description == "" {
 		description = "font:Helvetica, pos:bc, scale:12 abs"
@@ -423,10 +469,17 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "add_page_numbers")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -482,10 +535,17 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "update_metadata")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -519,5 +579,96 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 		})
 	}
 
+	config.LogToolUsage(userID, "fetch_metadata")
+
 	return c.JSON(properties)
+}
+
+func (ctrl *Controller) Repair(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Missing target PDF document file parameter.",
+		})
+	}
+
+	tempDir := os.TempDir()
+	sessionID := uuid.New().String()
+	inputPath := filepath.Join(tempDir, sessionID+"-corrupt-"+filepath.Base(fileHeader.Filename))
+	outputPath := filepath.Join(tempDir, sessionID+"-repaired-"+filepath.Base(fileHeader.Filename))
+
+	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to allocate local scratch workspace.",
+		})
+	}
+
+	defer func() {
+		os.Remove(inputPath)
+		os.Remove(outputPath)
+	}()
+
+	if err := RepairPdf(inputPath, outputPath); err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"error": "File is too severely corrupted to repair dynamically.",
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment("repaired_" + filepath.Base(fileHeader.Filename))
+
+	config.LogToolUsage(userID, "repair")
+
+	return c.SendFile(outputPath)
+}
+
+func (ctrl *Controller) Sign(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
+	pdfHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing target PDF document."})
+	}
+
+	sigHeader, err := c.FormFile("signature")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing signature image data."})
+	}
+
+	stampsJson := c.FormValue("stamps", "[]")
+
+	tempDir := os.TempDir()
+	sessionID := uuid.New().String()
+
+	pdfInputPath := filepath.Join(tempDir, sessionID+"-doc-"+filepath.Base(pdfHeader.Filename))
+	sigInputPath := filepath.Join(tempDir, sessionID+"-sig-"+filepath.Base(sigHeader.Filename))
+	outputPath := filepath.Join(tempDir, sessionID+"-signed-"+filepath.Base(pdfHeader.Filename))
+
+	if err := c.SaveFile(pdfHeader, pdfInputPath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save PDF workspace."})
+	}
+	if err := c.SaveFile(sigHeader, sigInputPath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save signature workspace."})
+	}
+
+	defer func() {
+		os.Remove(pdfInputPath)
+		os.Remove(sigInputPath)
+		os.Remove(outputPath)
+	}()
+
+	if err := SignPdfMulti(pdfInputPath, sigInputPath, outputPath, stampsJson); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Signature stamping failed: " + err.Error()})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment("signed_" + filepath.Base(pdfHeader.Filename))
+
+	config.LogToolUsage(userID, "sign")
+
+	return c.SendFile(outputPath)
 }

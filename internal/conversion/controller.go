@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/tasks"
 	"strconv"
 
@@ -26,6 +27,9 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -81,10 +85,17 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to purge temporary output compiled PDF at %s: %v", outputPath, cleanupErr)
 	}
 
+	if err == nil {
+		config.LogToolUsage(userID, "images_to_pdf")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -123,6 +134,10 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 
 	if cleanupErr := os.Remove(zipOutputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary output ZIP file archive at %s: %v", zipOutputPath, cleanupErr)
+	}
+
+	if err == nil {
+		config.LogToolUsage(userID, "pdf_to_images")
 	}
 
 	return err
@@ -170,6 +185,9 @@ func length(b []byte) int {
 }
 
 func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -198,10 +216,18 @@ func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	defer func() { _ = os.Remove(outputPath) }()
+
+	if err == nil {
+		config.LogToolUsage(userID, "office_to_pdf")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -234,6 +260,11 @@ func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	defer func() { _ = os.Remove(outputPath) }()
+
+	if err == nil {
+		config.LogToolUsage(userID, "webpage_capture")
+	}
+
 	return err
 }
 
@@ -247,6 +278,9 @@ type PrintOptions struct {
 }
 
 func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -281,10 +315,18 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	defer func() { _ = os.Remove(outputPath) }()
+
+	if err == nil {
+		config.LogToolUsage(userID, "markdown_to_pdf")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -324,10 +366,18 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	defer func() { _ = os.Remove(outputPath) }()
+
+	if err == nil {
+		config.LogToolUsage(userID, "code_to_pdf")
+	}
+
 	return err
 }
 
 func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -379,6 +429,8 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+
+		config.LogToolUsage(userID, "html_to_pdf")
 	}(taskId, targetURL, opts)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
@@ -431,6 +483,8 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+
+		config.LogToolUsage(taskId, "markdown_to_pdf")
 	}(taskId, inputPath, opts)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})

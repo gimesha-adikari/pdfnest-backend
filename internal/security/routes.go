@@ -1,9 +1,13 @@
 package security
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"pdfnest-backend/internal/middleware"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	securityGroup := router.Group("/security")
+	securityGroup := router.Group("/security", middleware.Protect(), middleware.EnforceLimits())
 
 	securityGroup.Post("/lock", ctrl.Lock)
 	securityGroup.Post("/unlock", ctrl.Unlock)

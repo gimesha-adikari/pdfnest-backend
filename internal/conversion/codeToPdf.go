@@ -15,29 +15,24 @@ import (
 	"github.com/google/uuid"
 )
 
-// CodeToPdf reads any raw plain text or source script file, applies syntax color highlighting, and prints to PDF
 func (s *ConversionService) CodeToPdf(inputCodePath string, fileName string, opts PrintOptions) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 	finalPdfPath := filepath.Join(tempDir, "code-compiled-"+sessionID+".pdf")
 
-	// 1. Read input script code file into a safe byte array
 	codeBytes, err := os.ReadFile(inputCodePath)
 	if err != nil {
 		return "", fmt.Errorf("failed reading source code asset file: %w", err)
 	}
 
-	// 2. Sanitize source syntax symbols (<, >, &) to keep HTML parsing structural integrity safe
 	escapedCode := html.EscapeString(string(codeBytes))
 
-	// 3. Match the file extension parameter to load the correct syntax highlighting parser engine token
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fileName), "."))
 	langClass := "language-" + ext
 	if ext == "txt" || ext == "" {
 		langClass = "language-plaintext"
 	}
 
-	// 4. Compile raw syntax text into the absolute #1e1e24 background matching your image snapshot
 	styledHtml := fmt.Sprintf(`<!DOCTYPE html>
 	<html>
 	<head>
@@ -180,6 +175,5 @@ func (s *ConversionService) CodeToPdf(inputCodePath string, fileName string, opt
 	if err := os.WriteFile(finalPdfPath, buf, 0644); err != nil {
 		return "", fmt.Errorf("failed writing browser pdf block stream to disk: %w", err)
 	}
-
 	return finalPdfPath, nil
 }

@@ -1,9 +1,13 @@
 package conversion
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"pdfnest-backend/internal/middleware"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	conversionGroup := router.Group("/conversion")
+	conversionGroup := router.Group("/conversion", middleware.Protect(), middleware.EnforceLimits())
 
 	conversionGroup.Post("/to-pdf", ctrl.ConvertImagesToPDF)
 	conversionGroup.Post("/pdf-to-images", ctrl.RasterizePdfUniversal)

@@ -3,6 +3,9 @@ package main
 import (
 	"log"
 	"os"
+	"pdfnest-backend/internal/admin"
+	"pdfnest-backend/internal/auth"
+	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/ocr"
@@ -49,6 +52,17 @@ func main() {
 	tasks.RegisterRoutes(app)
 
 	apiGroup := app.Group("/api")
+
+	// Core Identity Infrastructure Package Mounting Domain Blocks
+	authService := auth.NewService()
+	authController := auth.NewController(authService)
+	auth.RegisterRoutes(apiGroup, authController)
+
+	adminController := admin.NewController()
+	admin.RegisterRoutes(apiGroup, adminController)
+
+	billingController := billing.NewController()
+	billing.RegisterRoutes(apiGroup, billingController)
 
 	// Domain 1: Security (Lock/Unlock)
 	securityService := security.NewService()

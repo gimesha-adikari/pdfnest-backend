@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 
 	"pdfnest-backend/internal/tasks"
 
@@ -25,6 +26,9 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -65,10 +69,16 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "text/plain")
 	c.Attachment(filepath.Base(outputPath))
+
+	config.LogToolUsage(userID, "extract_text_from_pdf")
+
 	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -121,11 +131,18 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	_ = os.Remove(outputPath)
+
+	if err == nil {
+		config.LogToolUsage(userID, "image_to_text_pdf")
+	}
+
 	return err
 }
 
-// HandleAsyncExtractText handles tracking lifecycle for PDF to Text
 func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(400).JSON(APIError{Code: "MISSING_FILE", Message: "No file uploaded"})
@@ -156,13 +173,17 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+
+		config.LogToolUsage(userID, "extract_text_from_pdf")
 	}(taskId, inputPath)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
-// HandleAsyncImageToTextPDF handles tracking lifecycle for Images to PDF
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
+
+	userID := c.Locals("user_id").(string)
+
 	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(400).JSON(APIError{Code: "INVALID_FORM", Message: "Form structure processing error"})
@@ -203,6 +224,9 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+
+		config.LogToolUsage(userID, "image_to_text_pdf")
+
 	}(taskId, tempPaths)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})

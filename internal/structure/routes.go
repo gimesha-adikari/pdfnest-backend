@@ -1,9 +1,13 @@
 package structure
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"pdfnest-backend/internal/middleware"
+
+	"github.com/gofiber/fiber/v2"
+)
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	structureGroup := router.Group("/structure")
+	structureGroup := router.Group("/structure", middleware.Protect(), middleware.EnforceLimits())
 
 	structureGroup.Post("/merge", ctrl.Merge)
 	structureGroup.Post("/split", ctrl.Split)
@@ -14,4 +18,6 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	structureGroup.Post("/add-page-numbers", ctrl.AddPageNumbers)
 	structureGroup.Post("/update-metadata", ctrl.UpdateMetadata)
 	structureGroup.Post("/metadata/fetch", ctrl.FetchMetadata)
+	structureGroup.Post("/repair", ctrl.Repair)
+	structureGroup.Post("/sign", ctrl.Sign)
 }
