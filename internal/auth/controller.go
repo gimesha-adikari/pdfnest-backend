@@ -48,13 +48,18 @@ func (ctrl *Controller) Register(c *fiber.Ctx) error {
 	}
 
 	freeSub := config.Subscription{
-		ID:               uuid.New().String(),
-		UserID:           user.ID,
-		Status:           "active",
-		Tier:             "free", // Fixed from PlanTier
-		CurrentPeriodEnd: time.Now().AddDate(10, 0, 0),
+		ID:                   uuid.New().String(),
+		UserID:               user.ID,
+		PaddleCustomerID:     "free_cust_" + user.ID,
+		PaddleSubscriptionID: "free_sub_" + user.ID,
+		Status:               "active",
+		Tier:                 "free",
+		CurrentPeriodEnd:     time.Now().AddDate(10, 0, 0),
 	}
-	config.DB.Create(&freeSub)
+
+	if err := config.DB.Create(&freeSub).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Account created but failed to attach subscription tier."})
+	}
 
 	return c.Status(201).JSON(fiber.Map{"message": "Account created successfully", "userId": user.ID})
 }
@@ -126,13 +131,18 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		}
 
 		freeSub := config.Subscription{
-			ID:               uuid.New().String(),
-			UserID:           user.ID,
-			Status:           "active",
-			Tier:             "free", // Fixed from PlanTier
-			CurrentPeriodEnd: time.Now().AddDate(10, 0, 0),
+			ID:                   uuid.New().String(),
+			UserID:               user.ID,
+			PaddleCustomerID:     "free_cust_" + user.ID,
+			PaddleSubscriptionID: "free_sub_" + user.ID,
+			Status:               "active",
+			Tier:                 "free",
+			CurrentPeriodEnd:     time.Now().AddDate(10, 0, 0),
 		}
-		config.DB.Create(&freeSub)
+
+		if err := config.DB.Create(&freeSub).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "Account created but failed to attach subscription tier."})
+		}
 	} else {
 		if user.GoogleID == "" {
 			user.GoogleID = googleID
@@ -159,4 +169,17 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 	})
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
+}
+
+func (ctrl *Controller) Logout(c *fiber.Ctx) error {
+	c.Cookie(&fiber.Cookie{
+		Name:     "auth_token",
+		Value:    "",
+		Expires:  time.Now().Add(-24 * time.Hour),
+		HTTPOnly: true,
+		Secure:   true,
+		SameSite: "Lax",
+	})
+
+	return c.JSON(fiber.Map{"success": true, "message": "Logged out successfully"})
 }

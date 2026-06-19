@@ -52,7 +52,7 @@ func (s *authService) GenerateToken(userID, role string) (string, error) {
 func (s *authService) VerifyGoogleToken(ctx context.Context, idToken string) (map[string]interface{}, error) {
 	clientID := os.Getenv("GOOGLE_CLIENT_ID")
 	if clientID == "" {
-		clientID = "your-google-client-id.apps.googleusercontent.com"
+		log.Fatal("CRITICAL SECURITY ERROR: GOOGLE_CLIENT_ID environment variable is missing. Halting startup.")
 	}
 
 	payload, err := idtoken.Validate(ctx, idToken, clientID)

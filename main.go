@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/admin"
 	"pdfnest-backend/internal/auth"
@@ -25,9 +26,27 @@ import (
 )
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Warning: No .env file found. Falling back to system environment variables.")
+	dir, err := os.Getwd()
+	if err == nil {
+		log.Printf("[DEBUG] Current working directory of the process is: %s", dir)
+		log.Printf("[DEBUG] Expecting .env file to be here: %s", filepath.Join(dir, ".env"))
+	}
+
+	// 2. Try explicit check to see if the file physically exists on your drive
+	absPath := "/home/gimesha/My_Projects/go/pdfnest-backend/.env"
+	if _, err := os.Stat(absPath); err == nil {
+		log.Println("[DEBUG] File physically detected at absolute path. Attempting hardcoded parse...")
+		err = godotenv.Load(absPath)
+		if err != nil {
+			log.Printf("[DEBUG] godotenv failed parsing file content: %v", err)
+		}
+	} else {
+		log.Printf("[DEBUG] File NOT found at hardcoded absolute path: %v", err)
+
+		// Fallback normal attempt
+		if err := godotenv.Load(); err != nil {
+			log.Println("Warning: No .env file found. Falling back to system environment variables.")
+		}
 	}
 
 	config.ConnectDB()

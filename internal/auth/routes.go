@@ -7,4 +7,5 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	authGroup.Post("/register", ctrl.Register)
 	authGroup.Post("/login", ctrl.Login)
 	authGroup.Post("/google", ctrl.GoogleSignIn)
+	authGroup.Post("/logout", ctrl.Logout)
 }
