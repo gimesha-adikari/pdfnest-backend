@@ -1,4 +1,3 @@
-// file: internal/edit/service.go
 package edit
 
 import (
@@ -21,7 +20,6 @@ func NewService() Service {
 }
 
 func (s *service) ExtractLayout(pdfPath string) ([]byte, error) {
-	// Call layout mapping script
 	output, err := runPythonScript("scripts/pdf_to_layout.py", pdfPath)
 	if err != nil {
 		return nil, err
@@ -30,7 +28,6 @@ func (s *service) ExtractLayout(pdfPath string) ([]byte, error) {
 }
 
 func (s *service) CompileLayout(originalPdf string, payload []byte) (string, error) {
-	// Write modified frontend text json to a temporary data track
 	tempJsonPath := filepath.Join(os.TempDir(), uuid.New().String()+".json")
 	if err := os.WriteFile(tempJsonPath, payload, 0644); err != nil {
 		return "", err
@@ -40,7 +37,6 @@ func (s *service) CompileLayout(originalPdf string, payload []byte) (string, err
 	outPdfName := fmt.Sprintf("precision_edited_%s.pdf", uuid.New().String())
 	outPdfPath := filepath.Join(os.TempDir(), outPdfName)
 
-	// Call patching script: (originalPdf, outputPdf, modificationsJson)
 	_, err := runPythonScript("scripts/patch_pdf_layout.py", originalPdf, outPdfPath, tempJsonPath)
 	if err != nil {
 		return "", err

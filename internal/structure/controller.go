@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/helper"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -85,7 +86,7 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "merge")
+		config.LogToolUsage(userID, "merge", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -149,7 +150,7 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "split")
+		config.LogToolUsage(userID, "split", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -216,7 +217,7 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "rotate")
+		config.LogToolUsage(userID, "rotate", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -280,7 +281,7 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "delete")
+		config.LogToolUsage(userID, "delete", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -344,7 +345,7 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "reorder")
+		config.LogToolUsage(userID, "reorder", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -415,7 +416,7 @@ func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "watermark")
+		config.LogToolUsage(userID, "watermark", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -470,7 +471,7 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "add_page_numbers")
+		config.LogToolUsage(userID, "add_page_numbers", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -536,7 +537,7 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "update_metadata")
+		config.LogToolUsage(userID, "update_metadata", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -579,7 +580,7 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 		})
 	}
 
-	config.LogToolUsage(userID, "fetch_metadata")
+	config.LogToolUsage(userID, "fetch_metadata", helper.CheckCreditUsage(c))
 
 	return c.JSON(properties)
 }
@@ -620,7 +621,7 @@ func (ctrl *Controller) Repair(c *fiber.Ctx) error {
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("repaired_" + filepath.Base(fileHeader.Filename))
 
-	config.LogToolUsage(userID, "repair")
+	config.LogToolUsage(userID, "repair", helper.CheckCreditUsage(c))
 
 	return c.SendFile(outputPath)
 }
@@ -668,7 +669,66 @@ func (ctrl *Controller) Sign(c *fiber.Ctx) error {
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("signed_" + filepath.Base(pdfHeader.Filename))
 
-	config.LogToolUsage(userID, "sign")
+	config.LogToolUsage(userID, "sign", helper.CheckCreditUsage(c))
 
 	return c.SendFile(outputPath)
+}
+
+func (ctrl *Controller) Crop(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
+
+	// Expecting string coordinates format directly from the workspace frontend layout (e.g. "[10 10 400 400]" or percentage strings)
+	cropBoxDesc := c.FormValue("box")
+	if cropBoxDesc == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_CROP_DIMENSIONS",
+			Message: "A target crop box boundary dimension map is required.",
+		})
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_UPLOAD_FILE",
+			Message: "Missing source PDF context file vector.",
+		})
+	}
+
+	tempDir := os.TempDir()
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+
+	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		log.Printf("[SERVER ERROR] Crop: Failed to save uploaded input file %s: %v", inputPath, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DISK_WRITE_FAILURE",
+			Message: "Failed to isolate document file parameters into scratch space.",
+		})
+	}
+	defer func() {
+		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] Crop: Failed to delete input file at %s: %v", inputPath, err)
+		}
+	}()
+
+	outputPath, err := ctrl.service.CropPDF(inputPath, cropBoxDesc)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "CROPPING_ENGINE_FAILED",
+			Message: "Crop transaction engine boundary processing failure: " + err.Error(),
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment("cropped_document.pdf")
+	err = c.SendFile(outputPath)
+
+	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+		log.Printf("[CLEANUP WARNING] Crop: Failed to delete output split file at %s: %v", outputPath, cleanupErr)
+	}
+
+	if err == nil {
+		config.LogToolUsage(userID, "crop", helper.CheckCreditUsage(c))
+	}
+
+	return err
 }

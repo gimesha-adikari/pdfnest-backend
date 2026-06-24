@@ -121,7 +121,7 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		user = config.User{
 			ID:       uuid.New().String(),
 			Email:    email,
-			GoogleID: googleID,
+			GoogleID: &googleID,
 			Role:     "user",
 			Status:   "active",
 		}
@@ -144,8 +144,8 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"error": "Account created but failed to attach subscription tier."})
 		}
 	} else {
-		if user.GoogleID == "" {
-			user.GoogleID = googleID
+		if user.GoogleID == nil || *user.GoogleID == "" {
+			user.GoogleID = &googleID
 			config.DB.Save(&user)
 		}
 	}

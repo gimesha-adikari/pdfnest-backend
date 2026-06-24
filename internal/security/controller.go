@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/helper"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -79,7 +80,7 @@ func (ctrl *Controller) Lock(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "locked")
+		config.LogToolUsage(userID, "locked", helper.CheckCreditUsage(c))
 	}
 	return err
 }
@@ -139,7 +140,7 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "unlocked")
+		config.LogToolUsage(userID, "unlocked", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -185,7 +186,7 @@ func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
 	fullOutPath := filepath.Join(os.TempDir(), outFileName)
 	defer os.Remove(fullOutPath)
 
-	config.LogToolUsage(userID, "redact")
+	config.LogToolUsage(userID, "redact", helper.CheckCreditUsage(c))
 
 	return c.Download(fullOutPath)
 }

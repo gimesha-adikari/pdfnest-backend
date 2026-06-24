@@ -20,4 +20,5 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	structureGroup.Post("/metadata/fetch", ctrl.FetchMetadata)
 	structureGroup.Post("/repair", ctrl.Repair)
 	structureGroup.Post("/sign", ctrl.Sign)
+	structureGroup.Post("/crop", ctrl.Crop)
 }

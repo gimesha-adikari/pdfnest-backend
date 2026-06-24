@@ -10,6 +10,7 @@ type Service interface {
 	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
+	CropPDF(inputPath string, cropBoxDesc string) (string, error)
 }
 
 type structureService struct{}

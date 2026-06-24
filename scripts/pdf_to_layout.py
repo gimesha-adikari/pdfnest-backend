@@ -1,7 +1,7 @@
-# file: scripts/pdf_to_layout.py
-import fitz  # PyMuPDF
+import fitz
 import sys
 import json
+import os
 
 
 def get_pixel_bg_hex(page, x, y):
@@ -16,26 +16,24 @@ def get_pixel_bg_hex(page, x, y):
         return "#ffffff"
 
 
-def rgb_tuple_to_hex(rgb_tuple):
-    if not rgb_tuple or len(rgb_tuple) < 3:
-        return "#000000"
-    if isinstance(rgb_tuple, (int, float)):
-        val = max(0, min(255, int(rgb_tuple * 255)))
-        return f"#{val:02x}{val:02x}{val:02x}"
-
-    r = max(0, min(255, int(rgb_tuple[0] * 255)))
-    g = max(0, min(255, int(rgb_tuple[1] * 255)))
-    b = max(0, min(255, int(rgb_tuple[2] * 255)))
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
 def extract_pdf_layout(input_pdf_path):
     try:
         doc = fitz.open(input_pdf_path)
         pages_data = []
 
+        # 1. First Pass: Reset all pages to 0 rotation to unroll embedded orientations
+        for page in doc:
+            page.set_rotation(0)
+
+        # 2. Save an upright variant that the frontend canvas will consume cleanly
+        base, ext = os.path.splitext(input_pdf_path)
+        upright_pdf_path = base + "_upright" + ext
+        doc.save(upright_pdf_path)
+
+        # 3. Second Pass: Track structural text lines from the upright document variant safely
         for page_idx, page in enumerate(doc):
             page_rect = page.rect
+
             page_data = {
                 "page_num": page_idx + 1,
                 "width": page_rect.width,
@@ -47,7 +45,7 @@ def extract_pdf_layout(input_pdf_path):
             blocks = text_page.get("blocks", [])
 
             for block in blocks:
-                if block.get("type") == 0:  # Text block
+                if block.get("type") == 0:
                     lines = block.get("lines", [])
                     for line in lines:
                         bbox = line.get("bbox")
@@ -66,7 +64,6 @@ def extract_pdf_layout(input_pdf_path):
                         if spans:
                             first_span = spans[0]
                             if "color" in first_span:
-                                float_rgb = fitz.utils.getColorList()[0]  # default
                                 try:
                                     c_int = first_span["color"]
                                     r = ((c_int >> 16) & 255) / 255.0
@@ -96,7 +93,7 @@ def extract_pdf_layout(input_pdf_path):
             pages_data.append(page_data)
 
         doc.close()
-        print(json.dumps({"success": True, "pages": pages_data}))
+        print(json.dumps({"success": True, "pages": pages_data, "upright_tracker": upright_pdf_path}))
 
     except Exception as e:
         print(json.dumps({"success": False, "error": str(e)}))

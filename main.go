@@ -8,6 +8,7 @@ import (
 	"pdfnest-backend/internal/admin"
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/content"
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/ocr"
@@ -32,7 +33,6 @@ func main() {
 		log.Printf("[DEBUG] Expecting .env file to be here: %s", filepath.Join(dir, ".env"))
 	}
 
-	// 2. Try explicit check to see if the file physically exists on your drive
 	absPath := "/home/gimesha/My_Projects/go/pdfnest-backend/.env"
 	if _, err := os.Stat(absPath); err == nil {
 		log.Println("[DEBUG] File physically detected at absolute path. Attempting hardcoded parse...")
@@ -43,13 +43,13 @@ func main() {
 	} else {
 		log.Printf("[DEBUG] File NOT found at hardcoded absolute path: %v", err)
 
-		// Fallback normal attempt
 		if err := godotenv.Load(); err != nil {
 			log.Println("Warning: No .env file found. Falling back to system environment variables.")
 		}
 	}
 
 	config.ConnectDB()
+	content.SeedSiteContent()
 
 	app := fiber.New(fiber.Config{
 		BodyLimit:    100 * 1024 * 1024,
@@ -69,7 +69,7 @@ func main() {
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
-		AllowMethods:     "GET, POST, PUT, DELETE, OPTIONS",
+		AllowMethods:     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		AllowCredentials: true,
 	}))
 
@@ -77,7 +77,6 @@ func main() {
 		Format: "[${time}] ${status} - ${method} ${path} (${latency})\n",
 	}))
 
-	// Register Task Subsystem Core Routing Before Domain Context Groups
 	tasks.RegisterRoutes(app)
 
 	apiGroup := app.Group("/api")
@@ -122,6 +121,9 @@ func main() {
 	editService := edit.NewService()
 	editController := edit.NewController(editService)
 	edit.RegisterRoutes(apiGroup, editController)
+
+	contentController := content.NewController()
+	content.RegisterRoutes(apiGroup, contentController)
 
 	port := os.Getenv("PORT")
 	if port == "" {

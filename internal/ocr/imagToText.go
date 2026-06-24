@@ -1,16 +1,18 @@
 package ocr
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
 	"image/jpeg"
+	_ "image/jpeg"
 	_ "image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -20,109 +22,172 @@ import (
 
 func (s *ocrService) ImageToTextPDF(imagePaths []string) (string, error) {
 	if len(imagePaths) == 0 {
-		return "", errors.New("empty dataset sequence provided for OCR pipeline handling")
+		return "", errors.New("no images provided")
 	}
 
 	tempDir := os.TempDir()
-	outputFile := "ocr-compiled-" + uuid.New().String() + ".pdf"
-	outputPath := filepath.Join(tempDir, outputFile)
+
+	rawPDF := filepath.Join(
+		tempDir,
+		"ocr-raw-"+uuid.New().String()+".pdf",
+	)
+
+	searchablePDF := filepath.Join(
+		tempDir,
+		"ocr-searchable-"+uuid.New().String()+".pdf",
+	)
 
 	pdf := gofpdf.New("P", "mm", "A4", "")
-	pdf.SetFont("Helvetica", "", 12)
 
-	margin := 10.0
-	pageWidth, _ := pdf.GetPageSize()
-	writeWidth := pageWidth - (margin * 2)
+	var tempFiles []string
 
-	var intermediatePaths []string
 	defer func() {
-		for _, path := range intermediatePaths {
-			_ = os.Remove(path)
+		for _, f := range tempFiles {
+			_ = os.Remove(f)
 		}
 	}()
 
 	for _, imgPath := range imagePaths {
-		if _, err := os.Stat(imgPath); os.IsNotExist(err) {
-			return "", errors.New("underlying image segment missing during text conversion pipeline")
+
+		if _, err := os.Stat(imgPath); err != nil {
+			return "", fmt.Errorf("image not found: %s", imgPath)
 		}
 
 		processedPath := imgPath
-		lowerPath := strings.ToLower(imgPath)
 
-		if strings.HasSuffix(lowerPath, ".webp") {
-			standardizedPath, err := normalizeImageToJPEG(imgPath, tempDir)
+		if strings.HasSuffix(strings.ToLower(imgPath), ".webp") {
+			converted, err := normalizeImageToJPEG(imgPath, tempDir)
 			if err != nil {
-				return "", fmt.Errorf("failed normalizing frame array context: %w", err)
+				return "", err
 			}
-			processedPath = standardizedPath
-			intermediatePaths = append(intermediatePaths, standardizedPath)
+
+			tempFiles = append(tempFiles, converted)
+			processedPath = converted
+		}
+
+		imgWidth, imgHeight, err := getImageDimensions(processedPath)
+		if err != nil {
+			return "", err
 		}
 
 		pdf.AddPage()
 
-		cmd := exec.Command("tesseract",
-			processedPath,
-			"stdout",
-			"--oem", "1",
-			"--psm", "1",
+		pageW, pageH := pdf.GetPageSize()
+
+		scale := min(
+			pageW/float64(imgWidth),
+			pageH/float64(imgHeight),
 		)
-		var outBuffer bytes.Buffer
-		cmd.Stdout = &outBuffer
 
-		if err := cmd.Run(); err != nil {
-			pdf.ImageOptions(processedPath, margin, margin, writeWidth, 0, false, gofpdf.ImageOptions{}, 0, "")
-			continue
-		}
+		renderW := float64(imgWidth) * scale
+		renderH := float64(imgHeight) * scale
 
-		extractedText := outBuffer.String()
+		x := (pageW - renderW) / 2
+		y := (pageH - renderH) / 2
 
-		if len(strings.TrimSpace(extractedText)) > 0 {
-			lines := strings.Split(extractedText, "\n")
-			for _, line := range lines {
-				pdf.MultiCell(writeWidth, 6, line, "", "L", false)
-			}
-		} else {
-			pdf.ImageOptions(processedPath, margin, margin, writeWidth, 0, false, gofpdf.ImageOptions{}, 0, "")
-		}
-
-		if pdf.Err() {
-			errMessage := pdf.Error()
-			pdf.ClearError()
-			return "", fmt.Errorf("pdf generation fault during textual injection context: %w", errMessage)
-		}
+		pdf.ImageOptions(
+			processedPath,
+			x,
+			y,
+			renderW,
+			renderH,
+			false,
+			gofpdf.ImageOptions{
+				ReadDpi: true,
+			},
+			0,
+			"",
+		)
 	}
 
-	err := pdf.OutputFileAndClose(outputPath)
-	if err != nil {
+	if err := pdf.OutputFileAndClose(rawPDF); err != nil {
 		return "", err
 	}
 
-	return outputPath, nil
+	cmd := exec.Command(
+		"ocrmypdf",
+		"--skip-text",
+		"--rotate-pages",
+		"--deskew",
+		"--optimize", "3",
+		"--jobs", strconv.Itoa(runtime.NumCPU()),
+		rawPDF,
+		searchablePDF,
+	)
+
+	output, err := cmd.CombinedOutput()
+
+	_ = os.Remove(rawPDF)
+
+	if err != nil {
+		_ = os.Remove(searchablePDF)
+
+		return "", fmt.Errorf(
+			"ocrmypdf failed: %v\n%s",
+			err,
+			string(output),
+		)
+	}
+
+	return searchablePDF, nil
 }
 
-func normalizeImageToJPEG(srcPath, tempDir string) (string, error) {
-	file, err := os.Open(srcPath)
+func getImageDimensions(path string) (int, int, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return 0, 0, err
 	}
 	defer file.Close()
 
-	img, _, err := image.Decode(file)
+	cfg, _, err := image.DecodeConfig(file)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return cfg.Width, cfg.Height, nil
+}
+
+func normalizeImageToJPEG(srcPath, tempDir string) (string, error) {
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+
+	img, _, err := image.Decode(in)
 	if err != nil {
 		return "", err
 	}
 
-	outPath := filepath.Join(tempDir, "ocr-adapted-"+uuid.New().String()+".jpg")
-	outFile, err := os.Create(outPath)
+	outPath := filepath.Join(
+		tempDir,
+		"ocr-webp-"+uuid.New().String()+".jpg",
+	)
+
+	out, err := os.Create(outPath)
 	if err != nil {
 		return "", err
 	}
-	defer outFile.Close()
+	defer out.Close()
 
-	err = jpeg.Encode(outFile, img, &jpeg.Options{Quality: 98})
+	err = jpeg.Encode(
+		out,
+		img,
+		&jpeg.Options{
+			Quality: 95,
+		},
+	)
+
 	if err != nil {
 		return "", err
 	}
 
 	return outPath, nil
+}
+
+func min(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }

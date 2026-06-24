@@ -13,119 +13,285 @@ import (
 	"github.com/google/uuid"
 )
 
-// HtmlToPdf captures any remote web URL into a high-fidelity continuous portrait PDF using custom page boundaries
+const DebugHtmlToPdf = false
+
+func saveDebugHTML(debugDir string, html string) {
+	if !DebugHtmlToPdf {
+		return
+	}
+
+	_ = os.WriteFile(
+		filepath.Join(debugDir, "page.html"),
+		[]byte(html),
+		0644,
+	)
+}
+
+func saveDebugScreenshot(debugDir string, data []byte) {
+	if !DebugHtmlToPdf {
+		return
+	}
+
+	_ = os.WriteFile(
+		filepath.Join(debugDir, "screenshot.png"),
+		data,
+		0644,
+	)
+}
+
+func saveDebugPDF(debugDir string, data []byte) {
+	if !DebugHtmlToPdf {
+		return
+	}
+
+	_ = os.WriteFile(
+		filepath.Join(debugDir, "output.pdf"),
+		data,
+		0644,
+	)
+}
+
 func (s *ConversionService) HtmlToPdf(targetURL string, opts PrintOptions) (string, error) {
+
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
-	finalPdfPath := filepath.Join(tempDir, "web-compiled-"+sessionID+".pdf")
 
-	chromeOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.NoSandbox,
-		chromedp.DisableGPU,
-		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+	debugDir := filepath.Join(
+		tempDir,
+		"pdfnest-debug-"+sessionID,
 	)
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), chromeOpts...)
+	if DebugHtmlToPdf {
+		_ = os.MkdirAll(debugDir, 0755)
+	}
+
+	finalPdfPath := filepath.Join(
+		tempDir,
+		"web-compiled-"+sessionID+".pdf",
+	)
+
+	chromeOpts := append(
+		chromedp.DefaultExecAllocatorOptions[:],
+
+		chromedp.NoSandbox,
+		chromedp.DisableGPU,
+
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+
+		chromedp.UserAgent(
+			"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "+
+				"AppleWebKit/537.36 (KHTML, like Gecko) "+
+				"Chrome/137.0.0.0 Safari/537.36",
+		),
+	)
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(
+		context.Background(),
+		chromeOpts...,
+	)
 	defer allocCancel()
 
 	ctx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, cancelTimeout := context.WithTimeout(ctx, 60*time.Second) // 60s accommodates scrolling and rendering large sites safely
+	ctx, cancelTimeout := context.WithTimeout(
+		ctx,
+		90*time.Second,
+	)
 	defer cancelTimeout()
 
-	var buf []byte
+	var (
+		buf        []byte
+		html       string
+		screenshot []byte
+	)
 
-	err := chromedp.Run(ctx,
-		emulation.SetDeviceMetricsOverride(1920, 1080, 1.0, false),
+	err := chromedp.Run(
+		ctx,
+
+		emulation.SetDeviceMetricsOverride(
+			1920,
+			1080,
+			1.0,
+			false,
+		),
 
 		chromedp.Navigate(targetURL),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
-		chromedp.Sleep(1500*time.Millisecond),
 
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			return emulation.SetEmulatedMedia().WithMedia("screen").Do(ctx)
-		}),
+		chromedp.WaitVisible(
+			"body",
+			chromedp.ByQuery,
+		),
 
-		// Human-mimicking scroll loop simulation to activate hidden lazy loaded components safely
+		chromedp.Sleep(4*time.Second),
+
+		chromedp.OuterHTML("html", &html),
 		chromedp.Evaluate(`
-			new Promise((resolve) => {
-				let totalHeight = 0;
-				const distance = 80; 
-				const timer = setInterval(() => {
-					const scrollHeight = document.body.scrollHeight;
-					window.scrollBy(0, distance);
-					totalHeight += distance;
+(() => {
 
-					if (totalHeight >= scrollHeight) {
-						clearInterval(timer);
-						setTimeout(() => {
-							window.scrollTo(0, 0); 
-							resolve();
-						}, 1000);
-					}
-				}, 45); 
-			});
-		`, nil),
+    const style = document.createElement('style');
+
+    style.innerHTML =
+        "*,*::before,*::after{" +
+        "opacity:1 !important;" +
+        "visibility:visible !important;" +
+        "filter:none !important;" +
+        "backdrop-filter:none !important;" +
+        "transform:none !important;" +
+        "animation:none !important;" +
+        "transition:none !important;" +
+        "}" +
+        "html{" +
+        "scroll-behavior:auto !important;" +
+        "}";
+
+    document.head.appendChild(style);
+
+})();
+`, nil),
+
+		chromedp.Evaluate(`
+window.scrollTo(
+    0,
+    document.body.scrollHeight
+);
+`, nil),
+
+		chromedp.Sleep(3000*time.Millisecond),
+
+		chromedp.Evaluate(`
+window.scrollTo(0, 0);
+`, nil),
 
 		chromedp.Sleep(2000*time.Millisecond),
 
-		// Injected layout visibility sanitizer fallback rules
 		chromedp.Evaluate(`
-			const style = document.createElement('style');
-			style.innerHTML = `+"`"+`
-				@media print {
-					html, body {
-						background-color: #030712 !important; 
-						color: #f3f4f6 !important;
-					}
-					div, section, article, main, p, span, h1, h2, h3, a {
-						display: unset !important;
-						visibility: visible !important;
-						opacity: 1 !important;
-						transform: none !important;
-						transition: none !important;
-						animation: none !important;
-					}
-					.grid, [class*="grid"], .flex, [class*="flex"] {
-						display: flex !important;
-						flex-direction: row !important;
-						flex-wrap: wrap !important;
-					}
-				}
-			`+"`"+`;
-			document.head.appendChild(style);
-		`, nil),
+document.querySelectorAll('*').forEach(el => {
+	el.style.opacity = '1';
+	el.style.visibility = 'visible';
+});
+`, nil),
 
-		chromedp.Sleep(500*time.Millisecond),
+		chromedp.FullScreenshot(
+			&screenshot,
+			90,
+		),
 
 		chromedp.ActionFunc(func(ctx context.Context) error {
+			return emulation.
+				SetEmulatedMedia().
+				WithMedia("screen").
+				Do(ctx)
+		}),
+
+		chromedp.Evaluate(`
+			new Promise((resolve) => {
+
+				let previousHeight = -1;
+
+				const run = async () => {
+
+					while (true) {
+
+						window.scrollTo(
+							0,
+							document.body.scrollHeight
+						);
+
+						await new Promise(
+							r => setTimeout(r, 1200)
+						);
+
+						const currentHeight =
+							document.body.scrollHeight;
+
+						if (
+							currentHeight === previousHeight
+						) {
+							break;
+						}
+
+						previousHeight =
+							currentHeight;
+					}
+
+					window.scrollTo(0, 0);
+
+					setTimeout(resolve, 1500);
+				};
+
+				run();
+			});
+		`, nil),
+
+		chromedp.Sleep(2*time.Second),
+
+		chromedp.ActionFunc(func(ctx context.Context) error {
+
 			var err error
 
 			printParams := page.PrintToPDF()
-			printParams.PrintBackground = true
-			printParams.Landscape = false
-			printParams.PaperWidth = 11.0  // Retains full desktop layout scale aspect metrics
-			printParams.PaperHeight = 16.5 // Extra vertical breathing room per page block
 
-			// Dynamic client-side layout adjustments
+			printParams.PrintBackground = true
+
+			printParams.Landscape = false
+
 			printParams.MarginTop = opts.MarginTop
 			printParams.MarginBottom = opts.MarginBottom
 			printParams.MarginLeft = opts.MarginLeft
 			printParams.MarginRight = opts.MarginRight
-			printParams.PreferCSSPageSize = false
+
+			printParams.PreferCSSPageSize = true
 
 			buf, _, err = printParams.Do(ctx)
+
 			return err
 		}),
 	)
 
-	if err != nil {
-		return "", fmt.Errorf("high-fidelity webpage extraction process failed: %w", err)
+	if DebugHtmlToPdf {
+
+		saveDebugHTML(
+			debugDir,
+			html,
+		)
+
+		saveDebugScreenshot(
+			debugDir,
+			screenshot,
+		)
 	}
 
-	if err := os.WriteFile(finalPdfPath, buf, 0644); err != nil {
-		return "", fmt.Errorf("failed writing browser pdf stream to workspace disk: %w", err)
+	if err != nil {
+		return "", fmt.Errorf(
+			"html to pdf conversion failed: %w",
+			err,
+		)
+	}
+
+	if err := os.WriteFile(
+		finalPdfPath,
+		buf,
+		0644,
+	); err != nil {
+		return "", fmt.Errorf(
+			"failed writing pdf: %w",
+			err,
+		)
+	}
+
+	if DebugHtmlToPdf {
+
+		saveDebugPDF(
+			debugDir,
+			buf,
+		)
+
+		fmt.Println(
+			"[PDFNEST DEBUG] artifacts saved:",
+			debugDir,
+		)
 	}
 
 	return finalPdfPath, nil

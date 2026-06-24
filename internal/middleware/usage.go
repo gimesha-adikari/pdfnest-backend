@@ -1,3 +1,4 @@
+// file: internal/middleware/usage.go
 package middleware
 
 import (
@@ -16,32 +17,49 @@ func EnforceLimits() fiber.Handler {
 			return c.Status(403).JSON(fiber.Map{"error": "Account subscription missing"})
 		}
 
-		if sub.Tier == "pro" && time.Now().After(sub.CurrentPeriodEnd) {
+		if (sub.Tier == "pro" || sub.Tier == "plus") && time.Now().After(sub.CurrentPeriodEnd) {
 			sub.Tier = "free"
 			sub.Status = "expired"
 			config.DB.Save(&sub)
 		}
 
 		limit := 5
-		if sub.Tier == "pro" {
+		switch sub.Tier {
+		case "pro":
 			limit = 500
+		case "plus":
+			limit = 50
+		default:
+			limit = 5
 		}
 
 		var usageCount int64
 		today := time.Now().Truncate(24 * time.Hour)
 
 		config.DB.Model(&config.UsageLog{}).
-			Where("user_id = ? AND created_at >= ?", userID, today).
+			Where("user_id = ? AND created_at >= ? AND is_credit = false", userID, today).
 			Count(&usageCount)
 
-		if int(usageCount) >= limit {
-			return c.Status(429).JSON(fiber.Map{
-				"error": "Daily limit reached. Please upgrade to continue.",
-				"tier":  sub.Tier,
-				"limit": limit,
-			})
+		if int(usageCount) < limit {
+			c.Locals("consumed_via_credit", false)
+			return c.Next()
 		}
 
-		return c.Next()
+		if sub.CustomCredits > 0 {
+			sub.CustomCredits -= 1
+			if err := config.DB.Save(&sub).Error; err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Failed adjusting credit asset reserves"})
+			}
+
+			c.Locals("consumed_via_credit", true)
+			return c.Next()
+		}
+
+		return c.Status(429).JSON(fiber.Map{
+			"error":                    "Daily tier processed thresholds completely reached. Consume standard credits or purchase add-on bundles.",
+			"tier":                     sub.Tier,
+			"limit":                    limit,
+			"custom_credits_remaining": sub.CustomCredits,
+		})
 	}
 }

@@ -10,6 +10,7 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	conversionGroup := router.Group("/conversion", middleware.Protect(), middleware.EnforceLimits())
 
 	conversionGroup.Post("/to-pdf", ctrl.ConvertImagesToPDF)
+	conversionGroup.Post("/custom-to-pdf", ctrl.ConvertCustomImagesToPDF)
 	conversionGroup.Post("/pdf-to-images", ctrl.RasterizePdfUniversal)
 	conversionGroup.Post("/preview/page", ctrl.StreamPagePreviewHandler)
 	conversionGroup.Post("/word-to-pdf", ctrl.ConvertOfficeToPDF)

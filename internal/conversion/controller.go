@@ -1,11 +1,13 @@
 package conversion
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/helper"
 	"pdfnest-backend/internal/tasks"
 	"strconv"
 
@@ -15,6 +17,20 @@ import (
 
 type Controller struct {
 	service Service
+}
+
+type CanvasLayoutItem struct {
+	ID          string  `json:"id"`
+	FileIndex   int     `json:"fileIndex"`
+	Name        string  `json:"name"`
+	X           float64 `json:"x"`
+	Y           float64 `json:"y"`
+	Width       float64 `json:"width"`
+	Height      float64 `json:"height"`
+	BorderWidth float64 `json:"borderWidth"`
+	BorderColor string  `json:"borderColor"`
+	ZIndex      int     `json:"zIndex"`
+	PageIndex   int     `json:"pageIndex"`
 }
 
 func NewController(s Service) *Controller {
@@ -86,7 +102,7 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "images_to_pdf")
+		config.LogToolUsage(userID, "images_to_pdf", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -137,7 +153,7 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "pdf_to_images")
+		config.LogToolUsage(userID, "pdf_to_images", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -218,7 +234,7 @@ func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 	defer func() { _ = os.Remove(outputPath) }()
 
 	if err == nil {
-		config.LogToolUsage(userID, "office_to_pdf")
+		config.LogToolUsage(userID, "office_to_pdf", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -262,15 +278,15 @@ func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
 	defer func() { _ = os.Remove(outputPath) }()
 
 	if err == nil {
-		config.LogToolUsage(userID, "webpage_capture")
+		config.LogToolUsage(userID, "webpage_capture", helper.CheckCreditUsage(c))
 	}
 
 	return err
 }
 
 type PrintOptions struct {
-	Orientation  string  `form:"orientation" json:"orientation"` // "portrait" or "landscape"
-	PaperSize    string  `form:"paperSize" json:"paperSize"`     // "A4", "letter", "legal"
+	Orientation  string  `form:"orientation" json:"orientation"`
+	PaperSize    string  `form:"paperSize" json:"paperSize"`
 	MarginTop    float64 `form:"marginTop" json:"marginTop"`
 	MarginBottom float64 `form:"marginBottom" json:"marginBottom"`
 	MarginLeft   float64 `form:"marginLeft" json:"marginLeft"`
@@ -317,7 +333,7 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 	defer func() { _ = os.Remove(outputPath) }()
 
 	if err == nil {
-		config.LogToolUsage(userID, "markdown_to_pdf")
+		config.LogToolUsage(userID, "markdown_to_pdf", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -368,7 +384,7 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 	defer func() { _ = os.Remove(outputPath) }()
 
 	if err == nil {
-		config.LogToolUsage(userID, "code_to_pdf")
+		config.LogToolUsage(userID, "code_to_pdf", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -387,6 +403,8 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating sandboxed headless rendering nodes...", "")
+
+	creditUsage := helper.CheckCreditUsage(c)
 
 	opts := PrintOptions{}
 	if paperSize := c.FormValue("paperSize"); paperSize != "" {
@@ -430,7 +448,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(uID, "html_to_pdf")
+		config.LogToolUsage(uID, "html_to_pdf", creditUsage)
 	}(taskId, targetURL, opts, userID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
@@ -469,6 +487,8 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
+	creditUsage := helper.CheckCreditUsage(c)
+
 	go func(id, srcPath string, printOpts PrintOptions, uID string) {
 		defer func() {
 			_ = os.Remove(srcPath)
@@ -487,7 +507,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(uID, "markdown_to_pdf")
+		config.LogToolUsage(uID, "markdown_to_pdf", creditUsage)
 	}(taskId, inputPath, opts, userID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
@@ -522,11 +542,84 @@ func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Conversion failed: " + err.Error()})
 		}
 
-		config.LogToolUsage(userID, "pdf_to_"+targetFormat)
+		config.LogToolUsage(userID, "pdf_to_"+targetFormat, helper.CheckCreditUsage(c))
 
 		c.Set("Content-Type", "application/octet-stream")
 		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", file.Filename, targetFormat))
 
 		return c.SendFile(outputFilePath)
 	}
+}
+
+func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
+
+	form, err := c.MultipartForm()
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "INVALID_MULTIPART_FORM",
+			Message: "Invalid multipart form transmission asset array.",
+		})
+	}
+
+	layoutData := form.Value["canvasLayout"]
+	if len(layoutData) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_LAYOUT_METADATA",
+			Message: "Custom canvas configuration mapping data is required.",
+		})
+	}
+
+	var layout []CanvasLayoutItem
+	if err := json.Unmarshal([]byte(layoutData[0]), &layout); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MALFORMED_LAYOUT_JSON",
+			Message: "Failed to parse structural canvas coordinate parameters accurately.",
+		})
+	}
+
+	files := form.File["images"]
+	if len(files) == 0 {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_FILES",
+			Message: "At least one image binary is required for layout mapping context.",
+		})
+	}
+
+	tempDir := os.TempDir()
+	var temporaryImagePaths []string
+
+	defer func() {
+		for _, path := range temporaryImagePaths {
+			_ = os.Remove(path)
+		}
+	}()
+
+	for _, fileHeader := range files {
+		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "DISK_WRITE_FAILURE", Message: "Internal staging issue."})
+		}
+		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
+	}
+
+	outputPath, err := ctrl.service.CustomImagesToPDF(temporaryImagePaths, layout)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "CUSTOM_PDF_COMPILATION_FAILED",
+			Message: "Error rendering layered graphic objects to target PDF matrix: " + err.Error(),
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment("custom_compiled_images.pdf")
+	err = c.SendFile(outputPath)
+
+	_ = os.Remove(outputPath)
+
+	if err == nil {
+		config.LogToolUsage(userID, "custom_images_to_pdf", helper.CheckCreditUsage(c))
+	}
+
+	return err
 }

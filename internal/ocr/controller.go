@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/helper"
 
 	"pdfnest-backend/internal/tasks"
 
@@ -70,7 +71,7 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 	c.Set("Content-Type", "text/plain")
 	c.Attachment(filepath.Base(outputPath))
 
-	config.LogToolUsage(userID, "extract_text_from_pdf")
+	config.LogToolUsage(userID, "extract_text_from_pdf", helper.CheckCreditUsage(c))
 
 	return c.SendFile(outputPath)
 }
@@ -133,7 +134,7 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 	_ = os.Remove(outputPath)
 
 	if err == nil {
-		config.LogToolUsage(userID, "image_to_text_pdf")
+		config.LogToolUsage(userID, "image_to_text_pdf", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -157,6 +158,8 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		return c.Status(500).JSON(APIError{Code: "DISK_ERR", Message: "Failed to write workspace data cache"})
 	}
 
+	creditUsage := helper.CheckCreditUsage(c)
+
 	go func(id, srcPath string) {
 		defer func() {
 			_ = os.Remove(srcPath)
@@ -165,7 +168,13 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 			}
 		}()
 
-		tasks.Registry.Set(id, "PROCESSING", 25, "Running Ghostscript page raster engines...", "")
+		tasks.Registry.Set(
+			id,
+			"PROCESSING",
+			35,
+			"Running OCR and creating searchable PDF...",
+			"",
+		)
 		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath)
 		if err != nil {
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
@@ -174,7 +183,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(userID, "extract_text_from_pdf")
+		config.LogToolUsage(userID, "extract_text_from_pdf", creditUsage)
 	}(taskId, inputPath)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
@@ -193,6 +202,8 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	if len(files) == 0 {
 		return c.Status(400).JSON(APIError{Code: "MISSING_IMAGES", Message: "No file targets dropped inside body array"})
 	}
+
+	creditUsage := helper.CheckCreditUsage(c)
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
@@ -225,7 +236,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(userID, "image_to_text_pdf")
+		config.LogToolUsage(userID, "image_to_text_pdf", creditUsage)
 
 	}(taskId, tempPaths)
 

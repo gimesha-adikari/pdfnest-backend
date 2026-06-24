@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/helper"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -65,7 +66,7 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	mappedResponse["source_tracker"] = tempPdfPath
 
-	config.LogToolUsage(userID, "pdf_edit_extract")
+	config.LogToolUsage(userID, "pdf_edit_extract", helper.CheckCreditUsage(c))
 
 	return c.JSON(mappedResponse)
 }
@@ -98,8 +99,6 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 			"error":   "The original file staging window expired. Please re-upload the document",
 		})
 	}
-	defer os.Remove(tracker.SourceTracker)
-
 	fullOutPath, err := cr.service.CompileLayout(tracker.SourceTracker, payloadBytes)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -119,7 +118,7 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 	}
 
 	if err == nil {
-		config.LogToolUsage(userID, "pdf_edit_compile")
+		config.LogToolUsage(userID, "pdf_edit_compile", helper.CheckCreditUsage(c))
 	}
 
 	return err

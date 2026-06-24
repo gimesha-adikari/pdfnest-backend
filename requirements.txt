@@ -1,0 +1,10 @@
+docling
+paddleocr
+paddlepaddle
+
+python-docx
+
+markdown
+
+beautifulsoup4
+lxml
