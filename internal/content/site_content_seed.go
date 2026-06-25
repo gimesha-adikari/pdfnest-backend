@@ -40,12 +40,26 @@ func SeedSiteContent() {
 			PopularToolDescription: "Combine separate structural files into a clean compound container setup natively in seconds without data compression loss.",
 			PopularToolAction:      "Open Tool Module",
 
-			CategoryEditingTitle:  "PDF Document Architecture Editing",
-			CategoryEditingDesc:   "Modify structural parameters and compile native document elements layout grids.",
-			CategoryConvertTitle:  "Conversion Modules",
-			CategoryConvertDesc:   "Change container formats.",
-			CategorySecurityTitle: "High-Grade Security",
-			CategorySecurityDesc:  "Attach high-fidelity cipher authorization signatures securely.",
+			CategoryOrganizeTitle: "Page Organization",
+			CategoryOrganizeDesc:  "Merge, split, rotate, crop, and organize PDF pages with precision.",
+
+			CategoryEditingTitle: "Document Editing",
+			CategoryEditingDesc:  "Modify content, add annotations, signatures, watermarks, and page elements.",
+
+			CategoryConvertTitle: "PDF Conversion",
+			CategoryConvertDesc:  "Convert PDFs to and from Office documents, images, text, and other formats.",
+
+			CategoryCreateTitle: "PDF Creation",
+			CategoryCreateDesc:  "Create professional PDFs from documents, images, websites, code, and markdown.",
+
+			CategorySecurityTitle: "Document Security",
+			CategorySecurityDesc:  "Protect, unlock, and permanently redact sensitive PDF information.",
+
+			CategoryOptimizeTitle: "Optimization & Repair",
+			CategoryOptimizeDesc:  "Compress, repair, and optimize PDFs for storage, sharing, and printing.",
+
+			CategoryStudioTitle: "PDF Studio",
+			CategoryStudioDesc:  "Access an all-in-one workspace for advanced PDF editing and document management.",
 		}
 		config.DB.Create(&homeContent)
 	}

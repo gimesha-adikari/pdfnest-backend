@@ -7,6 +7,8 @@ import (
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
+	router.Post("/structure/analyze", ctrl.Analyze)
+
 	structureGroup := router.Group("/structure", middleware.Protect(), middleware.EnforceLimits())
 
 	structureGroup.Post("/merge", ctrl.Merge)
@@ -21,4 +23,9 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	structureGroup.Post("/repair", ctrl.Repair)
 	structureGroup.Post("/sign", ctrl.Sign)
 	structureGroup.Post("/crop", ctrl.Crop)
+	structureGroup.Post("/duplicate", ctrl.Duplicate)
+	structureGroup.Post("/insert-blank", ctrl.InsertBlank)
+	structureGroup.Post("/add-text", ctrl.AddText)
+	structureGroup.Post("/highlight", ctrl.Highlight)
+	structureGroup.Post("/underline", ctrl.Underline)
 }

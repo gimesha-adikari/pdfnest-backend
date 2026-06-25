@@ -2,11 +2,13 @@ package structure
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
 	"pdfnest-backend/helper"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -731,4 +733,138 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 	}
 
 	return err
+}
+
+func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
+	var userID string
+	if val, ok := c.Locals("user_id").(string); ok {
+		userID = val
+	} else {
+		userID = "anonymous"
+	}
+
+	pageSelection := c.FormValue("pages")
+	if pageSelection == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "MISSING_PAGE_SELECTION",
+			"message": "Target page descriptions are required for duplication matrix processing.",
+		})
+	}
+
+	copiesStr := c.FormValue("copies")
+	copies, err := strconv.Atoi(copiesStr)
+	if err != nil || copies < 1 {
+		copies = 1
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "MISSING_UPLOAD_FILE",
+			"message": "Missing input context PDF source vector.",
+		})
+	}
+
+	tempDir := os.TempDir()
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+
+	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"code":    "DISK_WRITE_FAILURE",
+			"message": "Failed to store asset into intermediate local temporary storage bounds.",
+		})
+	}
+	defer func() {
+		_ = os.Remove(inputPath)
+	}()
+
+	if password := c.FormValue("file_password"); password != "" {
+	}
+
+	outputPath, err := ctrl.service.DuplicatePDFPages(inputPath, pageSelection, copies)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"code":    "DUPLICATION_ENGINE_FAILED",
+			"message": "Page matrix layout rendering transaction failed: " + err.Error(),
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment(fmt.Sprintf("%s-duplicated.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
+
+	sendErr := c.SendFile(outputPath)
+
+	defer func() {
+		_ = os.Remove(outputPath)
+	}()
+
+	if sendErr == nil {
+		config.LogToolUsage(userID, "duplicate", helper.CheckCreditUsage(c))
+	}
+
+	return sendErr
+}
+
+func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
+	userID := c.Locals("user_id").(string)
+
+	insertAt := c.FormValue("insertAt")
+
+	targetPage := 1
+	if insertAt == "after" {
+		var err error
+		targetPage, err = strconv.Atoi(c.FormValue("targetPage"))
+		if err != nil || targetPage < 1 {
+			targetPage = 1
+		}
+	}
+
+	count, err := strconv.Atoi(c.FormValue("count"))
+	if err != nil || count < 1 {
+		count = 1
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "MISSING_UPLOAD_FILE",
+			"message": "Missing input context PDF source vector.",
+		})
+	}
+
+	tempDir := os.TempDir()
+	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+
+	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"code":    "DISK_WRITE_FAILURE",
+			"message": "Failed to store asset into temporary scratch bounds.",
+		})
+	}
+	defer func() {
+		_ = os.Remove(inputPath)
+	}()
+
+	outputPath, err := ctrl.service.InsertBlankPages(inputPath, insertAt, targetPage, count)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"code":    "INSERTION_ENGINE_FAILED",
+			"message": "Blank page insert rendering transaction failed: " + err.Error(),
+		})
+	}
+
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment(fmt.Sprintf("%s-with-blank.pdf", filepath.Base(fileHeader.Filename)))
+
+	sendErr := c.SendFile(outputPath)
+
+	defer func() {
+		_ = os.Remove(outputPath)
+	}()
+
+	if sendErr == nil {
+		config.LogToolUsage(userID, "duplicate", helper.CheckCreditUsage(c))
+	}
+
+	return sendErr
 }

@@ -39,12 +39,27 @@ type HomePageContent struct {
 	PopularToolAction      string `gorm:"type:varchar(255);not null" json:"popularToolAction"`
 
 	// Category Headers
-	CategoryEditingTitle  string `gorm:"type:varchar(255);not null" json:"categoryEditingTitle"`
-	CategoryEditingDesc   string `gorm:"type:text;not null" json:"categoryEditingDesc"`
-	CategoryConvertTitle  string `gorm:"type:varchar(255);not null" json:"categoryConvertTitle"`
-	CategoryConvertDesc   string `gorm:"type:text;not null" json:"categoryConvertDesc"`
+	// Category Headers
+	CategoryOrganizeTitle string `gorm:"type:varchar(255);not null" json:"categoryOrganizeTitle"`
+	CategoryOrganizeDesc  string `gorm:"type:text;not null" json:"categoryOrganizeDesc"`
+
+	CategoryEditingTitle string `gorm:"type:varchar(255);not null" json:"categoryEditingTitle"`
+	CategoryEditingDesc  string `gorm:"type:text;not null" json:"categoryEditingDesc"`
+
+	CategoryConvertTitle string `gorm:"type:varchar(255);not null" json:"categoryConvertTitle"`
+	CategoryConvertDesc  string `gorm:"type:text;not null" json:"categoryConvertDesc"`
+
+	CategoryCreateTitle string `gorm:"type:varchar(255);not null" json:"categoryCreateTitle"`
+	CategoryCreateDesc  string `gorm:"type:text;not null" json:"categoryCreateDesc"`
+
 	CategorySecurityTitle string `gorm:"type:varchar(255);not null" json:"categorySecurityTitle"`
 	CategorySecurityDesc  string `gorm:"type:text;not null" json:"categorySecurityDesc"`
+
+	CategoryOptimizeTitle string `gorm:"type:varchar(255);not null" json:"categoryOptimizeTitle"`
+	CategoryOptimizeDesc  string `gorm:"type:text;not null" json:"categoryOptimizeDesc"`
+
+	CategoryStudioTitle string `gorm:"type:varchar(255);not null" json:"categoryStudioTitle"`
+	CategoryStudioDesc  string `gorm:"type:text;not null" json:"categoryStudioDesc"`
 
 	UpdatedAt time.Time `json:"updatedAt"`
 }

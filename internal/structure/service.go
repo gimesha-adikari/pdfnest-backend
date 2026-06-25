@@ -11,8 +11,13 @@ type Service interface {
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
 	CropPDF(inputPath string, cropBoxDesc string) (string, error)
+	DuplicatePDFPages(inputPath string, pageSelection string, copies int) (string, error)
+	InsertBlankPages(inputPath string, insertAt string, targetPage int, count int) (string, error)
+	AddTextToPDF(inputPath string, elements []TextElement) (string, error)
+	HighlightPDF(inputPath string, boxes []HighlightBox, filePassword string) (string, error)
+	UnderlinePDF(inputPath string, boxes []UnderlineBox, mode, filePassword string) (string, int, error)
+	AnalyzePDF(inputPath, filePassword string) (*PDFAnalysis, error)
 }
-
 type structureService struct{}
 
 func NewService() Service {
