@@ -27,5 +27,6 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	structureGroup.Post("/insert-blank", ctrl.InsertBlank)
 	structureGroup.Post("/add-text", ctrl.AddText)
 	structureGroup.Post("/highlight", ctrl.Highlight)
+	structureGroup.Post("/strikeout", ctrl.Strikeout)
 	structureGroup.Post("/underline", ctrl.Underline)
 }

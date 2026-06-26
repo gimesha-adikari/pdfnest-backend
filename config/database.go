@@ -15,15 +15,18 @@ import (
 var DB *gorm.DB
 
 type User struct {
-	ID           string  `gorm:"type:uuid;primaryKey"`
-	Email        string  `gorm:"type:varchar(255);uniqueIndex;not null"`
-	PasswordHash string  `gorm:"type:varchar(255);nullable"`
-	GoogleID     *string `gorm:"type:varchar(255);uniqueIndex;nullable"`
-	Role         string  `gorm:"type:varchar(50);default:'user'"`
-	Status       string  `gorm:"type:varchar(50);default:'active'"`
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
-	DeletedAt    gorm.DeletedAt `gorm:"index"`
+	ID                   string  `gorm:"type:uuid;primaryKey"`
+	Email                string  `gorm:"type:varchar(255);uniqueIndex;not null"`
+	PasswordHash         string  `gorm:"type:varchar(255);nullable"`
+	GoogleID             *string `gorm:"type:varchar(255);uniqueIndex;nullable"`
+	Role                 string  `gorm:"type:varchar(50);default:'user'"`
+	Status               string  `gorm:"type:varchar(50);default:'pending'"`
+	EmailVerified        bool    `gorm:"default:false"`
+	EmailVerifyTokenHash string  `gorm:"type:varchar(255);index"`
+	EmailVerifyExpiresAt time.Time
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	DeletedAt            gorm.DeletedAt `gorm:"index"`
 }
 
 type Subscription struct {
@@ -105,12 +108,13 @@ func ConnectDB() {
 		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
 
 		adminUser := User{
-			ID:        uuid.New().String(),
-			Email:     adminEmail,
-			Role:      "admin",
-			Status:    "active",
-			CreatedAt: time.Now(),
-			UpdatedAt: time.Now(),
+			ID:            uuid.New().String(),
+			Email:         adminEmail,
+			Role:          "admin",
+			Status:        "active",
+			EmailVerified: true,
+			CreatedAt:     time.Now(),
+			UpdatedAt:     time.Now(),
 		}
 
 		if err := DB.Create(&adminUser).Error; err != nil {

@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type HighlightBox struct {
+type StrikeoutBox struct {
 	ID     string  `json:"id"`
 	X      float64 `json:"x"`
 	Y      float64 `json:"y"`
@@ -26,7 +26,7 @@ type HighlightBox struct {
 	Color  string  `json:"color"`
 }
 
-func countUniqueHighlightPages(boxes []HighlightBox) int {
+func countUniqueStrikeoutPages(boxes []StrikeoutBox) int {
 	seen := make(map[int]struct{})
 	for _, box := range boxes {
 		if box.Page > 0 {
@@ -36,24 +36,33 @@ func countUniqueHighlightPages(boxes []HighlightBox) int {
 	return len(seen)
 }
 
-func (s *structureService) HighlightPDF(inputPath string, boxes []HighlightBox, mode, filePassword string) (string, int, error) {
+func (s *structureService) StrikeoutPDF(inputPath string, boxes []StrikeoutBox, mode, filePassword string) (string, int, error) {
+
 	tempDir := os.TempDir()
-	outputPath := filepath.Join(tempDir, "highlighted-"+uuid.New().String()+".pdf")
-	boxesPath := filepath.Join(tempDir, "highlight-boxes-"+uuid.New().String()+".json")
+
+	outputPath := filepath.Join(
+		tempDir,
+		"strikeout-"+uuid.New().String()+".pdf",
+	)
+
+	boxesPath := filepath.Join(
+		tempDir,
+		"strikeout-boxes-"+uuid.New().String()+".json",
+	)
 
 	payload, err := json.Marshal(boxes)
 	if err != nil {
-		return "", 0, fmt.Errorf("failed to encode highlight boxes: %w", err)
+		return "", 0, fmt.Errorf("failed to encode strikeout boxes: %w", err)
 	}
 
 	if err := os.WriteFile(boxesPath, payload, 0600); err != nil {
-		return "", 0, fmt.Errorf("failed to write highlight boxes temp file: %w", err)
+		return "", 0, fmt.Errorf("failed to write strikeout temp file: %w", err)
 	}
 	defer func() {
 		_ = os.Remove(boxesPath)
 	}()
 
-	scriptPath := "./scripts/pdf_highlight.py"
+	scriptPath := "./scripts/pdf_strikeout.py"
 	pythonExecutable := "./venv/bin/python"
 
 	args := []string{
@@ -72,16 +81,20 @@ func (s *structureService) HighlightPDF(inputPath string, boxes []HighlightBox, 
 		args = append(args, filePassword)
 	}
 
-	cmd := exec.Command(pythonExecutable, args...)
+	cmd := exec.Command(
+		pythonExecutable,
+		args...,
+	)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
 		return "", 0, fmt.Errorf(
-			"python highlight failed: %w; stderr: %s; stdout: %s",
+			"python strikeout failed: %w; stderr: %s; stdout: %s",
 			err,
 			strings.TrimSpace(stderr.String()),
 			strings.TrimSpace(stdout.String()),
@@ -93,27 +106,37 @@ func (s *structureService) HighlightPDF(inputPath string, boxes []HighlightBox, 
 	}
 
 	ocrPages := 0
+
 	if strings.TrimSpace(mode) == "ocr" {
-		ocrPages = countUniqueHighlightPages(boxes)
+		ocrPages = countUniqueStrikeoutPages(boxes)
 	}
 
 	return outputPath, ocrPages, nil
 }
 
-func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
+func (ctrl *Controller) Strikeout(c *fiber.Ctx) error {
+
 	userID, _ := c.Locals("user_id").(string)
+
 	boxesStr := c.FormValue("boxes")
 	filePassword := c.FormValue("file_password")
-	mode := strings.TrimSpace(strings.ToLower(c.FormValue("mode")))
+
+	mode := strings.TrimSpace(
+		strings.ToLower(
+			c.FormValue("mode"),
+		),
+	)
+
 	if mode == "" {
 		mode = "smart"
 	}
 
-	var boxes []HighlightBox
+	var boxes []StrikeoutBox
+
 	if err := json.Unmarshal([]byte(boxesStr), &boxes); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"code":    "INVALID_HIGHLIGHT_DATA",
-			"message": "Failed to parse highlight selection data.",
+			"code":    "INVALID_STRIKEOUT_DATA",
+			"message": "Failed to parse strikeout selection data.",
 		})
 	}
 
@@ -126,7 +149,11 @@ func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+
+	inputPath := filepath.Join(
+		tempDir,
+		uuid.New().String()+"-"+filepath.Base(fileHeader.Filename),
+	)
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -138,31 +165,57 @@ func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 		_ = os.Remove(inputPath)
 	}()
 
-	outputPath, ocrPages, err := ctrl.service.HighlightPDF(inputPath, boxes, mode, filePassword)
+	outputPath, ocrPages, err := ctrl.service.StrikeoutPDF(
+		inputPath,
+		boxes,
+		mode,
+		filePassword,
+	)
+
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "HIGHLIGHT_ENGINE_FAILED",
-			"message": "Highlighter processing failure: " + err.Error(),
+			"code":    "STRIKEOUT_ENGINE_FAILED",
+			"message": "Strikeout processing failure: " + err.Error(),
 		})
 	}
+
 	defer func() {
 		_ = os.Remove(outputPath)
 	}()
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment(fmt.Sprintf("%s-highlighted.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
+
+	c.Attachment(
+		fmt.Sprintf(
+			"%s-strikeout.pdf",
+			strings.TrimSuffix(
+				fileHeader.Filename,
+				filepath.Ext(fileHeader.Filename),
+			),
+		),
+	)
 
 	sendErr := c.SendFile(outputPath)
 
 	if sendErr == nil && strings.TrimSpace(userID) != "" {
-		config.LogToolUsage(userID, "highlight", helper.CheckCreditUsage(c))
+
+		config.LogToolUsage(
+			userID,
+			"strikeout",
+			helper.CheckCreditUsage(c),
+		)
+
 		for i := 0; i < ocrPages; i++ {
-			config.LogToolUsage(userID, "ocr", helper.CheckCreditUsage(c))
+			config.LogToolUsage(
+				userID,
+				"ocr",
+				helper.CheckCreditUsage(c),
+			)
 		}
 	}
 
 	if sendErr == nil {
-		logUsageTimes(c, userID, "highlight", 1)
+		logUsageTimes(c, userID, "strikeout", 1)
 
 		logUsageTimes(c, userID, "ocr", ocrPages)
 	}
