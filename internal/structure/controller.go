@@ -576,9 +576,11 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 
 	properties, err := ctrl.service.GetMetadataPDF(inputPath, password)
 	if err != nil {
+		log.Printf("[METADATA ERROR] %v", err)
+
 		return c.Status(fiber.StatusUnauthorized).JSON(APIError{
 			Code:    "DECRYPTION_METADATA_FAILED",
-			Message: "Decryption runtime fault or unauthorized meta table structural mapping: " + err.Error(),
+			Message: err.Error(),
 		})
 	}
 
@@ -757,6 +759,70 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 		copies = 1
 	}
 
+	maxPages := 5
+	maxCopies := 2
+
+	if userID != "anonymous" {
+		var sub config.Subscription
+
+		if err := config.DB.
+			Where("user_id = ? AND status = ?", userID, "active").
+			First(&sub).Error; err == nil {
+
+			if sub.Tier == "pro" {
+				maxPages = 50
+				maxCopies = 10
+			}
+		}
+	}
+
+	selectedPages := 0
+
+	for _, part := range strings.Split(pageSelection, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		if strings.Contains(part, "-") {
+			r := strings.Split(part, "-")
+			if len(r) != 2 {
+				continue
+			}
+
+			start, err1 := strconv.Atoi(strings.TrimSpace(r[0]))
+			end, err2 := strconv.Atoi(strings.TrimSpace(r[1]))
+
+			if err1 == nil && err2 == nil && end >= start {
+				selectedPages += end - start + 1
+			}
+		} else {
+			if _, err := strconv.Atoi(part); err == nil {
+				selectedPages++
+			}
+		}
+	}
+
+	if selectedPages > maxPages {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code": "PAGE_LIMIT_EXCEEDED",
+			"message": fmt.Sprintf(
+				"Your subscription allows duplicating a maximum of %d pages at one time.",
+				maxPages,
+			),
+		})
+	}
+
+	if copies > maxCopies {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code": "COPY_LIMIT_EXCEEDED",
+			"message": fmt.Sprintf(
+				"Your subscription allows a maximum of %d copies per page.",
+				maxCopies,
+			),
+		})
+	}
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -824,6 +890,13 @@ func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
 		count = 1
 	}
 
+	if count > 10 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "BLANK_PAGE_LIMIT_EXCEEDED",
+			"message": "A maximum of 10 blank pages can be inserted in a single operation.",
+		})
+	}
+
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -863,7 +936,7 @@ func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
 	}()
 
 	if sendErr == nil {
-		config.LogToolUsage(userID, "duplicate", helper.CheckCreditUsage(c))
+		config.LogToolUsage(userID, "insert-blank", helper.CheckCreditUsage(c))
 	}
 
 	return sendErr

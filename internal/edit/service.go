@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const editPipelineScript = "scripts/pdf_edit_pipeline.py"
+
 type Service interface {
 	ExtractLayout(pdfPath string) ([]byte, error)
 	CompileLayout(originalPdf string, payload []byte) (string, error)
@@ -20,7 +22,7 @@ func NewService() Service {
 }
 
 func (s *service) ExtractLayout(pdfPath string) ([]byte, error) {
-	output, err := runPythonScript("scripts/pdf_to_layout.py", pdfPath)
+	output, err := runPythonScript(editPipelineScript, "extract", pdfPath)
 	if err != nil {
 		return nil, err
 	}
@@ -34,10 +36,9 @@ func (s *service) CompileLayout(originalPdf string, payload []byte) (string, err
 	}
 	defer os.Remove(tempJsonPath)
 
-	outPdfName := fmt.Sprintf("precision_edited_%s.pdf", uuid.New().String())
-	outPdfPath := filepath.Join(os.TempDir(), outPdfName)
+	outPdfPath := filepath.Join(os.TempDir(), fmt.Sprintf("precision_edited_%s.pdf", uuid.New().String()))
 
-	_, err := runPythonScript("scripts/patch_pdf_layout.py", originalPdf, outPdfPath, tempJsonPath)
+	_, err := runPythonScript(editPipelineScript, "compile", originalPdf, outPdfPath, tempJsonPath)
 	if err != nil {
 		return "", err
 	}
