@@ -76,6 +76,8 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 
 	payloadBytes := c.Body()
 
+	println(string(payloadBytes))
+
 	var tracker struct {
 		SourceTracker string `json:"source_tracker"`
 	}

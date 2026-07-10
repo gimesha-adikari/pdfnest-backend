@@ -365,8 +365,8 @@ def compile_document(original_pdf_path: str, output_pdf_path: str, pages_json_pa
         with open(pages_json_path, "r", encoding="utf-8") as f:
             layout_data = json.load(f)
 
-        upright_path = layout_data.get("upright_tracker", original_pdf_path)
-
+        upright_path = layout_data.get("upright_tracker") or original_pdf_path
+        
         orig_doc = fitz.open(original_pdf_path)
         source_doc = fitz.open(upright_path)
         output_doc = fitz.open()
