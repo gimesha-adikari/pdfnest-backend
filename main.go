@@ -44,7 +44,7 @@ func main() {
 		log.Printf("[DEBUG] File NOT found at hardcoded absolute path: %v", err)
 
 		if err := godotenv.Load(); err != nil {
-			log.Println("Warning: No .env file found. Falling back to system environment variables.")
+			log.Println("No .env file found, using Render environment variables.")
 		}
 	}
 
