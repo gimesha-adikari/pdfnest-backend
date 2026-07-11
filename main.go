@@ -52,7 +52,7 @@ func main() {
 
 	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
 	if allowedOrigins == "" {
-		allowedOrigins = "http://localhost:3000"
+		allowedOrigins = "http://localhost:3000,https://pdfnest-12uh.onrender.com"
 	}
 
 	app.Use(cors.New(cors.Config{
