@@ -2,15 +2,16 @@ package conversion
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"image/jpeg"
 	"io"
 	"mime/multipart"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"github.com/gen2brain/go-fitz"
 	"github.com/google/uuid"
 )
 
@@ -35,14 +36,13 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate disk memory space for temporary vector context: %v", err)
 	}
-
 	defer os.Remove(tempFilePath)
 
 	if _, err = io.Copy(dst, src); err != nil {
-		dst.Close()
+		_ = dst.Close()
 		return nil, fmt.Errorf("disk write failure on payload compilation pass: %v", err)
 	}
-	dst.Close()
+	_ = dst.Close()
 
 	targetPdfPath := tempFilePath
 
@@ -52,32 +52,58 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 			return nil, fmt.Errorf("failed to compile office document for preview generation: %v", err)
 		}
 		targetPdfPath = compiledPdfPath
-
 		defer os.Remove(targetPdfPath)
 	}
 
-	doc, err := fitz.New(targetPdfPath)
+	renderScript := filepath.Join(".", "scripts", "pdf_render_page.py")
+
+	request := map[string]any{
+		"documentPath": targetPdfPath,
+		"page":         pageNum,
+		"dpi":          72.0 * scale,
+	}
+
+	reqBytes, err := json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("raster engine initialization failure on target container tree: %v", err)
-	}
-	defer doc.Close()
-
-	adjustedPage := pageNum - 1
-	if adjustedPage < 0 || adjustedPage >= doc.NumPage() {
-		return nil, fmt.Errorf("requested bounds page index out of document limits: requested %d, total pages %d", pageNum, doc.NumPage())
+		return nil, fmt.Errorf("failed to encode render request: %v", err)
 	}
 
-	dpi := 72.0 * scale
-	img, err := doc.ImageDPI(adjustedPage, dpi)
+	pythonExec := filepath.Join(".", "venv", "bin", "python")
+	cmd := exec.Command(pythonExec, renderScript)
+	cmd.Stdin = bytes.NewReader(reqBytes)
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("raster image compression calculation pass rejected: %v", err)
+		return nil, fmt.Errorf("page render failed: %v; output: %s", err, strings.TrimSpace(string(output)))
 	}
 
-	var buf bytes.Buffer
-	err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85})
+	var resp struct {
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		ImagePath string `json:"imagePath"`
+	}
+
+	if err := json.Unmarshal(output, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse page render output: %v; raw: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	if !resp.Success {
+		if resp.Error == "" {
+			resp.Error = "unknown render error"
+		}
+		return nil, fmt.Errorf("page render failed: %s", resp.Error)
+	}
+
+	imgBytes, err := os.ReadFile(resp.ImagePath)
 	if err != nil {
-		return nil, fmt.Errorf("image encoding failure on data virtualization pass: %v", err)
+		return nil, fmt.Errorf("failed to read rendered image file: %v", err)
+	}
+	defer os.Remove(resp.ImagePath)
+
+	_, err = jpeg.Decode(bytes.NewReader(imgBytes))
+	if err != nil {
+		return nil, fmt.Errorf("rendered image is not a valid jpeg: %v", err)
 	}
 
-	return buf.Bytes(), nil
+	return imgBytes, nil
 }
