@@ -1,9 +1,9 @@
-// file: config/config.go
 package config
 
 import (
 	"log"
 	"os"
+	"pdfnest-backend/helper"
 	"pdfnest-backend/internal/models"
 	"time"
 
@@ -107,9 +107,12 @@ func ConnectDB() {
 	if count == 0 {
 		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
 
+		passwordHash, _ := helper.HashPassword("1234")
+
 		adminUser := User{
 			ID:            uuid.New().String(),
 			Email:         adminEmail,
+			PasswordHash:  passwordHash,
 			Role:          "admin",
 			Status:        "active",
 			EmailVerified: true,
