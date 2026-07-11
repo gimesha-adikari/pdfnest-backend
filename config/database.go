@@ -100,14 +100,22 @@ func ConnectDB() {
 	DB = database
 	log.Println("Database connection pool securely initialized and synced.")
 
-	adminEmail := "gimeshaadikari23@gmail.com"
+	adminEmail := os.Getenv("ADMIN_EMAIL")
+	if adminEmail == "" {
+		adminEmail = "admin@admin.com"
+	}
 	var count int64
 	DB.Model(&User{}).Where("email = ?", adminEmail).Count(&count)
 
 	if count == 0 {
 		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
 
-		passwordHash, _ := helper.HashPassword("1234")
+		adminPassword := os.Getenv("ADMIN_PASSWORD")
+
+		if adminPassword == "" {
+			adminPassword = "admin"
+		}
+		passwordHash, _ := helper.HashPassword(adminPassword)
 
 		adminUser := User{
 			ID:            uuid.New().String(),
