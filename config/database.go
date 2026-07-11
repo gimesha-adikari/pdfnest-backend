@@ -3,7 +3,6 @@ package config
 import (
 	"log"
 	"os"
-	"pdfnest-backend/helper"
 	"pdfnest-backend/internal/models"
 	"time"
 
@@ -115,7 +114,7 @@ func ConnectDB() {
 		if adminPassword == "" {
 			adminPassword = "admin"
 		}
-		passwordHash, _ := helper.HashPassword(adminPassword)
+		passwordHash, _ := HashPassword(adminPassword)
 
 		adminUser := User{
 			ID:            uuid.New().String(),

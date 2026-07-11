@@ -1,11 +1,9 @@
-package helper
-
-import "pdfnest-backend/config"
+package config
 
 func IsProUser(userID string) bool {
-	var sub config.Subscription
+	var sub Subscription
 
-	err := config.DB.
+	err := DB.
 		Where("user_id = ? AND status = ?", userID, "active").
 		First(&sub).Error
 
