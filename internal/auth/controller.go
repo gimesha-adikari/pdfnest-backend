@@ -372,7 +372,7 @@ func (ctrl *Controller) Login(c *fiber.Ctx) error {
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Lax",
+		SameSite: "None",
 	})
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
@@ -445,7 +445,7 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Lax",
+		SameSite: "None",
 	})
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
@@ -458,7 +458,7 @@ func (ctrl *Controller) Logout(c *fiber.Ctx) error {
 		Expires:  time.Now().Add(-24 * time.Hour),
 		HTTPOnly: true,
 		Secure:   true,
-		SameSite: "Lax",
+		SameSite: "None",
 	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "Logged out successfully"})
