@@ -1,7 +1,11 @@
-docling
-paddleocr
-paddlepaddle
+PyMuPDF
+Pillow
+pytesseract
+weasyprint
 python-docx
-markdown
-beautifulsoup4
-lxml
+pdf2docx
+pandas
+camelot-py[cv]
+pdfplumber
+python-pptx
+openpyxl

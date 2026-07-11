@@ -33,19 +33,8 @@ func main() {
 		log.Printf("[DEBUG] Expecting .env file to be here: %s", filepath.Join(dir, ".env"))
 	}
 
-	absPath := "/home/gimesha/My_Projects/go/pdfnest-backend/.env"
-	if _, err := os.Stat(absPath); err == nil {
-		log.Println("[DEBUG] File physically detected at absolute path. Attempting hardcoded parse...")
-		err = godotenv.Load(absPath)
-		if err != nil {
-			log.Printf("[DEBUG] godotenv failed parsing file content: %v", err)
-		}
-	} else {
-		log.Printf("[DEBUG] File NOT found at hardcoded absolute path: %v", err)
-
-		if err := godotenv.Load(); err != nil {
-			log.Println("No .env file found, using Render environment variables.")
-		}
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found; using Render environment variables.")
 	}
 
 	config.ConnectDB()
@@ -124,6 +113,13 @@ func main() {
 
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)
+
+	apiGroup.Get("/health", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"status":  "ok",
+			"service": "pdfnest-backend",
+		})
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
