@@ -69,6 +69,8 @@ func main() {
 
 	tasks.RegisterRoutes(app)
 
+	landing.RegisterRoutes(app)
+
 	apiGroup := app.Group("/api")
 
 	// Core Identity Infrastructure Package Mounting Domain Blocks
@@ -114,8 +116,6 @@ func main() {
 
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)
-
-	landing.RegisterRoutes(app)
 
 	apiGroup.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
