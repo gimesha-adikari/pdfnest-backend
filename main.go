@@ -11,6 +11,7 @@ import (
 	"pdfnest-backend/internal/content"
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/edit"
+	"pdfnest-backend/internal/landing"
 	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
@@ -113,6 +114,8 @@ func main() {
 
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)
+
+	landing.RegisterRoutes(app)
 
 	apiGroup.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{
