@@ -40,6 +40,13 @@ type ResendVerificationRequest struct {
 	Email string `json:"email"`
 }
 
+func isLocal() bool {
+	local := os.Getenv("LOCAL")
+	if local == "true" {
+		return true
+	}
+	return false
+}
 func NewController(s Service) *Controller {
 	return &Controller{service: s}
 }
@@ -366,14 +373,24 @@ func (ctrl *Controller) Login(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
 
-	c.Cookie(&fiber.Cookie{
+	isProduction := os.Getenv("APP_ENV") == "production"
+
+	cookie := &fiber.Cookie{
 		Name:     "auth_token",
 		Value:    token,
+		Path:     "/",
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: true,
-		Secure:   true,
-		SameSite: "None",
-	})
+		Secure:   isProduction,
+	}
+
+	if isProduction {
+		cookie.SameSite = "None"
+	} else {
+		cookie.SameSite = "Lax"
+	}
+
+	c.Cookie(cookie)
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
 }
@@ -439,27 +456,48 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
 
-	c.Cookie(&fiber.Cookie{
+	isProduction := os.Getenv("APP_ENV") == "production"
+
+	cookie := &fiber.Cookie{
 		Name:     "auth_token",
 		Value:    token,
+		Path:     "/",
 		Expires:  time.Now().Add(24 * time.Hour),
 		HTTPOnly: true,
-		Secure:   true,
-		SameSite: "None",
-	})
+		Secure:   isProduction,
+	}
+
+	if isProduction {
+		cookie.SameSite = "None"
+	} else {
+		cookie.SameSite = "Lax"
+	}
+
+	c.Cookie(cookie)
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
 }
 
 func (ctrl *Controller) Logout(c *fiber.Ctx) error {
-	c.Cookie(&fiber.Cookie{
+
+	isProduction := os.Getenv("APP_ENV") == "production"
+
+	cookie := &fiber.Cookie{
 		Name:     "auth_token",
 		Value:    "",
+		Path:     "/",
 		Expires:  time.Now().Add(-24 * time.Hour),
 		HTTPOnly: true,
-		Secure:   true,
-		SameSite: "None",
-	})
+		Secure:   isProduction,
+	}
+
+	if isProduction {
+		cookie.SameSite = "None"
+	} else {
+		cookie.SameSite = "Lax"
+	}
+
+	c.Cookie(cookie)
 
 	return c.JSON(fiber.Map{"success": true, "message": "Logged out successfully"})
 }

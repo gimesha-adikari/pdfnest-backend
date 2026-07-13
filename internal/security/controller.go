@@ -4,8 +4,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -26,8 +24,6 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Lock(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	password := c.FormValue("password")
 	if password == "" {
@@ -79,15 +75,10 @@ func (ctrl *Controller) Lock(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary encrypted PDF at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "locked", helper.CheckCreditUsage(c))
-	}
 	return err
 }
 
 func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	password := c.FormValue("password")
 	if password == "" {
@@ -139,16 +130,10 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary decrypted PDF at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "unlocked", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -185,8 +170,6 @@ func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
 
 	fullOutPath := filepath.Join(os.TempDir(), outFileName)
 	defer os.Remove(fullOutPath)
-
-	config.LogToolUsage(userID, "redact", helper.CheckCreditUsage(c))
 
 	return c.Download(fullOutPath)
 }

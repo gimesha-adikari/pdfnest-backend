@@ -4,9 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
-
+	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/tasks"
 
 	"github.com/gofiber/fiber/v2"
@@ -27,8 +25,6 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -71,15 +67,10 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 	c.Set("Content-Type", "text/plain")
 	c.Attachment(filepath.Base(outputPath))
 
-	config.LogToolUsage(userID, "extract_text_from_pdf", helper.CheckCreditUsage(c))
-
 	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
-
 	form, err := c.MultipartForm()
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -133,15 +124,10 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 
 	_ = os.Remove(outputPath)
 
-	if err == nil {
-		config.LogToolUsage(userID, "image_to_text_pdf", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
-
 	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
@@ -158,12 +144,20 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		return c.Status(500).JSON(APIError{Code: "DISK_ERR", Message: "Failed to write workspace data cache"})
 	}
 
-	creditUsage := helper.CheckCreditUsage(c)
+	reservation, err := billing.ReserveFromRequest(c, userID, billing.ExtractTextPDF)
+	if err != nil {
+		_ = os.Remove(inputPath)
+		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
+			Code:    "BILLING_BLOCKED",
+			Message: err.Error(),
+		})
+	}
 
-	go func(id, srcPath string) {
+	go func(id, srcPath, reservationID string) {
 		defer func() {
 			_ = os.Remove(srcPath)
 			if r := recover(); r != nil {
+				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", "Subprocess thread failure occurred.")
 			}
 		}()
@@ -175,22 +169,27 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 			"Running OCR and creating searchable PDF...",
 			"",
 		)
+
 		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath)
 		if err != nil {
+			_ = billing.Default.Release(reservationID)
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+		if err := billing.Default.Commit(reservationID); err != nil {
+			_ = billing.Default.Release(reservationID)
+			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			return
+		}
 
-		config.LogToolUsage(userID, "extract_text_from_pdf", creditUsage)
-	}(taskId, inputPath)
+		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+	}(taskId, inputPath, reservation.ID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
-
 	userID := c.Locals("user_id").(string)
 
 	form, err := c.MultipartForm()
@@ -202,8 +201,6 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	if len(files) == 0 {
 		return c.Status(400).JSON(APIError{Code: "MISSING_IMAGES", Message: "No file targets dropped inside body array"})
 	}
-
-	creditUsage := helper.CheckCreditUsage(c)
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
@@ -217,28 +214,45 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	go func(id string, imgPaths []string) {
+	reservation, err := billing.ReserveFromRequest(c, userID, billing.ImageToTextPDF)
+	if err != nil {
+		for _, p := range tempPaths {
+			_ = os.Remove(p)
+		}
+		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
+			Code:    "BILLING_BLOCKED",
+			Message: err.Error(),
+		})
+	}
+
+	go func(id string, imgPaths []string, reservationID string) {
 		defer func() {
 			for _, p := range imgPaths {
 				_ = os.Remove(p)
 			}
 			if r := recover(); r != nil {
+				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", "Subprocess matrix generation fault.")
 			}
 		}()
 
 		tasks.Registry.Set(id, "PROCESSING", 35, "Scanning character grid topologies and building PDF layout layers...", "")
+
 		outPath, err := ctrl.service.ImageToTextPDF(imgPaths)
 		if err != nil {
+			_ = billing.Default.Release(reservationID)
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
 			return
 		}
 
+		if err := billing.Default.Commit(reservationID); err != nil {
+			_ = billing.Default.Release(reservationID)
+			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			return
+		}
+
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-
-		config.LogToolUsage(userID, "image_to_text_pdf", creditUsage)
-
-	}(taskId, tempPaths)
+	}(taskId, tempPaths, reservation.ID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }

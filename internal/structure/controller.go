@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
 	"strconv"
 	"strings"
 
@@ -29,8 +28,6 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Merge(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	form, err := c.MultipartForm()
 	if err != nil {
@@ -87,16 +84,10 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Merge: Failed to delete output PDF at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "merge", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) Split(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
@@ -151,16 +142,10 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Split: Failed to delete output split file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "split", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	rotationsRaw := c.FormValue("rotations")
 	if rotationsRaw == "" {
@@ -218,16 +203,10 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Rotate: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "rotate", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
@@ -282,16 +261,10 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "delete", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	sequenceRaw := c.FormValue("sequence")
 	if sequenceRaw == "" {
@@ -346,16 +319,10 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "reorder", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -417,16 +384,10 @@ func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Watermark: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "watermark", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	description := c.FormValue("description")
 	if description == "" {
@@ -472,16 +433,10 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "add_page_numbers", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -538,16 +493,10 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete output file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "update_metadata", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -584,14 +533,10 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 		})
 	}
 
-	config.LogToolUsage(userID, "fetch_metadata", helper.CheckCreditUsage(c))
-
 	return c.JSON(properties)
 }
 
 func (ctrl *Controller) Repair(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -625,14 +570,10 @@ func (ctrl *Controller) Repair(c *fiber.Ctx) error {
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("repaired_" + filepath.Base(fileHeader.Filename))
 
-	config.LogToolUsage(userID, "repair", helper.CheckCreditUsage(c))
-
 	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) Sign(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	pdfHeader, err := c.FormFile("file")
 	if err != nil {
@@ -673,15 +614,11 @@ func (ctrl *Controller) Sign(c *fiber.Ctx) error {
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("signed_" + filepath.Base(pdfHeader.Filename))
 
-	config.LogToolUsage(userID, "sign", helper.CheckCreditUsage(c))
-
 	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) Crop(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
 
-	// Expecting string coordinates format directly from the workspace frontend layout (e.g. "[10 10 400 400]" or percentage strings)
 	cropBoxDesc := c.FormValue("box")
 	if cropBoxDesc == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -730,20 +667,11 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Crop: Failed to delete output split file at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "crop", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
-	var userID string
-	if val, ok := c.Locals("user_id").(string); ok {
-		userID = val
-	} else {
-		userID = "anonymous"
-	}
+	var userID = c.Locals("user_id").(string)
 
 	pageSelection := c.FormValue("pages")
 	if pageSelection == "" {
@@ -762,17 +690,15 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 	maxPages := 5
 	maxCopies := 2
 
-	if userID != "anonymous" {
-		var sub config.Subscription
+	var sub config.Subscription
 
-		if err := config.DB.
-			Where("user_id = ? AND status = ?", userID, "active").
-			First(&sub).Error; err == nil {
+	if err := config.DB.
+		Where("user_id = ? AND status = ?", userID, "active").
+		First(&sub).Error; err == nil {
 
-			if sub.Tier == "pro" {
-				maxPages = 50
-				maxCopies = 10
-			}
+		if sub.Tier == "pro" {
+			maxPages = 50
+			maxCopies = 10
 		}
 	}
 
@@ -864,15 +790,10 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 		_ = os.Remove(outputPath)
 	}()
 
-	if sendErr == nil {
-		config.LogToolUsage(userID, "duplicate", helper.CheckCreditUsage(c))
-	}
-
 	return sendErr
 }
 
 func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
 
 	insertAt := c.FormValue("insertAt")
 
@@ -934,10 +855,6 @@ func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
 	defer func() {
 		_ = os.Remove(outputPath)
 	}()
-
-	if sendErr == nil {
-		config.LogToolUsage(userID, "insert-blank", helper.CheckCreditUsage(c))
-	}
 
 	return sendErr
 }

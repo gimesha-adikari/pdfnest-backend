@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
+	"pdfnest-backend/internal/billing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -37,7 +37,6 @@ func countUniqueStrikeoutPages(boxes []StrikeoutBox) int {
 }
 
 func (s *structureService) StrikeoutPDF(inputPath string, boxes []StrikeoutBox, mode, filePassword string) (string, int, error) {
-
 	tempDir := os.TempDir()
 
 	outputPath := filepath.Join(
@@ -115,7 +114,6 @@ func (s *structureService) StrikeoutPDF(inputPath string, boxes []StrikeoutBox, 
 }
 
 func (ctrl *Controller) Strikeout(c *fiber.Ctx) error {
-
 	userID, _ := c.Locals("user_id").(string)
 
 	boxesStr := c.FormValue("boxes")
@@ -139,6 +137,13 @@ func (ctrl *Controller) Strikeout(c *fiber.Ctx) error {
 			"message": "Failed to parse strikeout selection data.",
 		})
 	}
+
+	ocrPages := 0
+	if mode == "ocr" {
+		ocrPages = countUniqueStrikeoutPages(boxes)
+	}
+
+	billTool, billPages := billing.SelectStrikeoutBilling(mode, ocrPages)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -165,13 +170,27 @@ func (ctrl *Controller) Strikeout(c *fiber.Ctx) error {
 		_ = os.Remove(inputPath)
 	}()
 
-	outputPath, ocrPages, err := ctrl.service.StrikeoutPDF(
+	reservation, err := billing.Default.Reserve(userID, billTool, billPages, 0, c.Path())
+	if err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "BILLING_BLOCKED",
+			"message": err.Error(),
+		})
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = billing.Default.Release(reservation.ID)
+		}
+	}()
+
+	outputPath, _, err := ctrl.service.StrikeoutPDF(
 		inputPath,
 		boxes,
 		mode,
 		filePassword,
 	)
-
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "STRIKEOUT_ENGINE_FAILED",
@@ -196,29 +215,15 @@ func (ctrl *Controller) Strikeout(c *fiber.Ctx) error {
 	)
 
 	sendErr := c.SendFile(outputPath)
-
-	if sendErr == nil && strings.TrimSpace(userID) != "" {
-
-		config.LogToolUsage(
-			userID,
-			"strikeout",
-			helper.CheckCreditUsage(c),
-		)
-
-		for i := 0; i < ocrPages; i++ {
-			config.LogToolUsage(
-				userID,
-				"ocr",
-				helper.CheckCreditUsage(c),
-			)
-		}
+	if sendErr != nil {
+		return sendErr
 	}
 
-	if sendErr == nil {
-		logUsageTimes(c, userID, "strikeout", 1)
-
-		logUsageTimes(c, userID, "ocr", ocrPages)
+	if err := billing.Default.Commit(reservation.ID); err != nil {
+		log.Printf("[BILLING] strikeout commit failed: %v", err)
+		return nil
 	}
 
-	return sendErr
+	committed = true
+	return nil
 }

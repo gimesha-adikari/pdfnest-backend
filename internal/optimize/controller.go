@@ -4,8 +4,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -25,8 +23,6 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Compress(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -70,16 +66,10 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary optimized output PDF at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "compress", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -115,8 +105,6 @@ func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("grayscale_" + filepath.Base(fileHeader.Filename))
-
-	config.LogToolUsage(userID, "grayscale", helper.CheckCreditUsage(c))
 
 	return c.SendFile(outputPath)
 }

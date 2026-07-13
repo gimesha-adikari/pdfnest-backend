@@ -1,12 +1,9 @@
-// file: internal/edit/controller.go
 package edit
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -23,8 +20,6 @@ func NewController(s Service) *Controller {
 }
 
 func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -66,13 +61,10 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	mappedResponse["source_tracker"] = tempPdfPath
 
-	config.LogToolUsage(userID, "pdf_edit_extract", helper.CheckCreditUsage(c))
-
 	return c.JSON(mappedResponse)
 }
 
 func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
 
 	payloadBytes := c.Body()
 
@@ -117,10 +109,6 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 
 	if cleanupErr := os.Remove(fullOutPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
 		println("[CLEANUP WARNING] Failed to purge temporary output compiled PDF:", cleanupErr.Error())
-	}
-
-	if err == nil {
-		config.LogToolUsage(userID, "pdf_edit_compile", helper.CheckCreditUsage(c))
 	}
 
 	return err

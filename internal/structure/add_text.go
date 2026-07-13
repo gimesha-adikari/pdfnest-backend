@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
 	"strconv"
 	"strings"
 
@@ -91,7 +89,6 @@ func (s *structureService) AddTextToPDF(inputPath string, elements []TextElement
 }
 
 func (ctrl *Controller) AddText(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
 	elementsStr := c.FormValue("elements")
 
 	var elements []TextElement
@@ -139,10 +136,6 @@ func (ctrl *Controller) AddText(c *fiber.Ctx) error {
 	defer func() {
 		_ = os.Remove(outputPath)
 	}()
-
-	if sendErr == nil {
-		config.LogToolUsage(userID, "duplicate", helper.CheckCreditUsage(c))
-	}
 
 	return sendErr
 }

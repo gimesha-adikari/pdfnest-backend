@@ -6,8 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
+	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/tasks"
 	"strconv"
 
@@ -43,8 +42,6 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	form, err := c.MultipartForm()
 	if err != nil {
@@ -101,16 +98,10 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 		log.Printf("[CLEANUP WARNING] Failed to purge temporary output compiled PDF at %s: %v", outputPath, cleanupErr)
 	}
 
-	if err == nil {
-		config.LogToolUsage(userID, "images_to_pdf", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -150,10 +141,6 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 
 	if cleanupErr := os.Remove(zipOutputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
 		log.Printf("[CLEANUP WARNING] Failed to delete temporary output ZIP file archive at %s: %v", zipOutputPath, cleanupErr)
-	}
-
-	if err == nil {
-		config.LogToolUsage(userID, "pdf_to_images", helper.CheckCreditUsage(c))
 	}
 
 	return err
@@ -202,8 +189,6 @@ func length(b []byte) int {
 
 func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 
-	userID := c.Locals("user_id").(string)
-
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -233,16 +218,10 @@ func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 
 	defer func() { _ = os.Remove(outputPath) }()
 
-	if err == nil {
-		config.LogToolUsage(userID, "office_to_pdf", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
@@ -277,10 +256,6 @@ func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
 
 	defer func() { _ = os.Remove(outputPath) }()
 
-	if err == nil {
-		config.LogToolUsage(userID, "webpage_capture", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
@@ -294,8 +269,6 @@ type PrintOptions struct {
 }
 
 func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -332,16 +305,10 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 
 	defer func() { _ = os.Remove(outputPath) }()
 
-	if err == nil {
-		config.LogToolUsage(userID, "markdown_to_pdf", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
-
-	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -383,15 +350,10 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 
 	defer func() { _ = os.Remove(outputPath) }()
 
-	if err == nil {
-		config.LogToolUsage(userID, "code_to_pdf", helper.CheckCreditUsage(c))
-	}
-
 	return err
 }
 
 func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
-
 	userID := c.Locals("user_id").(string)
 
 	targetURL := c.FormValue("url")
@@ -403,8 +365,6 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating sandboxed headless rendering nodes...", "")
-
-	creditUsage := helper.CheckCreditUsage(c)
 
 	opts := PrintOptions{}
 	if paperSize := c.FormValue("paperSize"); paperSize != "" {
@@ -431,9 +391,17 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	go func(id, target string, printOpts PrintOptions, uID string) {
+	reservation, err := billing.Default.Reserve(userID, billing.HTMLToPDF, 0, 0, c.Path())
+	if err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	go func(id, target string, printOpts PrintOptions, reservationID string) {
 		defer func() {
 			if r := recover(); r != nil {
+				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r))
 			}
 		}()
@@ -442,20 +410,24 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		outPath, err := ctrl.service.HtmlToPdf(target, printOpts)
 		if err != nil {
+			_ = billing.Default.Release(reservationID)
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+		if err := billing.Default.Commit(reservationID); err != nil {
+			_ = billing.Default.Release(reservationID)
+			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			return
+		}
 
-		config.LogToolUsage(uID, "html_to_pdf", creditUsage)
-	}(taskId, targetURL, opts, userID)
+		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+	}(taskId, targetURL, opts, reservation.ID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
-
 	userID := c.Locals("user_id").(string)
 
 	fileHeader, err := c.FormFile("file")
@@ -472,7 +444,9 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(fileHeader.Filename))
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		tasks.Registry.Set(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.")
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Disk caching allocation error"})
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Disk caching allocation error",
+		})
 	}
 
 	opts := PrintOptions{}
@@ -487,36 +461,81 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	creditUsage := helper.CheckCreditUsage(c)
+	reservation, err := billing.Default.Reserve(
+		userID,
+		billing.ConvertMarkdownToPDF,
+		0,
+		0,
+		c.Path(),
+	)
+	if err != nil {
+		_ = os.Remove(inputPath)
 
-	go func(id, srcPath string, printOpts PrintOptions, uID string) {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"error": err.Error(),
+		})
+	}
+
+	go func(id, srcPath string, printOpts PrintOptions, reservationID string) {
+
 		defer func() {
 			_ = os.Remove(srcPath)
+
 			if r := recover(); r != nil {
-				tasks.Registry.Set(id, "FAILED", 0, "", "Text compilation parser structural error.")
+				_ = billing.Default.Release(reservationID)
+
+				tasks.Registry.Set(
+					id,
+					"FAILED",
+					0,
+					"",
+					"Text compilation parser structural error.",
+				)
 			}
 		}()
 
-		tasks.Registry.Set(id, "PROCESSING", 40, "Parsing tokens and injecting layout styling variables...", "")
+		tasks.Registry.Set(
+			id,
+			"PROCESSING",
+			40,
+			"Parsing tokens and injecting layout styling variables...",
+			"",
+		)
 
 		outPath, err := ctrl.service.MarkdownToPdf(srcPath, printOpts)
 		if err != nil {
+			_ = billing.Default.Release(reservationID)
+
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			return
+		}
+
+		if err := billing.Default.Commit(reservationID); err != nil {
+
+			_ = os.Remove(outPath)
+			_ = billing.Default.Release(reservationID)
+
+			tasks.Registry.Set(
+				id,
+				"FAILED",
+				0,
+				"",
+				"Billing finalization failed.",
+			)
 			return
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-		config.LogToolUsage(uID, "markdown_to_pdf", creditUsage)
-	}(taskId, inputPath, opts, userID)
+	}(taskId, inputPath, opts, reservation.ID)
 
-	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"taskId": taskId,
+	})
 }
 
 func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-
-		userID := c.Locals("user_id").(string)
 
 		file, err := c.FormFile("file")
 		if err != nil {
@@ -542,8 +561,6 @@ func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Conversion failed: " + err.Error()})
 		}
 
-		config.LogToolUsage(userID, "pdf_to_"+targetFormat, helper.CheckCreditUsage(c))
-
 		c.Set("Content-Type", "application/octet-stream")
 		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", file.Filename, targetFormat))
 
@@ -552,7 +569,6 @@ func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 }
 
 func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
 
 	form, err := c.MultipartForm()
 	if err != nil {
@@ -616,10 +632,6 @@ func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
 	err = c.SendFile(outputPath)
 
 	_ = os.Remove(outputPath)
-
-	if err == nil {
-		config.LogToolUsage(userID, "custom_images_to_pdf", helper.CheckCreditUsage(c))
-	}
 
 	return err
 }

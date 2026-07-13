@@ -1,14 +1,16 @@
-// file: internal/structure/underline.go
 package structure
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"pdfnest-backend/internal/billing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -100,12 +102,7 @@ func (s *structureService) UnderlinePDF(inputPath string, boxes []UnderlineBox, 
 }
 
 func (ctrl *Controller) Underline(c *fiber.Ctx) error {
-	userID := ""
-	if v := c.Locals("user_id"); v != nil {
-		if s, ok := v.(string); ok {
-			userID = s
-		}
-	}
+	userID, _ := c.Locals("user_id").(string)
 
 	boxesStr := c.FormValue("boxes")
 	filePassword := c.FormValue("file_password")
@@ -121,6 +118,13 @@ func (ctrl *Controller) Underline(c *fiber.Ctx) error {
 			"message": "Failed to parse underline selection data.",
 		})
 	}
+
+	ocrPages := 0
+	if mode == "ocr" {
+		ocrPages = countUniquePages(boxes)
+	}
+
+	billTool, billPages := billing.SelectUnderlineBilling(mode, ocrPages)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -143,7 +147,22 @@ func (ctrl *Controller) Underline(c *fiber.Ctx) error {
 		_ = os.Remove(inputPath)
 	}()
 
-	outputPath, ocrPages, err := ctrl.service.UnderlinePDF(inputPath, boxes, mode, filePassword)
+	reservation, err := billing.Default.Reserve(userID, billTool, billPages, 0, c.Path())
+	if err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "BILLING_BLOCKED",
+			"message": err.Error(),
+		})
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = billing.Default.Release(reservation.ID)
+		}
+	}()
+
+	outputPath, _, err := ctrl.service.UnderlinePDF(inputPath, boxes, mode, filePassword)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "UNDERLINE_ENGINE_FAILED",
@@ -155,16 +174,19 @@ func (ctrl *Controller) Underline(c *fiber.Ctx) error {
 	c.Attachment(fmt.Sprintf("%s-underlined.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
 
 	sendErr := c.SendFile(outputPath)
+	if sendErr != nil {
+		return sendErr
+	}
 
 	defer func() {
 		_ = os.Remove(outputPath)
 	}()
 
-	if sendErr == nil {
-		logUsageTimes(c, userID, "underline", 1)
-
-		logUsageTimes(c, userID, "ocr", ocrPages)
+	if err := billing.Default.Commit(reservation.ID); err != nil {
+		log.Printf("[BILLING] underline commit failed: %v", err)
+		return nil
 	}
 
-	return sendErr
+	committed = true
+	return nil
 }

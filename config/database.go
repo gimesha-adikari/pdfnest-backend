@@ -35,13 +35,38 @@ type Subscription struct {
 	PaddleCustomerID     string    `gorm:"type:varchar(255);uniqueIndex"`
 	PaddleSubscriptionID string    `gorm:"type:varchar(255);uniqueIndex"`
 	Status               string    `gorm:"type:varchar(50);not null"`
-	Tier                 string    `gorm:"type:varchar(50);default:'free'"` // 'free', 'plus', or 'pro'
-	CustomCredits        int       `gorm:"default:0;not null"`              // ADDED: Lifetime remaining purchased package tokens
+	Tier                 string    `gorm:"type:varchar(50);default:'free'"` // free, plus, pro
+	CustomCredits        int       `gorm:"default:0;not null"`              // extra paid credits
 	UpdateURL            string    `gorm:"type:text"`
 	CancelURL            string    `gorm:"type:text"`
 	CurrentPeriodEnd     time.Time `gorm:"not null"`
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+
+	UsedUnits3h          int       `gorm:"default:0;not null"`
+	UsedUnitsDaily       int       `gorm:"default:0;not null"`
+	UsedUnitsMonthly     int       `gorm:"default:0;not null"`
+	Window3HResetAt      time.Time `gorm:"not null"`
+	WindowDailyResetAt   time.Time `gorm:"not null"`
+	WindowMonthlyResetAt time.Time `gorm:"not null"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type BillingReservation struct {
+	ID          string    `gorm:"type:uuid;primaryKey"`
+	UserID      string    `gorm:"type:uuid;index;not null"`
+	User        User      `gorm:"constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	ToolName    string    `gorm:"type:varchar(100);not null"`
+	PagesCount  int       `gorm:"default:0;not null"`
+	ImagesCount int       `gorm:"default:0;not null"`
+	Units       int       `gorm:"default:0;not null"`
+	PlanUnits   int       `gorm:"default:0;not null"`
+	CreditUnits int       `gorm:"default:0;not null"`
+	Status      string    `gorm:"type:varchar(20);default:'reserved';not null"`
+	RequestPath string    `gorm:"type:text"`
+	ExpiresAt   time.Time `gorm:"index;not null"`
+	CreatedAt   time.Time `gorm:"index"`
+	UpdatedAt   time.Time
 }
 
 type Transaction struct {
@@ -61,7 +86,7 @@ type UsageLog struct {
 	UserID     string    `gorm:"type:uuid;index;not null"`
 	User       User      `gorm:"constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 	ToolName   string    `gorm:"type:varchar(100);not null"`
-	IsCredit   bool      `gorm:"default:false;not null"` // ADDED: Marks if transaction consumed a standalone token block instead of subscription quota
+	IsCredit   bool      `gorm:"default:false;not null"`
 	PagesCount int       `gorm:"default:0"`
 	CreatedAt  time.Time `gorm:"index"`
 }
@@ -91,6 +116,19 @@ func ConnectDB() {
 	//	log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
 	//}
 
+	err = database.AutoMigrate(
+		&User{},
+		&Subscription{},
+		&Transaction{},
+		&UsageLog{},
+		&WebhookLog{},
+		&BillingReservation{},
+		&models.HomePageContent{},
+		&models.SubscribePageContent{},
+		&models.DynamicToolItem{},
+		models.AboutPageContent{},
+	)
+
 	err = database.AutoMigrate(&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &WebhookLog{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{}, models.AboutPageContent{})
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)
@@ -103,6 +141,7 @@ func ConnectDB() {
 	if adminEmail == "" {
 		adminEmail = "admin@admin.com"
 	}
+
 	var count int64
 	DB.Model(&User{}).Where("email = ?", adminEmail).Count(&count)
 
@@ -110,10 +149,10 @@ func ConnectDB() {
 		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
 
 		adminPassword := os.Getenv("ADMIN_PASSWORD")
-
 		if adminPassword == "" {
 			adminPassword = "admin"
 		}
+
 		passwordHash, _ := HashPassword(adminPassword)
 
 		adminUser := User{
@@ -132,6 +171,8 @@ func ConnectDB() {
 			return
 		}
 
+		now := time.Now()
+
 		adminSub := Subscription{
 			ID:                   uuid.New().String(),
 			UserID:               adminUser.ID,
@@ -140,9 +181,17 @@ func ConnectDB() {
 			Status:               "active",
 			Tier:                 "pro",
 			CustomCredits:        9999,
-			CurrentPeriodEnd:     time.Now().AddDate(50, 0, 0),
-			CreatedAt:            time.Now(),
-			UpdatedAt:            time.Now(),
+			CurrentPeriodEnd:     now.AddDate(50, 0, 0),
+
+			UsedUnits3h:          0,
+			UsedUnitsDaily:       0,
+			UsedUnitsMonthly:     0,
+			Window3HResetAt:      now.Add(3 * time.Hour),
+			WindowDailyResetAt:   time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, now.Location()),
+			WindowMonthlyResetAt: time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).AddDate(0, 1, 0),
+
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 
 		if err := DB.Create(&adminSub).Error; err != nil {

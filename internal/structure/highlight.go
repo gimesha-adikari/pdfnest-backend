@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"pdfnest-backend/config"
-	"pdfnest-backend/helper"
+	"pdfnest-backend/internal/billing"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -102,6 +102,7 @@ func (s *structureService) HighlightPDF(inputPath string, boxes []HighlightBox, 
 
 func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 	userID, _ := c.Locals("user_id").(string)
+
 	boxesStr := c.FormValue("boxes")
 	filePassword := c.FormValue("file_password")
 	mode := strings.TrimSpace(strings.ToLower(c.FormValue("mode")))
@@ -116,6 +117,13 @@ func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 			"message": "Failed to parse highlight selection data.",
 		})
 	}
+
+	ocrPages := 0
+	if mode == "ocr" {
+		ocrPages = countUniqueHighlightPages(boxes)
+	}
+
+	billTool, billPages := billing.SelectHighlightBilling(mode, ocrPages)
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -138,7 +146,23 @@ func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 		_ = os.Remove(inputPath)
 	}()
 
-	outputPath, ocrPages, err := ctrl.service.HighlightPDF(inputPath, boxes, mode, filePassword)
+	// Reserve before processing so this route still respects quotas.
+	reservation, err := billing.Default.Reserve(userID, billTool, billPages, 0, c.Path())
+	if err != nil {
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "BILLING_BLOCKED",
+			"message": err.Error(),
+		})
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = billing.Default.Release(reservation.ID)
+		}
+	}()
+
+	outputPath, _, err := ctrl.service.HighlightPDF(inputPath, boxes, mode, filePassword)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "HIGHLIGHT_ENGINE_FAILED",
@@ -153,19 +177,15 @@ func (ctrl *Controller) Highlight(c *fiber.Ctx) error {
 	c.Attachment(fmt.Sprintf("%s-highlighted.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
 
 	sendErr := c.SendFile(outputPath)
-
-	if sendErr == nil && strings.TrimSpace(userID) != "" {
-		config.LogToolUsage(userID, "highlight", helper.CheckCreditUsage(c))
-		for i := 0; i < ocrPages; i++ {
-			config.LogToolUsage(userID, "ocr", helper.CheckCreditUsage(c))
-		}
+	if sendErr != nil {
+		return sendErr
 	}
 
-	if sendErr == nil {
-		logUsageTimes(c, userID, "highlight", 1)
-
-		logUsageTimes(c, userID, "ocr", ocrPages)
+	if err := billing.Default.Commit(reservation.ID); err != nil {
+		log.Printf("[BILLING] highlight commit failed: %v", err)
+		return nil
 	}
 
-	return sendErr
+	committed = true
+	return nil
 }
