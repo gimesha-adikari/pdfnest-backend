@@ -257,6 +257,8 @@ func syncWindows(sub *config.Subscription, now time.Time) {
 	if (sub.Tier == "pro" || sub.Tier == "plus") && !sub.CurrentPeriodEnd.IsZero() && now.After(sub.CurrentPeriodEnd) {
 		sub.Tier = "free"
 		sub.Status = "expired"
+		sub.UpdateURL = ""
+		sub.CancelURL = ""
 	}
 
 	if sub.Window3HResetAt.IsZero() || !now.Before(sub.Window3HResetAt) {

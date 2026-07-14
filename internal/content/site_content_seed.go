@@ -92,34 +92,60 @@ func SeedSiteContent() {
 			FreeBulletPoints: "Core PDF tools,Light OCR,Secure processing,Small unit allowance,3-hour / daily / monthly limits",
 
 			PlusTitle:        "Plus",
-			PlusPrice:        "9",
+			PlusMonthlyPrice: "4.99",
+			PlusYearlyPrice:  "49.99",
 			PlusSubtitle:     "For active users",
 			PlusBulletPoints: "Everything in Free,More units per window,Full OCR support,Better burst allowance,Priority processing",
 
 			ProTitle:        "Pro",
-			ProPrice:        "29",
+			ProMonthlyPrice: "9.99",
+			ProYearlyPrice:  "99.99",
 			ProSubtitle:     "For professionals",
 			ProBulletPoints: "Everything in Plus,Highest unit allowance,Advanced workflows,Large file handling,Premium workspace tools",
+
+			TrialText: "7-day free trial",
 
 			SecurityTitle:    "Your files stay completely private",
 			SecuritySubtitle: "Document security is built into the core architecture.",
 			SecurityTags:     "Temporary processing,Secure transfers,Automatic cleanup,No permanent storage",
 
-			CtaGuestTitle:   "Create a free account and start using PDFNest today.",
-			CtaFreeTitle:    "Need more room to work?",
-			CtaFreeSubtitle: "Upgrade to Plus or Pro for larger unit windows and heavier workflows.",
-			CtaPlusTitle:    "Ready for bigger jobs?",
-			CtaProTitle:     "You already have full access.",
-			CtaProSubtitle:  "Your account can use the highest available unit windows and workflow limits.",
+			CtaGuestTitle: "Create a free account and start using PDFNest today.",
+
+			CtaFreeTitle:    "Need more power?",
+			CtaFreeSubtitle: "Choose monthly or yearly billing and start with a 7-day free trial.",
+
+			CtaPlusTitle:    "Need even higher limits?",
+			CtaPlusSubtitle: "Upgrade to Pro for Studio, Interactive Canvas and maximum processing limits.",
+
+			CtaProTitle:    "You're on our most powerful plan.",
+			CtaProSubtitle: "Manage your subscription anytime from your account settings.",
 
 			FaqsJSON: `[
-				{"q": "Is PDFNest free?", "a": "Yes! The Free Plan gives you access to core PDF tools with a limited unit allowance and separate 3-hour, daily, and monthly windows."},
-				{"q": "How does billing work now?", "a": "PDFNest now uses units. Simple tools cost fewer units, heavy tools cost more, and some tools can charge extra based on pages or OCR work."},
-				{"q": "What does Plus include?", "a": "Plus gives you more units, better burst capacity, and stronger support for OCR and larger jobs."},
-				{"q": "What does Pro include?", "a": "Pro is the highest tier. It includes the largest unit allowance, the best burst capacity, and the most room for heavy workflows."},
-				{"q": "Can I cancel anytime?", "a": "Absolutely. You can upgrade, downgrade, or cancel your active billing status inside your settings panel at any point."},
-				{"q": "Are my files stored?", "a": "Never. Files are processed in temporary runtime sandboxes and cleaned up after processing."}
-			]`,
+    {
+        "q":"Is PDFNest free?",
+        "a":"Yes. The Free plan includes essential PDF tools with limited daily usage."
+    },
+    {
+        "q":"Do Plus and Pro include a free trial?",
+        "a":"Yes. Every new Plus and Pro subscription includes a 7-day free trial."
+    },
+    {
+        "q":"Can I choose monthly or yearly billing?",
+        "a":"Yes. Both Plus and Pro are available with monthly and yearly billing."
+    },
+    {
+        "q":"Can I cancel during the trial?",
+        "a":"Yes. You can cancel at any time during the trial and you won't be charged. Your access continues until the trial ends."
+    },
+    {
+        "q":"What happens if I cancel my subscription?",
+        "a":"Your subscription stays active until the end of the current billing period or trial. After that, your account automatically returns to the Free plan."
+    },
+    {
+        "q":"Are my files stored?",
+        "a":"No. Files are processed temporarily and automatically deleted after processing."
+    }
+]`,
 		}
 
 		config.DB.Create(&subContent)

@@ -29,8 +29,8 @@ var toolProfiles = map[string]ToolProfile{
 
 var tierLimits = map[string]TierLimits{
 	"free": {Units3H: 8, UnitsDay: 20, UnitsMonth: 80},
-	"plus": {Units3H: 20, UnitsDay: 60, UnitsMonth: 250},
-	"pro":  {Units3H: 80, UnitsDay: 250, UnitsMonth: 1000},
+	"plus": {Units3H: 50, UnitsDay: 100, UnitsMonth: 500},
+	"pro":  {Units3H: 150, UnitsDay: 400, UnitsMonth: 2000},
 }
 
 func NormalizeToolName(tool string) string {

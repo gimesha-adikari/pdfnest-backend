@@ -90,14 +90,18 @@ type SubscribePageContent struct {
 	FreeBulletPoints string `gorm:"type:text" json:"freeBulletPoints"`
 
 	PlusTitle        string `gorm:"type:varchar(255)" json:"plusTitle"`
-	PlusPrice        string `gorm:"type:varchar(50);not null" json:"plusPrice"`
+	PlusMonthlyPrice string `gorm:"type:varchar(50);not null" json:"plusMonthlyPrice"`
+	PlusYearlyPrice  string `gorm:"type:varchar(50);not null" json:"plusYearlyPrice"`
 	PlusSubtitle     string `gorm:"type:varchar(255)" json:"plusSubtitle"`
 	PlusBulletPoints string `gorm:"type:text" json:"plusBulletPoints"`
 
 	ProTitle        string `gorm:"type:varchar(255)" json:"proTitle"`
-	ProPrice        string `gorm:"type:varchar(50);not null" json:"proPrice"`
+	ProMonthlyPrice string `gorm:"type:varchar(50);not null" json:"proMonthlyPrice"`
+	ProYearlyPrice  string `gorm:"type:varchar(50);not null" json:"proYearlyPrice"`
 	ProSubtitle     string `gorm:"type:varchar(255)" json:"proSubtitle"`
 	ProBulletPoints string `gorm:"type:text" json:"proBulletPoints"`
+
+	TrialText string `gorm:"type:varchar(255)" json:"trialText"`
 
 	// Security section at bottom
 	SecurityTitle    string `gorm:"type:varchar(255)" json:"securityTitle"`
@@ -109,6 +113,7 @@ type SubscribePageContent struct {
 	CtaFreeTitle    string `gorm:"type:text" json:"ctaFreeTitle"`
 	CtaFreeSubtitle string `gorm:"type:text" json:"ctaFreeSubtitle"`
 	CtaPlusTitle    string `gorm:"type:text" json:"ctaPlusTitle"`
+	CtaPlusSubtitle string `gorm:"type:text" json:"ctaPlusSubtitle"`
 	CtaProTitle     string `gorm:"type:text" json:"ctaProTitle"`
 	CtaProSubtitle  string `gorm:"type:text" json:"ctaProSubtitle"`
 

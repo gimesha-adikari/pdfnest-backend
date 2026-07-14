@@ -30,8 +30,10 @@ type PaddleWebhookPayload struct {
 		Amount         float64 `json:"amount"`
 		Currency       string  `json:"currency"`
 		CustomData     struct {
-			UserID      string `json:"user_id"`
-			PackageType string `json:"package_type"`
+			UserID          string `json:"user_id"`
+			PackageType     string `json:"package_type"`
+			BillingInterval string `json:"billing_interval"`
+			PurchaseType    string `json:"purchase_type"`
 		} `json:"custom_data"`
 		ManagementURLs struct {
 			UpdatePaymentMethod string `json:"update_payment_method"`
@@ -110,6 +112,12 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		sub.PaddleCustomerID = payload.Data.CustomerID
 		sub.PaddleSubscriptionID = payload.Data.SubscriptionID
 		sub.Status = payload.Data.Status
+
+		sub.BillingInterval = strings.ToLower(strings.TrimSpace(payload.Data.CustomData.BillingInterval))
+		if sub.BillingInterval == "" {
+			sub.BillingInterval = "monthly"
+		}
+
 		sub.CurrentPeriodEnd = now.AddDate(0, 1, 0)
 		sub.UpdateURL = payload.Data.ManagementURLs.UpdatePaymentMethod
 		sub.CancelURL = payload.Data.ManagementURLs.Cancel
@@ -133,9 +141,7 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 	case "subscription.canceled", "subscription.past_due":
 		if err := config.DB.Where("paddle_subscription_id = ?", payload.Data.SubscriptionID).First(&sub).Error; err == nil {
 			sub.Status = payload.Data.Status
-			sub.Tier = "free"
-			sub.UpdateURL = ""
-			sub.CancelURL = ""
+
 			sub.UpdatedAt = now
 			if err := config.DB.Save(&sub).Error; err != nil {
 				return c.Status(500).SendString("Failed to save cancellation state")
@@ -144,12 +150,14 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 
 	case "transaction.completed":
 		if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
-			packUnits := packageUnits(payload.Data.CustomData.PackageType)
-			if packUnits > 0 {
-				sub.CustomCredits += packUnits
-				sub.UpdatedAt = now
-				if err := config.DB.Save(&sub).Error; err != nil {
-					return c.Status(500).SendString("Failed to add credit units")
+			if strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType)) == "credits" {
+				packUnits := packageUnits(payload.Data.CustomData.PackageType)
+				if packUnits > 0 {
+					sub.CustomCredits += packUnits
+					sub.UpdatedAt = now
+					if err := config.DB.Save(&sub).Error; err != nil {
+						return c.Status(500).SendString("Failed to add credit units")
+					}
 				}
 			}
 
@@ -192,7 +200,7 @@ func (ctrl *Controller) GetSubscriptionStatus(c *fiber.Ctx) error {
 	}
 
 	limits := limitsForTier(sub.Tier)
-	resetBillingWindows(&sub, time.Now())
+	syncWindows(&sub, time.Now())
 
 	monthlyRemaining := limits.UnitsMonth + sub.CustomCredits - sub.UsedUnitsMonthly
 	if monthlyRemaining < 0 {
@@ -387,6 +395,8 @@ func packageUnits(packageType string) int {
 	switch {
 	case strings.Contains(pack, "addon_pack_500"):
 		return 500
+	case strings.Contains(pack, "addon_pack_200"):
+		return 200
 	case strings.Contains(pack, "addon_pack_100"):
 		return 100
 	case strings.Contains(pack, "addon_pack_50"):

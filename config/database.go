@@ -35,8 +35,10 @@ type Subscription struct {
 	PaddleCustomerID     string    `gorm:"type:varchar(255);uniqueIndex"`
 	PaddleSubscriptionID string    `gorm:"type:varchar(255);uniqueIndex"`
 	Status               string    `gorm:"type:varchar(50);not null"`
-	Tier                 string    `gorm:"type:varchar(50);default:'free'"` // free, plus, pro
-	CustomCredits        int       `gorm:"default:0;not null"`              // extra paid credits
+	Tier                 string    `gorm:"type:varchar(50);default:'free'"`
+	BillingInterval      string    `gorm:"type:varchar(20);default:'monthly'"` // monthly | yearly
+	TrialEndsAt          time.Time `gorm:""`
+	CustomCredits        int       `gorm:"default:0;not null"`
 	UpdateURL            string    `gorm:"type:text"`
 	CancelURL            string    `gorm:"type:text"`
 	CurrentPeriodEnd     time.Time `gorm:"not null"`

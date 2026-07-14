@@ -1,4 +1,3 @@
-// file: internal/billing/tools.go
 package billing
 
 import (
