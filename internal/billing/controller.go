@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"log"
 	"os"
 	"pdfnest-backend/config"
 	"strings"
@@ -50,60 +52,100 @@ type billingLimits struct {
 
 func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 	rawBody := c.Body()
-	signatureHeader := c.Get("Paddle-Signature")
-	if strings.TrimSpace(signatureHeader) == "" {
+
+	log.Println("========================================")
+	log.Println("[PADDLE WEBHOOK] Incoming webhook")
+	log.Println("[PADDLE WEBHOOK] Method:", c.Method())
+	log.Println("[PADDLE WEBHOOK] URL:", c.OriginalURL())
+	log.Println("[PADDLE WEBHOOK] Signature Header:", c.Get("Paddle-Signature"))
+	log.Println("[PADDLE WEBHOOK] Raw Body:", string(rawBody))
+	log.Println("========================================")
+
+	signatureHeader := strings.TrimSpace(c.Get("Paddle-Signature"))
+	if signatureHeader == "" {
+		log.Println("[PADDLE WEBHOOK] ERROR: Missing Paddle-Signature header")
 		return c.Status(401).SendString("Missing signature header")
 	}
 
 	parts := strings.Split(signatureHeader, ";")
 	if len(parts) != 2 {
+		log.Println("[PADDLE WEBHOOK] ERROR: Invalid signature format:", signatureHeader)
 		return c.Status(401).SendString("Invalid signature format")
 	}
 
 	tsPart := strings.TrimPrefix(strings.TrimSpace(parts[0]), "ts=")
 	h1Part := strings.TrimPrefix(strings.TrimSpace(parts[1]), "h1=")
 	if tsPart == "" || h1Part == "" {
+		log.Println("[PADDLE WEBHOOK] ERROR: Invalid signature values")
+		log.Println("[PADDLE WEBHOOK] ts =", tsPart)
+		log.Println("[PADDLE WEBHOOK] h1 =", h1Part)
 		return c.Status(401).SendString("Invalid signature format")
 	}
 
-	signedPayload := tsPart + ":" + string(rawBody)
-
-	secretKey := os.Getenv("PADDLE_WEBHOOK_SECRET")
+	secretKey := strings.TrimSpace(os.Getenv("PADDLE_WEBHOOK_SECRET"))
 	if secretKey == "" {
+		log.Println("[PADDLE WEBHOOK] ERROR: PADDLE_WEBHOOK_SECRET not configured")
 		return c.Status(500).SendString("Webhook secret not configured")
 	}
 
+	log.Println("[PADDLE WEBHOOK] Secret loaded: YES")
+
+	signedPayload := tsPart + ":" + string(rawBody)
+
 	mac := hmac.New(sha256.New, []byte(secretKey))
-	mac.Write([]byte(signedPayload))
+	_, _ = mac.Write([]byte(signedPayload))
 	expectedHash := hex.EncodeToString(mac.Sum(nil))
 
+	log.Println("[PADDLE WEBHOOK] Timestamp:", tsPart)
+	log.Println("[PADDLE WEBHOOK] Received H1:", h1Part)
+	log.Println("[PADDLE WEBHOOK] Expected H1:", expectedHash)
+
 	if !hmac.Equal([]byte(h1Part), []byte(expectedHash)) {
+		log.Println("[PADDLE WEBHOOK] ERROR: Signature verification FAILED")
 		return c.Status(401).SendString("Signature verification failed")
 	}
 
+	log.Println("[PADDLE WEBHOOK] Signature verified successfully")
+
 	var payload PaddleWebhookPayload
-	if err := c.BodyParser(&payload); err != nil {
+	if err := json.Unmarshal(rawBody, &payload); err != nil {
+		log.Println("[PADDLE WEBHOOK] ERROR: JSON decode failed:", err)
 		return c.Status(400).SendString("Invalid webhook data format")
 	}
 
+	log.Println("[PADDLE WEBHOOK] Event ID:", payload.EventID)
+	log.Println("[PADDLE WEBHOOK] Event Type:", payload.EventType)
+	log.Println("[PADDLE WEBHOOK] Data ID:", payload.Data.ID)
+	log.Println("[PADDLE WEBHOOK] Customer ID:", payload.Data.CustomerID)
+	log.Println("[PADDLE WEBHOOK] Subscription ID:", payload.Data.SubscriptionID)
+	log.Println("[PADDLE WEBHOOK] Status:", payload.Data.Status)
+	log.Println("[PADDLE WEBHOOK] User ID:", payload.Data.CustomData.UserID)
+	log.Println("[PADDLE WEBHOOK] Package Type:", payload.Data.CustomData.PackageType)
+	log.Println("[PADDLE WEBHOOK] Billing Interval:", payload.Data.CustomData.BillingInterval)
+	log.Println("[PADDLE WEBHOOK] Purchase Type:", payload.Data.CustomData.PurchaseType)
+
 	if strings.TrimSpace(payload.EventID) == "" {
+		log.Println("[PADDLE WEBHOOK] ERROR: Missing event_id")
 		return c.Status(400).SendString("Missing webhook event_id")
 	}
 
 	var existingLog config.WebhookLog
 	if err := config.DB.Where("event_id = ?", payload.EventID).First(&existingLog).Error; err == nil {
+		log.Println("[PADDLE WEBHOOK] Duplicate event ignored:", payload.EventID)
 		return c.Status(200).SendString("Webhook already processed (Idempotent)")
 	}
 
 	now := time.Now()
 	userID := payload.Data.CustomData.UserID
-
 	var sub config.Subscription
 
 	switch payload.EventType {
 	case "subscription.activated", "subscription.updated":
+		log.Println("[PADDLE WEBHOOK] Processing subscription update")
+
 		err := config.DB.Where("user_id = ?", userID).First(&sub).Error
 		if err != nil {
+			log.Println("[PADDLE WEBHOOK] No subscription row found, creating new one for user:", userID)
 			sub.ID = uuid.New().String()
 			sub.UserID = userID
 			sub.CreatedAt = now
@@ -135,29 +177,47 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		sub.UpdatedAt = now
 
 		if err := config.DB.Save(&sub).Error; err != nil {
+			log.Println("[PADDLE WEBHOOK] ERROR: Failed to save subscription state:", err)
 			return c.Status(500).SendString("Failed to save subscription state")
 		}
 
+		log.Println("[PADDLE WEBHOOK] Subscription updated successfully")
+
 	case "subscription.canceled", "subscription.past_due":
+		log.Println("[PADDLE WEBHOOK] Processing subscription cancellation/past_due")
+
 		if err := config.DB.Where("paddle_subscription_id = ?", payload.Data.SubscriptionID).First(&sub).Error; err == nil {
 			sub.Status = payload.Data.Status
-
 			sub.UpdatedAt = now
+
 			if err := config.DB.Save(&sub).Error; err != nil {
+				log.Println("[PADDLE WEBHOOK] ERROR: Failed to save cancellation state:", err)
 				return c.Status(500).SendString("Failed to save cancellation state")
 			}
+
+			log.Println("[PADDLE WEBHOOK] Subscription status updated to:", payload.Data.Status)
+		} else {
+			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for paddle_subscription_id:", payload.Data.SubscriptionID)
 		}
 
 	case "transaction.completed":
+		log.Println("[PADDLE WEBHOOK] Processing completed transaction")
+
 		if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
 			if strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType)) == "credits" {
 				packUnits := packageUnits(payload.Data.CustomData.PackageType)
+				log.Println("[PADDLE WEBHOOK] Credit pack detected:", payload.Data.CustomData.PackageType, "units:", packUnits)
+
 				if packUnits > 0 {
 					sub.CustomCredits += packUnits
 					sub.UpdatedAt = now
+
 					if err := config.DB.Save(&sub).Error; err != nil {
+						log.Println("[PADDLE WEBHOOK] ERROR: Failed to add credit units:", err)
 						return c.Status(500).SendString("Failed to add credit units")
 					}
+
+					log.Println("[PADDLE WEBHOOK] Credits added successfully")
 				}
 			}
 
@@ -171,10 +231,19 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 				Status:              "completed",
 				CreatedAt:           now,
 			}
+
 			if err := config.DB.Create(&tx).Error; err != nil {
+				log.Println("[PADDLE WEBHOOK] ERROR: Failed to record transaction:", err)
 				return c.Status(500).SendString("Failed to record transaction")
 			}
+
+			log.Println("[PADDLE WEBHOOK] Transaction recorded successfully")
+		} else {
+			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for user:", userID)
 		}
+
+	default:
+		log.Println("[PADDLE WEBHOOK] Unhandled event type:", payload.EventType)
 	}
 
 	if err := config.DB.Create(&config.WebhookLog{
@@ -184,9 +253,11 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		Status:    "processed",
 		CreatedAt: now,
 	}).Error; err != nil {
+		log.Println("[PADDLE WEBHOOK] ERROR: Failed to record webhook log:", err)
 		return c.Status(500).SendString("Failed to record webhook log")
 	}
 
+	log.Println("[PADDLE WEBHOOK] Completed successfully")
 	return c.Status(200).SendString("Webhook processed accurately.")
 }
 

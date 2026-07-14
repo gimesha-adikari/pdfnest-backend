@@ -31,15 +31,10 @@ type paddleTransactionItem struct {
 	Quantity int    `json:"quantity"`
 }
 
-type paddleTransactionCheckout struct {
-	URL *string `json:"url"`
-}
-
 type paddleTransactionCreatePayload struct {
-	Items          []paddleTransactionItem   `json:"items"`
-	CollectionMode string                    `json:"collection_mode"`
-	Checkout       paddleTransactionCheckout `json:"checkout"`
-	CustomData     map[string]any            `json:"custom_data,omitempty"`
+	Items          []paddleTransactionItem `json:"items"`
+	CollectionMode string                  `json:"collection_mode"`
+	CustomData     map[string]any          `json:"custom_data,omitempty"`
 }
 
 type paddleTransactionCreateResponse struct {
@@ -161,19 +156,11 @@ func createPaddleTransactionCheckout(priceID string, customData map[string]any) 
 		return "", "", fmt.Errorf("paddle api key not configured")
 	}
 
-	defaultPaymentURL := strings.TrimSpace(os.Getenv("PADDLE_DEFAULT_PAYMENT_URL"))
-
-	var checkoutURL *string
-	if defaultPaymentURL != "" {
-		checkoutURL = &defaultPaymentURL
-	}
-
 	payload := paddleTransactionCreatePayload{
 		Items: []paddleTransactionItem{
 			{PriceID: priceID, Quantity: 1},
 		},
 		CollectionMode: "automatic",
-		Checkout:       paddleTransactionCheckout{URL: checkoutURL},
 		CustomData:     customData,
 	}
 
