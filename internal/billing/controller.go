@@ -114,14 +114,12 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		sub.UpdateURL = payload.Data.ManagementURLs.UpdatePaymentMethod
 		sub.CancelURL = payload.Data.ManagementURLs.Cancel
 
-		// Keep the current tier mapping: plus package -> plus, otherwise pro.
 		if strings.Contains(strings.ToLower(payload.Data.CustomData.PackageType), "plus") {
 			sub.Tier = "plus"
 		} else {
 			sub.Tier = "pro"
 		}
 
-		// Fresh billing cycle starts on activation / renewal.
 		resetBillingWindows(&sub, now)
 		sub.WindowMonthlyResetAt = sub.CurrentPeriodEnd
 		sub.UsedUnitsMonthly = 0

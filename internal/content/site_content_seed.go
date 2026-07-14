@@ -1,3 +1,4 @@
+// file: internal/content/site_content_seed.go
 package content
 
 import (
@@ -21,23 +22,23 @@ func SeedSiteContent() {
 			HeroSubtitleGuestBold: "Start free. Upgrade anytime.",
 
 			AuthBannerProAccess:  "Access: All Premium Workspaces & Advanced Tools",
-			AuthBannerFreeUsage:  "Daily Usage: 5 operations remaining today",
+			AuthBannerFreeUsage:  "Usage: unit-based billing with 3-hour, daily, and monthly limits",
 			AuthBannerFreeAction: "Upgrade to Pro",
 
 			Feature1Title:       "Free Tier Included",
-			Feature1Description: "Access baseline document utilities instantly with zero upfront costs or mandatory payment thresholds.",
+			Feature1Description: "Access baseline document utilities instantly with no upfront cost.",
 			Feature2Title:       "Pro Ecosystem",
-			Feature2Description: "Unlock high-performance processing architectures, interactive digital canvas features, and massive filesizes.",
+			Feature2Description: "Unlock high-performance processing, interactive canvas features, and larger workflows.",
 			Feature3Title:       "Isolated Sandbox",
-			Feature3Description: "Secure corporate sandboxes compile your parameters layout grids. Data clears instantly post compilation.",
+			Feature3Description: "Secure processing sandboxes compile your document jobs and clear data after completion.",
 
 			SearchPlaceholder:      "Search tool modules (e.g., merge, watermark, encrypt)...",
 			SearchScopeSuffix:      "tools matching search matrix scope",
 			SearchEmptyTitle:       "No structural modules matched",
-			SearchEmptyDescription: "Try checking code spelling tags or clear filters.",
+			SearchEmptyDescription: "Try checking spelling, tags, or clear filters.",
 
 			PopularToolTitle:       "Merge PDF Documents Collectively",
-			PopularToolDescription: "Combine separate structural files into a clean compound container setup natively in seconds without data compression loss.",
+			PopularToolDescription: "Combine separate files into one clean PDF in seconds.",
 			PopularToolAction:      "Open Tool Module",
 
 			CategoryOrganizeTitle: "Page Organization",
@@ -83,42 +84,44 @@ func SeedSiteContent() {
 			CanvasBulletPoints:  "Drag and drop,Custom layouts,Multiple images,Professional exports",
 			SpeedTitle:          "Faster Processing",
 			SpeedDescription:    "Built for power users.",
-			SpeedBulletPoints:   "Priority queues,Larger limits,Faster operations,Premium tools",
+			SpeedBulletPoints:   "Priority queues,Lower wait times,Flexible usage windows,Premium tools",
 
 			FreeTitle:        "Free",
 			FreePrice:        "0",
 			FreeSubtitle:     "Perfect for occasional use",
-			FreeBulletPoints: "Core PDF tools,Basic OCR,Secure processing,5 operations/day",
+			FreeBulletPoints: "Core PDF tools,Light OCR,Secure processing,Small unit allowance,3-hour / daily / monthly limits",
 
 			PlusTitle:        "Plus",
 			PlusPrice:        "9",
 			PlusSubtitle:     "For active users",
-			PlusBulletPoints: "Everything in Free,50 operations/day,Full OCR,Priority processing,Larger file support",
+			PlusBulletPoints: "Everything in Free,More units per window,Full OCR support,Better burst allowance,Priority processing",
 
 			ProTitle:        "Pro",
 			ProPrice:        "29",
 			ProSubtitle:     "For professionals",
-			ProBulletPoints: "Everything in Plus,500 operations/day,Virtual Studio Workspace,Interactive visual canvas,Premium Workspace layers",
+			ProBulletPoints: "Everything in Plus,Highest unit allowance,Advanced workflows,Large file handling,Premium workspace tools",
 
 			SecurityTitle:    "Your files stay completely private",
-			SecuritySubtitle: "Document security is integrated right into the core architecture loops.",
+			SecuritySubtitle: "Document security is built into the core architecture.",
 			SecurityTags:     "Temporary processing,Secure transfers,Automatic cleanup,No permanent storage",
 
 			CtaGuestTitle:   "Create a free account and start using PDFNest today.",
-			CtaFreeTitle:    "Need more power?",
-			CtaFreeSubtitle: "Upgrade to Plus or Pro to expand daily thresholds.",
-			CtaPlusTitle:    "Ready for Studio and Interactive Canvas?",
+			CtaFreeTitle:    "Need more room to work?",
+			CtaFreeSubtitle: "Upgrade to Plus or Pro for larger unit windows and heavier workflows.",
+			CtaPlusTitle:    "Ready for bigger jobs?",
 			CtaProTitle:     "You already have full access.",
-			CtaProSubtitle:  "Your account profile holds absolute execution clearances.",
+			CtaProSubtitle:  "Your account can use the highest available unit windows and workflow limits.",
 
 			FaqsJSON: `[
-				{"q": "Is PDFNest free?", "a": "Yes! Our Free Plan gives you access to core PDF utility tools with a baseline allocation of 5 operations per day entirely free."},
-				{"q": "What does Plus include?", "a": "Plus scales your volume limits up to 50 operations per day, unlocks full high-quality OCR extraction, guarantees priority server processing slots, and handles much larger file structures."},
-				{"q": "What does Pro include?", "a": "Pro is our ultimate tier. It includes 500 daily operations, complete access to our multi-step Virtual Document Studio workspace, and the visual layout Interactive Canvas."},
-				{"q": "Can I cancel anytime?", "a": "Absolutely. You are never locked into long agreements. You can upgrade, downgrade, or cancel your active billing status inside your settings panel at any point."},
-				{"q": "Are my files stored?", "a": "Never. Privacy is paramount. Files are processed within private, temporary runtime sandboxes and permanently wiped immediately after processing."}
+				{"q": "Is PDFNest free?", "a": "Yes! The Free Plan gives you access to core PDF tools with a limited unit allowance and separate 3-hour, daily, and monthly windows."},
+				{"q": "How does billing work now?", "a": "PDFNest now uses units. Simple tools cost fewer units, heavy tools cost more, and some tools can charge extra based on pages or OCR work."},
+				{"q": "What does Plus include?", "a": "Plus gives you more units, better burst capacity, and stronger support for OCR and larger jobs."},
+				{"q": "What does Pro include?", "a": "Pro is the highest tier. It includes the largest unit allowance, the best burst capacity, and the most room for heavy workflows."},
+				{"q": "Can I cancel anytime?", "a": "Absolutely. You can upgrade, downgrade, or cancel your active billing status inside your settings panel at any point."},
+				{"q": "Are my files stored?", "a": "Never. Files are processed in temporary runtime sandboxes and cleaned up after processing."}
 			]`,
 		}
+
 		config.DB.Create(&subContent)
 	}
 
@@ -133,7 +136,7 @@ func SeedSiteContent() {
 			StatsJson:           `[{"value":"37+","label":"PDF Tools"},{"value":"3","label":"Workspace Types"},{"value":"Free","label":"Plan Available"},{"value":"Pro","label":"Advanced Workspaces"}]`,
 			SectionTitle:        "What Makes PDFNest Different",
 			SectionSubtitle:     "More than a PDF converter. A complete PDF workspace.",
-			HighlightsJson:      `[{"title":"37+ PDF Tools","description":"Merge, split, compress, convert, secure, and organize PDFs with fast and reliable tools built for everyday work.","icon_type":"file"},{"title":"Virtual Document Studio","description":"Manage pages, watermarks, metadata, merging, compression, and document workflows from a single workspace.","icon_type":"layers"},{"title":"Interactive Canvas","description":"Create custom PDF layouts using drag-and-drop positioning, scaling controls, layer management, and visual editing.","icon_type":"pen"}]`,
+			HighlightsJson:      `[{"title":"37+ PDF Tools","description":"Merge, split, compress, convert, secure, and organize PDFs with fast and reliable tools built for everyday work.","icon_type":"file"},{"title":"Virtual Document Studio","description":"Manage pages, watermarks, metadata, merging, compression, and document workflows from a single workspace.","icon_type":"layers"},{"title":"Interactive Canvas","description":"Design PDFs visually using drag-and-drop positioning, scaling controls, layer management, and visual editing.","icon_type":"pen"}]`,
 			StudioTitle:         "Virtual Document Studio",
 			StudioDescription:   "Manage document workflows visually from one workspace. Rotate pages, apply watermarks, update metadata, merge documents, compress files, and export professional PDFs.",
 			StudioFeaturesJson:  `["Page management","Watermark controls","Metadata editing","Merge & compression workflows","Visual PDF workspace"]`,

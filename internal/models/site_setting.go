@@ -1,3 +1,4 @@
+// file: internal/models/site_setting.go
 package models
 
 import "time"
@@ -39,7 +40,6 @@ type HomePageContent struct {
 	PopularToolAction      string `gorm:"type:varchar(255);not null" json:"popularToolAction"`
 
 	// Category Headers
-	// Category Headers
 	CategoryOrganizeTitle string `gorm:"type:varchar(255);not null" json:"categoryOrganizeTitle"`
 	CategoryOrganizeDesc  string `gorm:"type:text;not null" json:"categoryOrganizeDesc"`
 
@@ -75,7 +75,7 @@ type SubscribePageContent struct {
 	PremiumSectionTitle string `gorm:"type:varchar(255)" json:"premiumSectionTitle"`
 	StudioTitle         string `gorm:"type:varchar(255)" json:"studioTitle"`
 	StudioDescription   string `gorm:"type:text" json:"studioDescription"`
-	StudioBulletPoints  string `gorm:"type:text" json:"studioBulletPoints"` // Saved as "Edit pages,Watermarks,Metadata..."
+	StudioBulletPoints  string `gorm:"type:text" json:"studioBulletPoints"`
 	CanvasTitle         string `gorm:"type:varchar(255)" json:"canvasTitle"`
 	CanvasDescription   string `gorm:"type:text" json:"canvasDescription"`
 	CanvasBulletPoints  string `gorm:"type:text" json:"canvasBulletPoints"`
@@ -102,7 +102,7 @@ type SubscribePageContent struct {
 	// Security section at bottom
 	SecurityTitle    string `gorm:"type:varchar(255)" json:"securityTitle"`
 	SecuritySubtitle string `gorm:"type:text" json:"securitySubtitle"`
-	SecurityTags     string `gorm:"type:text" json:"securityTags"` // Saved as comma separated
+	SecurityTags     string `gorm:"type:text" json:"securityTags"`
 
 	// Bottom dynamic states text mapping
 	CtaGuestTitle   string `gorm:"type:text" json:"ctaGuestTitle"`

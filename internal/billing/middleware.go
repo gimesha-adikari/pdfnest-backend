@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"errors"
 	"log"
 	"pdfnest-backend/config"
 	"strings"
@@ -28,10 +29,18 @@ func Use(tool Tool) fiber.Handler {
 		reservation, err := ReserveFromRequest(c, userID, tool)
 		if err != nil {
 			log.Printf("[BILLING] reserve failed user=%s tool=%s path=%s err=%v", userID, tool.Name, c.Path(), err)
+
+			if billingErr, ok := errors.AsType[*BillingError](err); ok && billingErr != nil {
+				billingErr.Tool = tool.Name
+				billingErr.RemainingCredits = currentCreditsForError(userID)
+				return c.Status(fiber.StatusTooManyRequests).JSON(billingErr)
+			}
+
 			return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-				"error":                    err.Error(),
-				"tool":                     tool.Name,
-				"custom_credits_remaining": currentCreditsForError(userID),
+				"code":    "BILLING_ERROR",
+				"title":   "Unable to process request",
+				"message": err.Error(),
+				"tool":    tool.Name,
 			})
 		}
 

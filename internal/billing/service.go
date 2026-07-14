@@ -1,9 +1,7 @@
-// internal/billing/service.go
 package billing
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
@@ -64,10 +62,10 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 		limits := GetTierLimits(sub.Tier)
 
 		if sub.UsedUnits3h+totals.Units+units > limits.Units3H {
-			return fmt.Errorf("%w: 3-hour limit exceeded", ErrBillingBlocked)
+			return HourlyLimitError(units)
 		}
 		if sub.UsedUnitsDaily+totals.Units+units > limits.UnitsDay {
-			return fmt.Errorf("%w: daily limit exceeded", ErrBillingBlocked)
+			return DailyLimitError(units)
 		}
 
 		availablePlan := limits.UnitsMonth - (sub.UsedUnitsMonthly + totals.PlanUnits)
@@ -81,7 +79,7 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 		}
 
 		if sub.UsedUnitsMonthly+totals.Units+units > limits.UnitsMonth+availableCredits {
-			return fmt.Errorf("%w: monthly limit exceeded", ErrBillingBlocked)
+			return MonthlyLimitError(units)
 		}
 
 		planUnits := units
@@ -91,7 +89,7 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 
 		creditUnits := units - planUnits
 		if creditUnits > availableCredits {
-			return fmt.Errorf("%w: credits exhausted", ErrBillingBlocked)
+			return CreditsExhaustedError(units)
 		}
 
 		reservation = &config.BillingReservation{
