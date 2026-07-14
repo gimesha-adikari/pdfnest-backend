@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"pdfnest-backend/config"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,18 +26,50 @@ type PaddleWebhookPayload struct {
 	EventID   string `json:"event_id"`
 	EventType string `json:"event_type"`
 	Data      struct {
-		ID             string  `json:"id"`
-		CustomerID     string  `json:"customer_id"`
-		SubscriptionID string  `json:"subscription_id"`
-		Status         string  `json:"status"`
-		Amount         float64 `json:"amount"`
-		Currency       string  `json:"currency"`
-		CustomData     struct {
+		ID             string `json:"id"`
+		CustomerID     string `json:"customer_id"`
+		SubscriptionID string `json:"subscription_id"`
+		Status         string `json:"status"`
+
+		CurrencyCode string `json:"currency_code"`
+
+		CustomData struct {
 			UserID          string `json:"user_id"`
 			PackageType     string `json:"package_type"`
 			BillingInterval string `json:"billing_interval"`
 			PurchaseType    string `json:"purchase_type"`
 		} `json:"custom_data"`
+
+		BillingCycle struct {
+			Interval  string `json:"interval"`
+			Frequency int    `json:"frequency"`
+		} `json:"billing_cycle"`
+
+		TrialDates struct {
+			StartsAt time.Time `json:"starts_at"`
+			EndsAt   time.Time `json:"ends_at"`
+		} `json:"trial_dates"`
+
+		NextBilledAt time.Time `json:"next_billed_at"`
+
+		CurrentBillingPeriod struct {
+			StartsAt time.Time `json:"starts_at"`
+			EndsAt   time.Time `json:"ends_at"`
+		} `json:"current_billing_period"`
+
+		BillingPeriod struct {
+			StartsAt time.Time `json:"starts_at"`
+			EndsAt   time.Time `json:"ends_at"`
+		} `json:"billing_period"`
+
+		Details struct {
+			Totals struct {
+				GrandTotal   string `json:"grand_total"`
+				Total        string `json:"total"`
+				CurrencyCode string `json:"currency_code"`
+			} `json:"totals"`
+		} `json:"details"`
+
 		ManagementURLs struct {
 			UpdatePaymentMethod string `json:"update_payment_method"`
 			Cancel              string `json:"cancel"`
@@ -113,16 +146,24 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		return c.Status(400).SendString("Invalid webhook data format")
 	}
 
+	subscriptionID := firstNonEmpty(payload.Data.SubscriptionID, payload.Data.ID)
+	userID := strings.TrimSpace(payload.Data.CustomData.UserID)
+
 	log.Println("[PADDLE WEBHOOK] Event ID:", payload.EventID)
 	log.Println("[PADDLE WEBHOOK] Event Type:", payload.EventType)
 	log.Println("[PADDLE WEBHOOK] Data ID:", payload.Data.ID)
 	log.Println("[PADDLE WEBHOOK] Customer ID:", payload.Data.CustomerID)
-	log.Println("[PADDLE WEBHOOK] Subscription ID:", payload.Data.SubscriptionID)
+	log.Println("[PADDLE WEBHOOK] Subscription ID:", subscriptionID)
 	log.Println("[PADDLE WEBHOOK] Status:", payload.Data.Status)
-	log.Println("[PADDLE WEBHOOK] User ID:", payload.Data.CustomData.UserID)
+	log.Println("[PADDLE WEBHOOK] User ID:", userID)
 	log.Println("[PADDLE WEBHOOK] Package Type:", payload.Data.CustomData.PackageType)
 	log.Println("[PADDLE WEBHOOK] Billing Interval:", payload.Data.CustomData.BillingInterval)
 	log.Println("[PADDLE WEBHOOK] Purchase Type:", payload.Data.CustomData.PurchaseType)
+	log.Println("[PADDLE WEBHOOK] Billing Cycle Interval:", payload.Data.BillingCycle.Interval)
+	log.Println("[PADDLE WEBHOOK] Trial Ends At:", payload.Data.TrialDates.EndsAt)
+	log.Println("[PADDLE WEBHOOK] Next Billed At:", payload.Data.NextBilledAt)
+	log.Println("[PADDLE WEBHOOK] Current Billing Period Ends At:", payload.Data.CurrentBillingPeriod.EndsAt)
+	log.Println("[PADDLE WEBHOOK] Billing Period Ends At:", payload.Data.BillingPeriod.EndsAt)
 
 	if strings.TrimSpace(payload.EventID) == "" {
 		log.Println("[PADDLE WEBHOOK] ERROR: Missing event_id")
@@ -136,44 +177,65 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
-	userID := payload.Data.CustomData.UserID
 	var sub config.Subscription
 
 	switch payload.EventType {
-	case "subscription.activated", "subscription.updated":
-		log.Println("[PADDLE WEBHOOK] Processing subscription update")
+	case "subscription.created", "subscription.trialing", "subscription.activated", "subscription.updated":
+		log.Println("[PADDLE WEBHOOK] Processing subscription event")
+
+		if userID == "" {
+			log.Println("[PADDLE WEBHOOK] ERROR: missing user_id in custom_data")
+			return c.Status(400).SendString("Missing user_id in custom_data")
+		}
 
 		err := config.DB.Where("user_id = ?", userID).First(&sub).Error
+		if err != nil && subscriptionID != "" {
+			err = config.DB.Where("paddle_subscription_id = ?", subscriptionID).First(&sub).Error
+		}
 		if err != nil {
-			log.Println("[PADDLE WEBHOOK] No subscription row found, creating new one for user:", userID)
 			sub.ID = uuid.New().String()
 			sub.UserID = userID
 			sub.CreatedAt = now
 		}
 
-		sub.PaddleCustomerID = payload.Data.CustomerID
-		sub.PaddleSubscriptionID = payload.Data.SubscriptionID
-		sub.Status = payload.Data.Status
-
-		sub.BillingInterval = strings.ToLower(strings.TrimSpace(payload.Data.CustomData.BillingInterval))
-		if sub.BillingInterval == "" {
-			sub.BillingInterval = "monthly"
+		if customerID := strings.TrimSpace(payload.Data.CustomerID); customerID != "" {
+			sub.PaddleCustomerID = customerID
+		}
+		if subscriptionID != "" {
+			sub.PaddleSubscriptionID = subscriptionID
 		}
 
-		sub.CurrentPeriodEnd = now.AddDate(0, 1, 0)
+		status := strings.ToLower(strings.TrimSpace(payload.Data.Status))
+		if status == "" {
+			status = "active"
+		}
+		sub.Status = status
+
+		interval := strings.ToLower(strings.TrimSpace(payload.Data.CustomData.BillingInterval))
+		if interval == "" {
+			interval = strings.ToLower(strings.TrimSpace(payload.Data.BillingCycle.Interval))
+		}
+		if interval == "" {
+			interval = "monthly"
+		}
+		sub.BillingInterval = interval
+
+		end := chooseSubscriptionEnd(payload, now)
+		sub.CurrentPeriodEnd = end
 		sub.UpdateURL = payload.Data.ManagementURLs.UpdatePaymentMethod
 		sub.CancelURL = payload.Data.ManagementURLs.Cancel
 
-		if strings.Contains(strings.ToLower(payload.Data.CustomData.PackageType), "plus") {
+		switch {
+		case strings.Contains(strings.ToLower(payload.Data.CustomData.PackageType), "plus"):
 			sub.Tier = "plus"
-		} else {
+		case strings.Contains(strings.ToLower(payload.Data.CustomData.PackageType), "pro"):
 			sub.Tier = "pro"
+		case sub.Tier == "":
+			sub.Tier = "free"
 		}
 
 		resetBillingWindows(&sub, now)
 		sub.WindowMonthlyResetAt = sub.CurrentPeriodEnd
-		sub.UsedUnitsMonthly = 0
-		sub.CustomCredits = maxInt(sub.CustomCredits, 0)
 		sub.UpdatedAt = now
 
 		if err := config.DB.Save(&sub).Error; err != nil {
@@ -181,13 +243,29 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 			return c.Status(500).SendString("Failed to save subscription state")
 		}
 
-		log.Println("[PADDLE WEBHOOK] Subscription updated successfully")
+		log.Println("[PADDLE WEBHOOK] Subscription saved successfully")
 
-	case "subscription.canceled", "subscription.past_due":
-		log.Println("[PADDLE WEBHOOK] Processing subscription cancellation/past_due")
+	case "subscription.canceled", "subscription.paused", "subscription.past_due":
+		log.Println("[PADDLE WEBHOOK] Processing subscription cancellation/past_due/paused")
 
-		if err := config.DB.Where("paddle_subscription_id = ?", payload.Data.SubscriptionID).First(&sub).Error; err == nil {
-			sub.Status = payload.Data.Status
+		if userID != "" {
+			if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err != nil && subscriptionID != "" {
+				_ = config.DB.Where("paddle_subscription_id = ?", subscriptionID).First(&sub).Error
+			}
+		} else if subscriptionID != "" {
+			_ = config.DB.Where("paddle_subscription_id = ?", subscriptionID).First(&sub).Error
+		}
+
+		if sub.ID != "" {
+			sub.Status = strings.ToLower(strings.TrimSpace(payload.Data.Status))
+			if sub.Status == "" {
+				sub.Status = "canceled"
+			}
+
+			end := chooseSubscriptionEnd(payload, now)
+			if !end.IsZero() {
+				sub.CurrentPeriodEnd = end
+			}
 			sub.UpdatedAt = now
 
 			if err := config.DB.Save(&sub).Error; err != nil {
@@ -195,51 +273,58 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 				return c.Status(500).SendString("Failed to save cancellation state")
 			}
 
-			log.Println("[PADDLE WEBHOOK] Subscription status updated to:", payload.Data.Status)
+			log.Println("[PADDLE WEBHOOK] Subscription status updated to:", sub.Status)
 		} else {
-			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for paddle_subscription_id:", payload.Data.SubscriptionID)
+			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for cancellation event")
 		}
 
 	case "transaction.completed":
 		log.Println("[PADDLE WEBHOOK] Processing completed transaction")
 
-		if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
-			if strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType)) == "credits" {
-				packUnits := packageUnits(payload.Data.CustomData.PackageType)
-				log.Println("[PADDLE WEBHOOK] Credit pack detected:", payload.Data.CustomData.PackageType, "units:", packUnits)
+		// Keep subscription state in sync for subscription purchases if we have a row.
+		if strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType)) == "credits" {
+			if userID != "" {
+				if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
+					packUnits := packageUnits(payload.Data.CustomData.PackageType)
+					log.Println("[PADDLE WEBHOOK] Credit pack detected:", payload.Data.CustomData.PackageType, "units:", packUnits)
 
-				if packUnits > 0 {
-					sub.CustomCredits += packUnits
-					sub.UpdatedAt = now
-
-					if err := config.DB.Save(&sub).Error; err != nil {
-						log.Println("[PADDLE WEBHOOK] ERROR: Failed to add credit units:", err)
-						return c.Status(500).SendString("Failed to add credit units")
+					if packUnits > 0 {
+						sub.CustomCredits += packUnits
+						sub.UpdatedAt = now
+						if err := config.DB.Save(&sub).Error; err != nil {
+							log.Println("[PADDLE WEBHOOK] ERROR: Failed to add credit units:", err)
+							return c.Status(500).SendString("Failed to add credit units")
+						}
+						log.Println("[PADDLE WEBHOOK] Credits added successfully")
 					}
-
-					log.Println("[PADDLE WEBHOOK] Credits added successfully")
 				}
 			}
+		}
 
-			tx := config.Transaction{
-				ID:                  uuid.New().String(),
-				UserID:              sub.UserID,
-				SubscriptionID:      sub.ID,
-				PaddleTransactionID: payload.Data.ID,
-				Amount:              payload.Data.Amount,
-				Currency:            payload.Data.Currency,
-				Status:              "completed",
-				CreatedAt:           now,
+		// Transaction amount in Paddle Billing webhook is nested under details.totals.
+		amount := paddleTransactionAmount(payload)
+		currency := firstNonEmpty(payload.Data.Details.Totals.CurrencyCode, payload.Data.CurrencyCode)
+
+		if userID != "" {
+			if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
+				tx := config.Transaction{
+					ID:                  uuid.New().String(),
+					UserID:              sub.UserID,
+					SubscriptionID:      sub.ID,
+					PaddleTransactionID: payload.Data.ID,
+					Amount:              amount,
+					Currency:            currency,
+					Status:              "completed",
+					CreatedAt:           now,
+				}
+				if err := config.DB.Create(&tx).Error; err != nil {
+					log.Println("[PADDLE WEBHOOK] ERROR: Failed to record transaction:", err)
+					return c.Status(500).SendString("Failed to record transaction")
+				}
+				log.Println("[PADDLE WEBHOOK] Transaction recorded successfully")
+			} else {
+				log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for user:", userID)
 			}
-
-			if err := config.DB.Create(&tx).Error; err != nil {
-				log.Println("[PADDLE WEBHOOK] ERROR: Failed to record transaction:", err)
-				return c.Status(500).SendString("Failed to record transaction")
-			}
-
-			log.Println("[PADDLE WEBHOOK] Transaction recorded successfully")
-		} else {
-			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for user:", userID)
 		}
 
 	default:
@@ -259,6 +344,42 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 
 	log.Println("[PADDLE WEBHOOK] Completed successfully")
 	return c.Status(200).SendString("Webhook processed accurately.")
+}
+
+func chooseSubscriptionEnd(payload PaddleWebhookPayload, now time.Time) time.Time {
+	for _, t := range []time.Time{
+		payload.Data.CurrentBillingPeriod.EndsAt,
+		payload.Data.BillingPeriod.EndsAt,
+		payload.Data.TrialDates.EndsAt,
+		payload.Data.NextBilledAt,
+	} {
+		if !t.IsZero() {
+			return t
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(payload.Data.BillingCycle.Interval)) {
+	case "year", "yearly":
+		return now.AddDate(1, 0, 0)
+	default:
+		return now.AddDate(0, 1, 0)
+	}
+}
+
+func paddleTransactionAmount(payload PaddleWebhookPayload) float64 {
+	for _, raw := range []string{
+		payload.Data.Details.Totals.GrandTotal,
+		payload.Data.Details.Totals.Total,
+	} {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if n, err := strconv.ParseFloat(raw, 64); err == nil {
+			return n / 100.0
+		}
+	}
+	return 0
 }
 
 func (ctrl *Controller) GetSubscriptionStatus(c *fiber.Ctx) error {
