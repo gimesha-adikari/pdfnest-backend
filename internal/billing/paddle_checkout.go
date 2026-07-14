@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -141,6 +142,10 @@ func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
 	defer httpRes.Body.Close()
 
 	raw, _ := io.ReadAll(httpRes.Body)
+
+	log.Printf("[PADDLE] Status: %d", httpRes.StatusCode)
+	log.Printf("[PADDLE] Response: %s", string(raw))
+
 	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error":   "paddle checkout creation failed",
@@ -246,6 +251,10 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 	defer httpRes.Body.Close()
 
 	raw, _ := io.ReadAll(httpRes.Body)
+
+	log.Printf("[PADDLE] Status: %d", httpRes.StatusCode)
+	log.Printf("[PADDLE] Response: %s", string(raw))
+
 	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error":   "paddle checkout creation failed",
