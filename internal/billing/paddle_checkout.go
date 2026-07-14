@@ -122,7 +122,18 @@ func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
 		})
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, apiBase+checkoutPath, bytes.NewReader(body))
+	log.Println("[PADDLE] Payload:")
+	log.Println(string(body))
+
+	url := apiBase + checkoutPath
+	log.Println("[PADDLE] URL:", url)
+
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		url,
+		bytes.NewReader(body),
+	)
+
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to build checkout request",
@@ -231,7 +242,17 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 		})
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, apiBase+checkoutPath, bytes.NewReader(body))
+	log.Println("[PADDLE] Payload:")
+	log.Println(string(body))
+
+	url := apiBase + checkoutPath
+	log.Println("[PADDLE] URL:", url)
+
+	httpReq, err := http.NewRequest(
+		http.MethodPost,
+		url,
+		bytes.NewReader(body),
+	)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to build checkout request",
