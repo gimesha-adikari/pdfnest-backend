@@ -22,23 +22,33 @@ type createCheckoutRequest struct {
 	Interval string `json:"interval"` // monthly | yearly
 }
 
-type paddleCheckoutItem struct {
+type createCreditCheckoutRequest struct {
+	Credits int `json:"credits"`
+}
+
+type paddleTransactionItem struct {
 	PriceID  string `json:"price_id"`
 	Quantity int    `json:"quantity"`
 }
 
-type paddleCheckoutCreatePayload struct {
-	Items      []paddleCheckoutItem `json:"items"`
-	CustomData map[string]any       `json:"custom_data"`
+type paddleTransactionCheckout struct {
+	URL *string `json:"url"`
 }
 
-type paddleCheckoutCreateResponse struct {
+type paddleTransactionCreatePayload struct {
+	Items          []paddleTransactionItem   `json:"items"`
+	CollectionMode string                    `json:"collection_mode"`
+	Checkout       paddleTransactionCheckout `json:"checkout"`
+	CustomData     map[string]any            `json:"custom_data,omitempty"`
+}
+
+type paddleTransactionCreateResponse struct {
 	Data struct {
-		URL         string `json:"url"`
-		CheckoutURL string `json:"checkout_url"`
+		ID       string `json:"id"`
+		Checkout struct {
+			URL *string `json:"url"`
+		} `json:"checkout"`
 	} `json:"data"`
-	URL         string `json:"url"`
-	CheckoutURL string `json:"checkout_url"`
 }
 
 func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
@@ -70,127 +80,30 @@ func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
 		})
 	}
 
-	// Make sure a subscription row exists so the webhook can update it later.
-	var sub config.Subscription
-	if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err != nil {
-		now := time.Now()
-		sub = config.Subscription{
-			ID:                   uuid.New().String(),
-			UserID:               userID,
-			PaddleCustomerID:     "pending-customer-" + uuid.New().String(),
-			PaddleSubscriptionID: "pending-subscription-" + uuid.New().String(),
-			Status:               "free",
-			Tier:                 "free",
-			CurrentPeriodEnd:     now,
-			Window3HResetAt:      now.Add(3 * time.Hour),
-			WindowDailyResetAt:   nextMidnight(now),
-			WindowMonthlyResetAt: nextMonthStart(now),
-			CreatedAt:            now,
-			UpdatedAt:            now,
-		}
-		if err := config.DB.Create(&sub).Error; err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "failed to prepare subscription record",
-			})
-		}
-	}
-
-	apiBase := strings.TrimRight(getEnv("PADDLE_API_BASE_URL", "https://api.paddle.com"), "/")
-	checkoutPath := getEnv("PADDLE_CHECKOUT_CREATE_PATH", "/checkouts")
-	apiKey := strings.TrimSpace(os.Getenv("PADDLE_API_KEY"))
-	if apiKey == "" {
+	if _, err := ensureSubscriptionRow(userID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "paddle api key not configured",
+			"error": "failed to prepare subscription record",
 		})
 	}
 
-	payload := paddleCheckoutCreatePayload{
-		Items: []paddleCheckoutItem{
-			{PriceID: priceID, Quantity: 1},
-		},
-		CustomData: map[string]any{
-			"user_id":          userID,
-			"package_type":     req.Tier,
-			"billing_interval": req.Interval,
-		},
-	}
-
-	body, err := json.Marshal(payload)
+	checkoutURL, raw, err := createPaddleTransactionCheckout(priceID, map[string]any{
+		"user_id":          userID,
+		"package_type":     req.Tier,
+		"billing_interval": req.Interval,
+		"purchase_type":    "subscription",
+	})
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to encode checkout payload",
-		})
-	}
-
-	log.Println("[PADDLE] Payload:")
-	log.Println(string(body))
-
-	url := apiBase + checkoutPath
-	log.Println("[PADDLE] URL:", url)
-
-	httpReq, err := http.NewRequest(
-		http.MethodPost,
-		url,
-		bytes.NewReader(body),
-	)
-
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to build checkout request",
-		})
-	}
-
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-
-	httpRes, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "failed to contact paddle",
-		})
-	}
-	defer httpRes.Body.Close()
-
-	raw, _ := io.ReadAll(httpRes.Body)
-
-	log.Printf("[PADDLE] Status: %d", httpRes.StatusCode)
-	log.Printf("[PADDLE] Response: %s", string(raw))
-
-	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
+		log.Printf("[PADDLE] subscription checkout failed: %v", err)
+		log.Printf("[PADDLE] response: %s", raw)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error":   "paddle checkout creation failed",
-			"details": string(raw),
-		})
-	}
-
-	var decoded paddleCheckoutCreateResponse
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "failed to parse paddle response",
-		})
-	}
-
-	checkoutURL := firstNonEmpty(
-		decoded.Data.URL,
-		decoded.Data.CheckoutURL,
-		decoded.URL,
-		decoded.CheckoutURL,
-	)
-
-	if checkoutURL == "" {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "paddle response did not include a checkout url",
+			"details": raw,
 		})
 	}
 
 	return c.JSON(fiber.Map{
 		"checkout_url": checkoutURL,
 	})
-}
-
-type createCreditCheckoutRequest struct {
-	Credits int `json:"credits"`
 }
 
 func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
@@ -215,48 +128,67 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 		})
 	}
 
-	apiBase := strings.TrimRight(getEnv("PADDLE_API_BASE_URL", "https://api.paddle.com"), "/")
-	checkoutPath := getEnv("PADDLE_CHECKOUT_CREATE_PATH", "/checkouts")
-	apiKey := strings.TrimSpace(os.Getenv("PADDLE_API_KEY"))
-	if apiKey == "" {
+	if _, err := ensureSubscriptionRow(userID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "paddle api key not configured",
+			"error": "failed to prepare subscription record",
 		})
 	}
 
-	payload := paddleCheckoutCreatePayload{
-		Items: []paddleCheckoutItem{
+	checkoutURL, raw, err := createPaddleTransactionCheckout(priceID, map[string]any{
+		"user_id":       userID,
+		"purchase_type": "credits",
+		"package_type":  fmt.Sprintf("addon_pack_%d", req.Credits),
+	})
+	if err != nil {
+		log.Printf("[PADDLE] credit checkout failed: %v", err)
+		log.Printf("[PADDLE] response: %s", raw)
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error":   "paddle checkout creation failed",
+			"details": raw,
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"checkout_url": checkoutURL,
+	})
+}
+
+func createPaddleTransactionCheckout(priceID string, customData map[string]any) (string, string, error) {
+	apiBase := strings.TrimRight(getEnv("PADDLE_API_BASE_URL", "https://api.paddle.com"), "/")
+	apiURL := apiBase + "/transactions"
+	apiKey := strings.TrimSpace(os.Getenv("PADDLE_API_KEY"))
+	if apiKey == "" {
+		return "", "", fmt.Errorf("paddle api key not configured")
+	}
+
+	defaultPaymentURL := strings.TrimSpace(os.Getenv("PADDLE_DEFAULT_PAYMENT_URL"))
+
+	var checkoutURL *string
+	if defaultPaymentURL != "" {
+		checkoutURL = &defaultPaymentURL
+	}
+
+	payload := paddleTransactionCreatePayload{
+		Items: []paddleTransactionItem{
 			{PriceID: priceID, Quantity: 1},
 		},
-		CustomData: map[string]any{
-			"user_id":       userID,
-			"purchase_type": "credits",
-			"package_type":  fmt.Sprintf("addon_pack_%d", req.Credits),
-		},
+		CollectionMode: "automatic",
+		Checkout:       paddleTransactionCheckout{URL: checkoutURL},
+		CustomData:     customData,
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to encode checkout payload",
-		})
+		return "", "", fmt.Errorf("failed to encode checkout payload: %w", err)
 	}
 
 	log.Println("[PADDLE] Payload:")
 	log.Println(string(body))
+	log.Println("[PADDLE] URL:", apiURL)
 
-	url := apiBase + checkoutPath
-	log.Println("[PADDLE] URL:", url)
-
-	httpReq, err := http.NewRequest(
-		http.MethodPost,
-		url,
-		bytes.NewReader(body),
-	)
+	httpReq, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "failed to build checkout request",
-		})
+		return "", "", fmt.Errorf("failed to build checkout request: %w", err)
 	}
 
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
@@ -265,9 +197,7 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 
 	httpRes, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "failed to contact paddle",
-		})
+		return "", "", fmt.Errorf("failed to contact paddle: %w", err)
 	}
 	defer httpRes.Body.Close()
 
@@ -277,35 +207,46 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 	log.Printf("[PADDLE] Response: %s", string(raw))
 
 	if httpRes.StatusCode < 200 || httpRes.StatusCode >= 300 {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error":   "paddle checkout creation failed",
-			"details": string(raw),
-		})
+		return "", string(raw), fmt.Errorf("paddle checkout creation failed")
 	}
 
-	var decoded paddleCheckoutCreateResponse
+	var decoded paddleTransactionCreateResponse
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "failed to parse paddle response",
-		})
+		return "", string(raw), fmt.Errorf("failed to parse paddle response: %w", err)
 	}
 
-	checkoutURL := firstNonEmpty(
-		decoded.Data.URL,
-		decoded.Data.CheckoutURL,
-		decoded.URL,
-		decoded.CheckoutURL,
-	)
-
-	if checkoutURL == "" {
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"error": "paddle response did not include a checkout url",
-		})
+	if decoded.Data.Checkout.URL == nil || strings.TrimSpace(*decoded.Data.Checkout.URL) == "" {
+		return "", string(raw), fmt.Errorf("paddle response did not include a checkout url")
 	}
 
-	return c.JSON(fiber.Map{
-		"checkout_url": checkoutURL,
-	})
+	return *decoded.Data.Checkout.URL, string(raw), nil
+}
+
+func ensureSubscriptionRow(userID string) (*config.Subscription, error) {
+	var sub config.Subscription
+	if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
+		return &sub, nil
+	}
+
+	now := time.Now()
+	sub = config.Subscription{
+		ID:                   uuid.New().String(),
+		UserID:               userID,
+		PaddleCustomerID:     "pending-customer-" + uuid.New().String(),
+		PaddleSubscriptionID: "pending-subscription-" + uuid.New().String(),
+		Status:               "free",
+		Tier:                 "free",
+		CurrentPeriodEnd:     now,
+		Window3HResetAt:      now.Add(3 * time.Hour),
+		WindowDailyResetAt:   nextMidnight(now),
+		WindowMonthlyResetAt: nextMonthStart(now),
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if err := config.DB.Create(&sub).Error; err != nil {
+		return nil, err
+	}
+	return &sub, nil
 }
 
 func creditPriceID(credits int) string {
@@ -337,7 +278,6 @@ func priceIDForPlan(tier, interval string) string {
 			return strings.TrimSpace(os.Getenv("PADDLE_PRICE_PLUS_YEARLY"))
 		}
 		return strings.TrimSpace(os.Getenv("PADDLE_PRICE_PLUS_MONTHLY"))
-
 	case "pro":
 		if interval == "yearly" {
 			return strings.TrimSpace(os.Getenv("PADDLE_PRICE_PRO_YEARLY"))
