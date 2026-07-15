@@ -357,6 +357,8 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 			CreatedAt:           now,
 		}
 
+		log.Println("[PADDLE WEBHOOK] " + strconv.FormatFloat(tx.Amount, 'a', 2, 64))
+
 		if err := config.DB.Create(&tx).Error; err != nil {
 			log.Println(err)
 			return c.Status(500).SendString("failed to save transaction")
