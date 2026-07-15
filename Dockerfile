@@ -4,10 +4,10 @@ FROM golang:1.26-bookworm AS go-builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN --mount=type=cache,id=go-mod,target=/go/pkg/mod go mod download
 
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/go-build \
+RUN --mount=type=cache,id=go-build,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/server .
 
 FROM python:3.12-slim-bookworm AS runtime
