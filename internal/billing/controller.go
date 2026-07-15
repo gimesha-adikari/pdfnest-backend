@@ -277,55 +277,102 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 		} else {
 			log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for cancellation event")
 		}
-
 	case "transaction.completed":
 		log.Println("[PADDLE WEBHOOK] Processing completed transaction")
 
-		// Keep subscription state in sync for subscription purchases if we have a row.
-		if strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType)) == "credits" {
-			if userID != "" {
-				if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
-					packUnits := packageUnits(payload.Data.CustomData.PackageType)
-					log.Println("[PADDLE WEBHOOK] Credit pack detected:", payload.Data.CustomData.PackageType, "units:", packUnits)
-
-					if packUnits > 0 {
-						sub.CustomCredits += packUnits
-						sub.UpdatedAt = now
-						if err := config.DB.Save(&sub).Error; err != nil {
-							log.Println("[PADDLE WEBHOOK] ERROR: Failed to add credit units:", err)
-							return c.Status(500).SendString("Failed to add credit units")
-						}
-						log.Println("[PADDLE WEBHOOK] Credits added successfully")
-					}
-				}
-			}
-		}
-
-		// Transaction amount in Paddle Billing webhook is nested under details.totals.
 		amount := paddleTransactionAmount(payload)
-		currency := firstNonEmpty(payload.Data.Details.Totals.CurrencyCode, payload.Data.CurrencyCode)
+		currency := firstNonEmpty(
+			payload.Data.Details.Totals.CurrencyCode,
+			payload.Data.CurrencyCode,
+		)
 
-		if userID != "" {
-			if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err == nil {
-				tx := config.Transaction{
-					ID:                  uuid.New().String(),
-					UserID:              sub.UserID,
-					SubscriptionID:      sub.ID,
-					PaddleTransactionID: payload.Data.ID,
-					Amount:              amount,
-					Currency:            currency,
-					Status:              "completed",
-					CreatedAt:           now,
-				}
-				if err := config.DB.Create(&tx).Error; err != nil {
-					log.Println("[PADDLE WEBHOOK] ERROR: Failed to record transaction:", err)
-					return c.Status(500).SendString("Failed to record transaction")
-				}
-				log.Println("[PADDLE WEBHOOK] Transaction recorded successfully")
-			} else {
-				log.Println("[PADDLE WEBHOOK] WARNING: No subscription found for user:", userID)
-			}
+		log.Println("[PADDLE WEBHOOK] Amount:", amount)
+		log.Println("[PADDLE WEBHOOK] Currency:", currency)
+
+		if userID == "" {
+			log.Println("[PADDLE WEBHOOK] Missing user id")
+			break
 		}
+
+		if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err != nil {
+			log.Println("[PADDLE WEBHOOK] Subscription row not found:", err)
+			break
+		}
+
+		purchaseType := strings.ToLower(strings.TrimSpace(payload.Data.CustomData.PurchaseType))
+
+		switch purchaseType {
+
+		case "credits":
+
+			packUnits := packageUnits(payload.Data.CustomData.PackageType)
+
+			log.Println("[PADDLE WEBHOOK] Credit purchase")
+			log.Println("[PADDLE WEBHOOK] Credits:", packUnits)
+
+			if packUnits > 0 {
+				sub.CustomCredits += packUnits
+				sub.UpdatedAt = now
+
+				if err := config.DB.Save(&sub).Error; err != nil {
+					log.Println(err)
+					return c.Status(500).SendString("failed to update credits")
+				}
+			}
+
+		case "subscription":
+
+			log.Println("[PADDLE WEBHOOK] Subscription purchase")
+
+			sub.Status = "active"
+
+			sub.PaddleCustomerID = payload.Data.CustomerID
+
+			if payload.Data.SubscriptionID != "" {
+				sub.PaddleSubscriptionID = payload.Data.SubscriptionID
+			}
+
+			sub.BillingInterval = payload.Data.CustomData.BillingInterval
+			sub.CurrentPeriodEnd = chooseSubscriptionEnd(payload, now)
+			sub.UpdatedAt = now
+
+			switch strings.ToLower(payload.Data.CustomData.PackageType) {
+
+			case "plus":
+				sub.Tier = "plus"
+
+			case "pro":
+				sub.Tier = "pro"
+			}
+
+			resetBillingWindows(&sub, now)
+			sub.WindowMonthlyResetAt = sub.CurrentPeriodEnd
+
+			if err := config.DB.Save(&sub).Error; err != nil {
+				log.Println(err)
+				return c.Status(500).SendString("failed to update subscription")
+			}
+
+			log.Println("[PADDLE WEBHOOK] Subscription activated")
+		}
+
+		tx := config.Transaction{
+			ID:                  uuid.New().String(),
+			UserID:              sub.UserID,
+			SubscriptionID:      sub.ID,
+			PaddleTransactionID: payload.Data.ID,
+			Amount:              amount,
+			Currency:            currency,
+			Status:              "completed",
+			CreatedAt:           now,
+		}
+
+		if err := config.DB.Create(&tx).Error; err != nil {
+			log.Println(err)
+			return c.Status(500).SendString("failed to save transaction")
+		}
+
+		log.Println("[PADDLE WEBHOOK] Transaction saved")
 
 	default:
 		log.Println("[PADDLE WEBHOOK] Unhandled event type:", payload.EventType)
