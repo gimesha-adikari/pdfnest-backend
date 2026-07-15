@@ -321,30 +321,21 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 			}
 
 		case "subscription":
-
 			log.Println("[PADDLE WEBHOOK] Subscription purchase")
-
 			sub.Status = "active"
-
 			sub.PaddleCustomerID = payload.Data.CustomerID
-
 			if payload.Data.SubscriptionID != "" {
 				sub.PaddleSubscriptionID = payload.Data.SubscriptionID
 			}
-
 			sub.BillingInterval = payload.Data.CustomData.BillingInterval
 			sub.CurrentPeriodEnd = chooseSubscriptionEnd(payload, now)
 			sub.UpdatedAt = now
-
 			switch strings.ToLower(payload.Data.CustomData.PackageType) {
-
 			case "plus":
 				sub.Tier = "plus"
-
 			case "pro":
 				sub.Tier = "pro"
 			}
-
 			resetBillingWindows(&sub, now)
 			sub.WindowMonthlyResetAt = sub.CurrentPeriodEnd
 
@@ -355,7 +346,6 @@ func (ctrl *Controller) HandleWebhook(c *fiber.Ctx) error {
 
 			log.Println("[PADDLE WEBHOOK] Subscription activated")
 		}
-
 		tx := config.Transaction{
 			ID:                  uuid.New().String(),
 			UserID:              sub.UserID,
@@ -482,6 +472,7 @@ func (ctrl *Controller) GetTransactionHistory(c *fiber.Ctx) error {
 
 	var transactions []config.Transaction
 	config.DB.Where("user_id = ?", userID).Order("created_at desc").Find(&transactions)
+	log.Println(transactions)
 	return c.JSON(transactions)
 }
 
