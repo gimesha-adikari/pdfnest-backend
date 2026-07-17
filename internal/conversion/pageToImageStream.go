@@ -2,15 +2,15 @@ package conversion
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"image/jpeg"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -18,7 +18,7 @@ import (
 func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileHeader, pageNum int, scale float64) ([]byte, error) {
 	src, err := fileHeader.Open()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read uploaded file payload stream: %v", err)
+		return nil, fmt.Errorf("failed to read uploaded file payload stream: %w", err)
 	}
 	defer src.Close()
 
@@ -34,75 +34,94 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 
 	dst, err := os.Create(tempFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to allocate disk memory space for temporary vector context: %v", err)
+		return nil, fmt.Errorf("failed to allocate disk memory space for temporary vector context: %w", err)
 	}
+	defer func() {
+		_ = dst.Close()
+	}()
 	defer os.Remove(tempFilePath)
 
 	if _, err = io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		return nil, fmt.Errorf("disk write failure on payload compilation pass: %v", err)
+		return nil, fmt.Errorf("disk write failure on payload compilation pass: %w", err)
 	}
-	_ = dst.Close()
+	if err := dst.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temporary payload file: %w", err)
+	}
 
 	targetPdfPath := tempFilePath
 
 	if ext != ".pdf" {
 		compiledPdfPath, err := s.OfficeToPdf(tempFilePath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compile office document for preview generation: %v", err)
+			return nil, fmt.Errorf("failed to compile office document for preview generation: %w", err)
 		}
 		targetPdfPath = compiledPdfPath
 		defer os.Remove(targetPdfPath)
 	}
 
-	renderScript := filepath.Join(".", "scripts", "pdf_render_page.py")
-
-	request := map[string]any{
-		"documentPath": targetPdfPath,
-		"page":         pageNum,
-		"dpi":          72.0 * scale,
+	workerBaseURL := os.Getenv("PDFNEST_WORKER_URL")
+	if workerBaseURL == "" {
+		workerBaseURL = "http://localhost:8000"
 	}
 
-	reqBytes, err := json.Marshal(request)
+	pdfFile, err := os.Open(targetPdfPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode render request: %v", err)
+		return nil, fmt.Errorf("failed to open target pdf for worker request: %w", err)
 	}
+	defer pdfFile.Close()
 
-	pythonExec := filepath.Join(".", "venv", "bin", "python")
-	cmd := exec.Command(pythonExec, renderScript)
-	cmd.Stdin = bytes.NewReader(reqBytes)
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
 
-	output, err := cmd.CombinedOutput()
+	part, err := writer.CreateFormFile("file", filepath.Base(targetPdfPath))
 	if err != nil {
-		return nil, fmt.Errorf("page render failed: %v; output: %s", err, strings.TrimSpace(string(output)))
+		return nil, fmt.Errorf("failed to create file form part: %w", err)
 	}
 
-	var resp struct {
-		Success   bool   `json:"success"`
-		Error     string `json:"error"`
-		ImagePath string `json:"imagePath"`
+	if _, err := io.Copy(part, pdfFile); err != nil {
+		return nil, fmt.Errorf("failed to stream pdf to worker: %w", err)
 	}
 
-	if err := json.Unmarshal(output, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse page render output: %v; raw: %s", err, strings.TrimSpace(string(output)))
+	if err := writer.WriteField("page", fmt.Sprintf("%d", pageNum)); err != nil {
+		return nil, fmt.Errorf("failed to set page field: %w", err)
 	}
 
-	if !resp.Success {
-		if resp.Error == "" {
-			resp.Error = "unknown render error"
-		}
-		return nil, fmt.Errorf("page render failed: %s", resp.Error)
+	if err := writer.WriteField("dpi", fmt.Sprintf("%f", 72.0*scale)); err != nil {
+		return nil, fmt.Errorf("failed to set dpi field: %w", err)
 	}
 
-	imgBytes, err := os.ReadFile(resp.ImagePath)
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(workerBaseURL, "/")+"/api/v1/render/page", &body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read rendered image file: %v", err)
+		return nil, fmt.Errorf("failed to build worker request: %w", err)
 	}
-	defer os.Remove(resp.ImagePath)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	_, err = jpeg.Decode(bytes.NewReader(imgBytes))
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("rendered image is not a valid jpeg: %v", err)
+		return nil, fmt.Errorf("page render failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("page render failed: status=%s body=%s", resp.Status, strings.TrimSpace(string(errBody)))
+	}
+
+	imgBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read rendered image bytes: %w", err)
+	}
+
+	if _, err = jpeg.Decode(bytes.NewReader(imgBytes)); err != nil {
+		return nil, fmt.Errorf("rendered image is not a valid jpeg: %w", err)
 	}
 
 	return imgBytes, nil

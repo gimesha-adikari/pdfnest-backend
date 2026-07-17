@@ -2,7 +2,10 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/docker.iml" filepath="$PROJECT_DIR$/docker.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../../next/pdfnest/pdfnest.iml" filepath="$PROJECT_DIR$/../../next/pdfnest/pdfnest.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/pdfnest-backend.iml" filepath="$PROJECT_DIR$/.idea/pdfnest-backend.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../../Python/fast_api/pdfnest-worker/pdfnest-worker.iml" filepath="$PROJECT_DIR$/../../Python/fast_api/pdfnest-worker/pdfnest-worker.iml" />
     </modules>
   </component>
 </project>

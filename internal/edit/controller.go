@@ -2,6 +2,8 @@ package edit
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -14,13 +16,10 @@ type Controller struct {
 }
 
 func NewController(s Service) *Controller {
-	return &Controller{
-		service: s,
-	}
+	return &Controller{service: s}
 }
 
 func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
-
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -28,6 +27,8 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 			"error":   "PDF file parameter is required",
 		})
 	}
+
+	filePassword := c.FormValue("file_password")
 
 	tempPdfPath := filepath.Join(os.TempDir(), "source_"+uuid.New().String()+".pdf")
 	if err := c.SaveFile(fileHeader, tempPdfPath); err != nil {
@@ -37,38 +38,26 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		})
 	}
 
-	layoutBytes, err := cr.service.ExtractLayout(tempPdfPath)
+	submission, err := cr.service.ExtractLayout(tempPdfPath, filePassword)
 	if err != nil {
-		os.Remove(tempPdfPath)
-
-		println("==================== PYTHON RUNTIME ERROR CRASH DUMP ====================")
-		println(err.Error())
-		println("=========================================================================")
-
+		_ = os.Remove(tempPdfPath)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "An unexpected error occurred while processing the document. Please try again."})
-	}
-
-	var mappedResponse map[string]interface{}
-	if err := json.Unmarshal(layoutBytes, &mappedResponse); err != nil {
-		os.Remove(tempPdfPath)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to decode coordinate map sequence from layout analyzer",
+			"error":   err.Error(),
 		})
 	}
 
-	mappedResponse["source_tracker"] = tempPdfPath
-
-	return c.JSON(mappedResponse)
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success":        true,
+		"job_id":         submission.JobID,
+		"status":         submission.Status,
+		"queue_name":     submission.QueueName,
+		"source_tracker": tempPdfPath,
+	})
 }
 
 func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
-
 	payloadBytes := c.Body()
-
-	println(string(payloadBytes))
 
 	var tracker struct {
 		SourceTracker string `json:"source_tracker"`
@@ -93,7 +82,8 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 			"error":   "The original file staging window expired. Please re-upload the document",
 		})
 	}
-	fullOutPath, err := cr.service.CompileLayout(tracker.SourceTracker, payloadBytes)
+
+	submission, err := cr.service.CompileLayout(tracker.SourceTracker, payloadBytes)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -101,15 +91,57 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 		})
 	}
 
-	outPdfName := "edited_" + filepath.Base(fullOutPath)
-	c.Set("Content-Type", "application/pdf")
-	c.Set("Content-Disposition", "attachment; filename="+outPdfName)
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success":    true,
+		"job_id":     submission.JobID,
+		"status":     submission.Status,
+		"queue_name": submission.QueueName,
+	})
+}
 
-	err = c.SendFile(fullOutPath)
+func (cr *Controller) HandleJobStatus(c *fiber.Ctx) error {
+	jobID := c.Params("job_id")
+	job, err := cr.service.GetJobStatus(jobID)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+	return c.JSON(job)
+}
 
-	if cleanupErr := os.Remove(fullOutPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-		println("[CLEANUP WARNING] Failed to purge temporary output compiled PDF:", cleanupErr.Error())
+func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
+	jobID := c.Params("job_id")
+
+	resp, err := cr.service.GetJobDownload(jobID)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return c.Status(resp.StatusCode).Send(b)
 	}
 
-	return err
+	pdfBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		c.Set("Content-Type", ct)
+	} else {
+		c.Set("Content-Type", "application/pdf")
+	}
+
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		c.Set("Content-Disposition", cd)
+	}
+
+	return c.Send(pdfBytes)
 }

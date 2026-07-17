@@ -10,6 +10,7 @@ from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
+import psutil
 import pytesseract
 from PIL import Image
 
@@ -374,6 +375,9 @@ def compile_document(original_pdf_path: str, output_pdf_path: str, pages_json_pa
         rotations = [p.rotation for p in orig_doc]
         pages = layout_data.get("pages", [])
 
+        process = psutil.Process(os.getpid())
+        print(process.memory_info().rss / 1024 / 1024)
+
         for page_idx, page_data in enumerate(pages):
             if page_idx >= len(source_doc):
                 continue
@@ -416,6 +420,9 @@ def compile_document(original_pdf_path: str, output_pdf_path: str, pages_json_pa
                             color=color_rgb,
                             align=0,
                         )
+                        process = psutil.Process(os.getpid())
+                        print(process.memory_info().rss / 1024 / 1024)
+
                         if rc < 0:
                             pt = fitz.Point(x0, y0 + (h * 0.85))
                             new_page.insert_text(

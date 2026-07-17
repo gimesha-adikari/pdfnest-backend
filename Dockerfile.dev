@@ -1,0 +1,46 @@
+FROM golang:1.26-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PORT=10000 \
+    CHROMIUM_PATH=/usr/bin/chromium \
+    PATH="/opt/venv/bin:/go/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ghostscript \
+    tesseract-ocr \
+    chromium \
+    python3-venv \
+    python3-pip \
+    libpango-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libffi8 \
+    libssl3 \
+    libjpeg62-turbo \
+    zlib1g \
+    shared-mime-info \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN go install github.com/air-verse/air@latest
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY requirements.txt /app/requirements.txt
+
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    if [ -f /app/requirements.txt ]; then \
+      /opt/venv/bin/pip install --no-cache-dir -r /app/requirements.txt; \
+    fi
+
+COPY .air.toml /app/.air.toml
+
+EXPOSE 10000
+
+CMD ["air", "-c", ".air.toml"]

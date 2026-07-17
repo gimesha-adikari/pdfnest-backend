@@ -2,5 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../Python/fast_api/pdfnest-worker" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../../next/pdfnest" vcs="Git" />
   </component>
 </project>

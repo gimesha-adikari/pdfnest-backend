@@ -6,3 +6,4 @@
 /.env.render
 /tmp/
 /collect_text_and_tree.py.py
+/scripts/archive/

@@ -10,7 +10,7 @@ def hex_to_rgb(hex_str):
         rgb_int = tuple(int(hex_str[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
         return (rgb_int[0] / 255.0, rgb_int[1] / 255.0, rgb_int[2] / 255.0)
     except Exception:
-        return (1.0, 1.0, 1.0)
+        return   (1.0, 1.0, 1.0)
 
 
 def patch_pdf(input_pdf_path, output_pdf_path, pages_json_path):
