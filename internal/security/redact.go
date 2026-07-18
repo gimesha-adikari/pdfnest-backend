@@ -1,45 +1,88 @@
 package security
 
 import (
-	"errors"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"pdfnest-backend/internal/worker"
 
 	"github.com/google/uuid"
 )
 
-// RedactPageText executes true secure binary redaction by delegating coordinate
-// extraction, keyword matching, and pixel box scrubbing to the local PyMuPDF virtual environment.
-func (s *securityService) RedactPageText(inputPath string, outputPath string, keywords []string, boxesStr string) (string, error) {
+func (s *securityService) RedactPageText(
+	inputPath string,
+	outputDir string,
+	keywords []string,
+	boxesStr string,
+) (string, error) {
+
 	outFileName := fmt.Sprintf("redacted_%s.pdf", uuid.New().String())
-	finalOutPath := filepath.Join(outputPath, outFileName)
+	finalOutPath := filepath.Join(outputDir, outFileName)
 
-	// Join keywords with our custom multi-word safe character delimiter
-	keywordsStr := strings.Join(keywords, "|||")
-
-	// Fallback empty array literal safeguard to prevent empty string command arguments breaking python sys indexes
 	if boxesStr == "" {
 		boxesStr = "[]"
 	}
 
-	// Reference local isolated python execution binary assets natively
-	pythonExecutable := filepath.Join(".", "venv", "bin", "python")
-	scriptPath := filepath.Join("scripts", "redact.py")
+	keywordsStr := strings.Join(keywords, "|||")
 
-	// Execute execution routine passing: (inputFile, outputFile, keywordsString, canvasBoxesJSONString)
-	cmd := exec.Command(pythonExecutable, scriptPath, inputPath, finalOutPath, keywordsStr, boxesStr)
+	body, contentType, err := worker.CreateMultipartRequest(
+		inputPath,
+		func(w *multipart.Writer) error {
 
-	output, err := cmd.CombinedOutput()
+			if err := w.WriteField("keywords", keywordsStr); err != nil {
+				return err
+			}
+
+			if err := w.WriteField("boxes", boxesStr); err != nil {
+				return err
+			}
+
+			return nil
+		},
+	)
 	if err != nil {
-		return "", fmt.Errorf("secure redaction engine failed: %v | Details: %s", err, string(output))
+		return "", err
 	}
 
-	// Verify target out file block exists
-	if _, err := os.Stat(finalOutPath); os.IsNotExist(err) {
-		return "", errors.New("redaction script completed but output file is missing")
+	req, err := http.NewRequest(
+		http.MethodPost,
+		worker.GetWorkerURL()+"/api/v1/redact",
+		body,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := worker.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("redaction worker unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("redaction worker failed: %s", string(b))
+	}
+
+	out, err := os.Create(finalOutPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", err
+	}
+
+	if _, err := os.Stat(finalOutPath); err != nil {
+		return "", fmt.Errorf("worker returned successfully but output PDF is missing")
 	}
 
 	return outFileName, nil
