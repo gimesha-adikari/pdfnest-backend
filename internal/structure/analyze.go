@@ -4,14 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+var workerURL = os.Getenv("PDFNEST_WORKER_URL")
 
 type PageAnalysis struct {
 	Page              int     `json:"page"`
@@ -30,33 +33,71 @@ type PDFAnalysis struct {
 }
 
 func (s *structureService) AnalyzePDF(inputPath, filePassword string) (*PDFAnalysis, error) {
-	scriptPath := "./scripts/pdf_analyzer.py"
-	pythonExecutable := "./venv/bin/python"
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
 
-	args := []string{scriptPath, inputPath}
-	if strings.TrimSpace(filePassword) != "" {
-		args = append(args, filePassword)
+	fileWriter, err := writer.CreateFormFile("file", filepath.Base(inputPath))
+	if err != nil {
+		return nil, err
 	}
 
-	cmd := exec.Command(pythonExecutable, args...)
+	file, err := os.Open(inputPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if _, err := io.Copy(fileWriter, file); err != nil {
+		return nil, err
+	}
 
-	if err := cmd.Run(); err != nil {
+	if filePassword != "" {
+		if err := writer.WriteField("file_password", filePassword); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	if workerURL == "" {
+		workerURL = "http://0.0.0.0:8000"
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		workerURL+"/api/v1/analyzer/analyze",
+		body,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("worker request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf(
-			"python analyzer failed: %w; stderr: %s; stdout: %s",
-			err,
-			strings.TrimSpace(stderr.String()),
-			strings.TrimSpace(stdout.String()),
+			"worker returned %d: %s",
+			resp.StatusCode,
+			string(respBody),
 		)
 	}
 
 	var analysis PDFAnalysis
-	if err := json.Unmarshal(stdout.Bytes(), &analysis); err != nil {
-		return nil, fmt.Errorf("failed to parse analyzer output: %w", err)
+	if err := json.Unmarshal(respBody, &analysis); err != nil {
+		return nil, fmt.Errorf("invalid worker response: %w", err)
 	}
 
 	return &analysis, nil
@@ -74,7 +115,11 @@ func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 	}
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+
+	inputPath := filepath.Join(
+		tempDir,
+		uuid.New().String()+"-"+filepath.Base(fileHeader.Filename),
+	)
 
 	if err := c.SaveFile(fileHeader, inputPath); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -82,15 +127,13 @@ func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 			"message": "Failed to store input PDF in temporary storage.",
 		})
 	}
-	defer func() {
-		_ = os.Remove(inputPath)
-	}()
+	defer os.Remove(inputPath)
 
 	analysis, err := ctrl.service.AnalyzePDF(inputPath, filePassword)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "ANALYZE_ENGINE_FAILED",
-			"message": "PDF analysis failed: " + err.Error(),
+			"message": err.Error(),
 		})
 	}
 
