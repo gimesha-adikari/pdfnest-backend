@@ -13,9 +13,9 @@ func Use(tool Tool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 
 		path := c.Path()
-		if strings.HasSuffix(path, "/structure/highlight") ||
-			strings.HasSuffix(path, "/structure/strikeout") ||
-			strings.HasSuffix(path, "/structure/underline") {
+		if strings.HasSuffix(path, "/markup/highlight") ||
+			strings.HasSuffix(path, "/markup/strikeout") ||
+			strings.HasSuffix(path, "/markup/underline") {
 			return c.Next()
 		}
 

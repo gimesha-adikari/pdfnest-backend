@@ -101,22 +101,4 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 		billing.Use(billing.AddTextPDF),
 		ctrl.AddText,
 	)
-
-	structureGroup.Post(
-		"/highlight",
-		billing.Use(billing.HighlightPDF),
-		ctrl.Highlight,
-	)
-
-	structureGroup.Post(
-		"/strikeout",
-		billing.Use(billing.StrikeoutPDF),
-		ctrl.Strikeout,
-	)
-
-	structureGroup.Post(
-		"/underline",
-		billing.Use(billing.UnderlinePDF),
-		ctrl.Underline,
-	)
 }

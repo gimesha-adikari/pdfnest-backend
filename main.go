@@ -13,6 +13,7 @@ import (
 	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/health"
 	"pdfnest-backend/internal/landing"
+	"pdfnest-backend/internal/markup"
 	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
@@ -114,6 +115,11 @@ func main() {
 	editService := edit.NewService()
 	editController := edit.NewController(editService)
 	edit.RegisterRoutes(apiGroup, editController)
+
+	// Domain 7: Markup (Highlight / Underline / Strikeout)
+	markupService := markup.NewService()
+	markupController := markup.NewController(markupService)
+	markup.RegisterRoutes(apiGroup, markupController)
 
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)

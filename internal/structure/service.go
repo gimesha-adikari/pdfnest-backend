@@ -14,9 +14,6 @@ type Service interface {
 	DuplicatePDFPages(inputPath string, pageSelection string, copies int) (string, error)
 	InsertBlankPages(inputPath string, insertAt string, targetPage int, count int) (string, error)
 	AddTextToPDF(inputPath string, elements []TextElement) (string, error)
-	HighlightPDF(inputPath string, boxes []HighlightBox, mode, filePassword string) (string, int, error)
-	UnderlinePDF(inputPath string, boxes []UnderlineBox, mode, filePassword string) (string, int, error)
-	StrikeoutPDF(inputPath string, boxes []StrikeoutBox, mode, filePassword string) (string, int, error)
 	AnalyzePDF(inputPath, filePassword string) (*PDFAnalysis, error)
 }
 type structureService struct{}
