@@ -16,22 +16,8 @@ require() {
 }
 
 require go
-require uv
+require air
 require pg_isready
-
-#############################################
-# Python
-#############################################
-
-if [ ! -d "venv" ]; then
-    echo "Creating Python virtual environment..."
-    uv venv
-fi
-
-source venv/bin/activate
-
-echo "Installing Python dependencies..."
-uv pip install -r requirements.txt
 
 #############################################
 # Go
@@ -59,8 +45,7 @@ else
 
     echo "Waiting for PostgreSQL..."
 
-    until pg_isready -q
-    do
+    until pg_isready -q; do
         sleep 1
     done
 
