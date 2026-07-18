@@ -3,81 +3,171 @@ package structure
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+	"pdfnest-backend/internal/worker"
 
 	"github.com/google/uuid"
 )
 
-const pdfMetadataScript = "scripts/pdf_metadata.py"
-
-func runMetadataScript(mode, inputPath, outputPath, password string, metadata map[string]string) ([]byte, error) {
-	args := []string{pdfMetadataScript, mode, inputPath}
-
-	if mode == "write" {
-		args = append(args, outputPath)
-
-		payload := map[string]string{
-			"title":    strings.TrimSpace(metadata["Title"]),
-			"author":   strings.TrimSpace(metadata["Author"]),
-			"subject":  strings.TrimSpace(metadata["Subject"]),
-			"keywords": strings.TrimSpace(metadata["Keywords"]),
-		}
-
-		metaJSON, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
-		}
-
-		args = append(args, "--metadata-json", string(metaJSON))
-	}
-
-	if password != "" {
-		args = append(args, "--password", password)
-	}
-
-	venvPython := filepath.Join("venv", "bin", "python3")
-	cmd := exec.Command(venvPython, args...)
-	cmd.Env = os.Environ()
-
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-
-	return out, nil
+type metadataResponse struct {
+	Title    string `json:"title"`
+	Author   string `json:"author"`
+	Subject  string `json:"subject"`
+	Keywords string `json:"keywords"`
 }
 
-func (s *structureService) UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error) {
-	tempDir := os.TempDir()
-	outputFile := "metadata-" + uuid.New().String() + ".pdf"
-	outputPath := filepath.Join(tempDir, outputFile)
+func (s *structureService) UpdateMetadataPDF(
+	inputPath string,
+	metadata map[string]string,
+	password string,
+) (string, error) {
 
-	if _, err := runMetadataScript("write", inputPath, outputPath, password, metadata); err != nil {
-		return "", fmt.Errorf("python metadata writer failed: %w", err)
+	tempDir := os.TempDir()
+	outputPath := filepath.Join(
+		tempDir,
+		"metadata-"+uuid.New().String()+".pdf",
+	)
+
+	file, err := os.Open(inputPath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	body, contentType, err := worker.CreateMultipartRequest(
+		inputPath,
+		func(writer *multipart.Writer) error {
+			err := writer.WriteField("title", metadata["Title"])
+			if err != nil {
+				return err
+			}
+			err = writer.WriteField("author", metadata["Author"])
+			if err != nil {
+				return err
+			}
+			err = writer.WriteField("subject", metadata["Subject"])
+			if err != nil {
+				return err
+			}
+			err = writer.WriteField("keywords", metadata["Keywords"])
+			if err != nil {
+				return err
+			}
+
+			if password != "" {
+				err := writer.WriteField("file_password", password)
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		},
+	)
+
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		worker.GetWorkerURL()+"/api/v1/metadata/write",
+		body,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := worker.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("metadata worker unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("metadata worker failed: %s", string(b))
+	}
+
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", err
 	}
 
 	return outputPath, nil
 }
 
-func (s *structureService) GetMetadataPDF(inputPath string, password string) (map[string]string, error) {
-	out, err := runMetadataScript("read", inputPath, "", password, nil)
+func (s *structureService) GetMetadataPDF(
+	inputPath string,
+	password string,
+) (map[string]string, error) {
+
+	file, err := os.Open(inputPath)
 	if err != nil {
-		return nil, fmt.Errorf("python metadata reader failed: %w", err)
+		return nil, err
+	}
+	defer file.Close()
+
+	body, contentType, err := worker.CreateMultipartRequest(
+		inputPath,
+		func(writer *multipart.Writer) error {
+			if password != "" {
+				err := writer.WriteField("file_password", password)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+
+	if err != nil {
+		return nil, err
 	}
 
-	result := map[string]string{
-		"title":    "",
-		"author":   "",
-		"subject":  "",
-		"keywords": "",
+	req, err := http.NewRequest(
+		http.MethodPost,
+		worker.GetWorkerURL()+"/api/v1/metadata/read",
+		body,
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := json.Unmarshal(out, &result); err != nil {
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := worker.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("metadata worker unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("metadata worker failed: %s", string(b))
+	}
+
+	var parsed metadataResponse
+
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("invalid metadata response: %w", err)
 	}
 
-	return result, nil
+	return map[string]string{
+		"title":    parsed.Title,
+		"author":   parsed.Author,
+		"subject":  parsed.Subject,
+		"keywords": parsed.Keywords,
+	}, nil
 }
