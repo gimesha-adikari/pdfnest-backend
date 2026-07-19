@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     dumb-init \
+    ghostscript \
     chromium \
     && rm -rf /var/lib/apt/lists/*
 
