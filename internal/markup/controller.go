@@ -2,10 +2,13 @@ package markup
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"pdfnest-backend/internal/storage"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -64,15 +67,51 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 	}
 	defer func() { _ = os.Remove(tempPdfPath) }()
 
-	var submission *workerJobSubmission
+	store, err := storage.Default()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
 
+	sourceKey := storage.BuildKey("markup/source", filepath.Ext(fileHeader.Filename))
+	if err := store.UploadFile(tempPdfPath, sourceKey, fileHeader.Header.Get("Content-Type")); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
+		})
+	}
+
+	payloadBytes, err := json.Marshal(map[string]any{
+		"boxes":         boxes,
+		"mode":          mode,
+		"file_password": filePassword,
+		"action":        action,
+	})
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to encode markup payload: %v", err),
+		})
+	}
+
+	payloadKey := storage.BuildKey("markup/payload", ".json")
+	if err := store.UploadBytes(payloadBytes, payloadKey, "application/json"); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to upload markup payload to R2: %v", err),
+		})
+	}
+
+	var submission *workerJobSubmission
 	switch action {
 	case ActionHighlight:
-		submission, err = cr.service.HighlightPDF(tempPdfPath, boxes, mode, filePassword)
+		submission, err = cr.service.HighlightPDF(sourceKey, payloadKey, fileHeader.Filename)
 	case ActionUnderline:
-		submission, err = cr.service.UnderlinePDF(tempPdfPath, boxes, mode, filePassword)
+		submission, err = cr.service.UnderlinePDF(sourceKey, payloadKey, fileHeader.Filename)
 	case ActionStrikeout:
-		submission, err = cr.service.StrikeoutPDF(tempPdfPath, boxes, mode, filePassword)
+		submission, err = cr.service.StrikeoutPDF(sourceKey, payloadKey, fileHeader.Filename)
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,

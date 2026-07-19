@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -21,40 +19,23 @@ func workerBaseURL() string {
 	return strings.TrimRight(base, "/")
 }
 
-func postMultipartFile(url string, fileFieldName string, filePath string, extraFields map[string]string) (*workerJobSubmission, error) {
-	file, err := os.Open(filePath)
+type markupRequest struct {
+	SourceKey  string `json:"source_key"`
+	PayloadKey string `json:"payload_key"`
+	SourceName string `json:"source_name,omitempty"`
+}
+
+func postJSON(url string, payload any) (*workerJobSubmission, error) {
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	part, err := writer.CreateFormFile(fileFieldName, filepath.Base(filePath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create form file: %w", err)
+		return nil, fmt.Errorf("failed to encode request json: %w", err)
 	}
 
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, fmt.Errorf("failed to stream file: %w", err)
-	}
-
-	for key, value := range extraFields {
-		if err := writer.WriteField(key, value); err != nil {
-			return nil, fmt.Errorf("failed to set %s: %w", key, err)
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize request body: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Minute}
 	resp, err := client.Do(req)
@@ -103,4 +84,53 @@ func getJSON[T any](url string, timeout time.Duration) (*T, error) {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	return &out, nil
+}
+
+func (s *service) HighlightPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/markup/highlight", markupRequest{
+		SourceKey:  sourceKey,
+		PayloadKey: payloadKey,
+		SourceName: sourceName,
+	})
+}
+
+func (s *service) UnderlinePDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/markup/underline", markupRequest{
+		SourceKey:  sourceKey,
+		PayloadKey: payloadKey,
+		SourceName: sourceName,
+	})
+}
+
+func (s *service) StrikeoutPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/markup/strikeout", markupRequest{
+		SourceKey:  sourceKey,
+		PayloadKey: payloadKey,
+		SourceName: sourceName,
+	})
+}
+
+func (s *service) GetJobStatus(jobID string) (*workerJobRecord, error) {
+	return getJSON[workerJobRecord](workerBaseURL()+"/api/v1/jobs/"+jobID, 30*time.Second)
+}
+
+func (s *service) GetJobDownload(jobID string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, workerBaseURL()+"/api/v1/markup/jobs/"+jobID+"/download", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build download request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download request failed: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("download failed: status=%s body=%s", resp.Status, strings.TrimSpace(string(b)))
+	}
+
+	return resp, nil
 }

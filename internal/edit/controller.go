@@ -2,10 +2,13 @@ package edit
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"pdfnest-backend/internal/storage"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -37,10 +40,26 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 			"error":   "Failed to stage original document on server disk",
 		})
 	}
+	defer func() { _ = os.Remove(tempPdfPath) }()
 
-	submission, err := cr.service.ExtractLayout(tempPdfPath, filePassword)
+	store, err := storage.Default()
 	if err != nil {
-		_ = os.Remove(tempPdfPath)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+
+	sourceKey := storage.BuildKey("edit/source", filepath.Ext(fileHeader.Filename))
+	if err := store.UploadFile(tempPdfPath, sourceKey, fileHeader.Header.Get("Content-Type")); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
+		})
+	}
+
+	submission, err := cr.service.ExtractLayout(sourceKey, filePassword, fileHeader.Filename)
+	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   err.Error(),
@@ -52,7 +71,8 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		"job_id":         submission.JobID,
 		"status":         submission.Status,
 		"queue_name":     submission.QueueName,
-		"source_tracker": tempPdfPath,
+		"source_tracker": sourceKey,
+		"source_name":    fileHeader.Filename,
 	})
 }
 
@@ -61,6 +81,7 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 
 	var tracker struct {
 		SourceTracker string `json:"source_tracker"`
+		SourceName    string `json:"source_name,omitempty"`
 	}
 	if err := json.Unmarshal(payloadBytes, &tracker); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -76,14 +97,28 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 		})
 	}
 
-	if _, err := os.Stat(tracker.SourceTracker); os.IsNotExist(err) {
-		return c.Status(fiber.StatusGone).JSON(fiber.Map{
+	store, err := storage.Default()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   "The original file staging window expired. Please re-upload the document",
+			"error":   err.Error(),
 		})
 	}
 
-	submission, err := cr.service.CompileLayout(tracker.SourceTracker, payloadBytes)
+	pagesJSONKey := storage.BuildKey("edit/layout", ".json")
+	if err := store.UploadBytes(payloadBytes, pagesJSONKey, "application/json"); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to upload edit payload to R2: %v", err),
+		})
+	}
+
+	sourceName := tracker.SourceName
+	if sourceName == "" {
+		sourceName = filepath.Base(tracker.SourceTracker)
+	}
+
+	submission, err := cr.service.CompileLayout(tracker.SourceTracker, pagesJSONKey, sourceName)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,

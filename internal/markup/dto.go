@@ -1,7 +1,5 @@
 package markup
 
-import "net/http"
-
 type Mode string
 
 const (
@@ -56,13 +54,4 @@ type workerJobRecord struct {
 	Result          map[string]any `json:"result"`
 	Error           string         `json:"error"`
 	CancelRequested bool           `json:"cancel_requested"`
-}
-
-type Service interface {
-	HighlightPDF(inputPath string, boxes []HighlightBox, mode, filePassword string) (*workerJobSubmission, error)
-	UnderlinePDF(inputPath string, boxes []UnderlineBox, mode, filePassword string) (*workerJobSubmission, error)
-	StrikeoutPDF(inputPath string, boxes []StrikeoutBox, mode, filePassword string) (*workerJobSubmission, error)
-
-	GetJobStatus(jobID string) (*workerJobRecord, error)
-	GetJobDownload(jobID string) (*http.Response, error)
 }

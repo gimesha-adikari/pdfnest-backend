@@ -3,8 +3,8 @@ package edit
 import "net/http"
 
 type Service interface {
-	ExtractLayout(pdfPath string, filePassword string) (*workerJobSubmission, error)
-	CompileLayout(originalPdf string, payload []byte) (*workerJobSubmission, error)
+	ExtractLayout(sourceKey string, filePassword string, sourceName string) (*workerJobSubmission, error)
+	CompileLayout(sourceKey string, pagesJSONKey string, sourceName string) (*workerJobSubmission, error)
 	GetJobStatus(jobID string) (*workerJobRecord, error)
 	GetJobDownload(jobID string) (*http.Response, error)
 }

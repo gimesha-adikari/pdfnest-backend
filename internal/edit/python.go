@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -30,6 +28,18 @@ type workerJobRecord struct {
 	CancelRequested bool           `json:"cancel_requested"`
 }
 
+type editorExtractRequest struct {
+	SourceKey    string `json:"source_key"`
+	FilePassword string `json:"file_password,omitempty"`
+	SourceName   string `json:"source_name,omitempty"`
+}
+
+type editorCompileRequest struct {
+	SourceKey    string `json:"source_key"`
+	PagesJSONKey string `json:"pages_json_key"`
+	SourceName   string `json:"source_name,omitempty"`
+}
+
 func workerBaseURL() string {
 	base := os.Getenv("PDFNEST_WORKER_URL")
 	if base == "" {
@@ -38,40 +48,17 @@ func workerBaseURL() string {
 	return strings.TrimRight(base, "/")
 }
 
-func postMultipartFile(url string, fileFieldName string, filePath string, extraFields map[string]string) (*workerJobSubmission, error) {
-	file, err := os.Open(filePath)
+func postJSON(url string, payload any) (*workerJobSubmission, error) {
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	part, err := writer.CreateFormFile(fileFieldName, filepath.Base(filePath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create form file: %w", err)
+		return nil, fmt.Errorf("failed to encode request json: %w", err)
 	}
 
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, fmt.Errorf("failed to stream file: %w", err)
-	}
-
-	for key, value := range extraFields {
-		if err := writer.WriteField(key, value); err != nil {
-			return nil, fmt.Errorf("failed to set %s: %w", key, err)
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize request body: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, url, &body)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 15 * time.Minute}
 	resp, err := client.Do(req)
@@ -97,85 +84,20 @@ func postMultipartFile(url string, fileFieldName string, filePath string, extraF
 	return &submission, nil
 }
 
-func postCompileJob(url string, filePath string, payload []byte) (*workerJobSubmission, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pdf form file: %w", err)
-	}
-
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, fmt.Errorf("failed to stream file: %w", err)
-	}
-
-	if err := writer.WriteField("payload", string(payload)); err != nil {
-		return nil, fmt.Errorf("failed to attach payload: %w", err)
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize request body: %w", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, url, &body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	client := &http.Client{Timeout: 15 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("worker request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("worker request failed: status=%s body=%s", resp.Status, strings.TrimSpace(string(b)))
-	}
-
-	var submission workerJobSubmission
-	if err := json.NewDecoder(resp.Body).Decode(&submission); err != nil {
-		return nil, fmt.Errorf("failed to decode job submission response: %w", err)
-	}
-
-	if submission.JobID == "" {
-		return nil, fmt.Errorf("worker returned empty job id")
-	}
-
-	return &submission, nil
+func (s *service) ExtractLayout(sourceKey string, filePassword string, sourceName string) (*workerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
+		SourceKey:    sourceKey,
+		FilePassword: filePassword,
+		SourceName:   sourceName,
+	})
 }
 
-func (s *service) ExtractLayout(pdfPath string, filePassword string) (*workerJobSubmission, error) {
-	extra := map[string]string{
-		"source_tracker": pdfPath,
-	}
-	if strings.TrimSpace(filePassword) != "" {
-		extra["file_password"] = filePassword
-	}
-
-	return postMultipartFile(
-		workerBaseURL()+"/api/v1/editor/extract",
-		"file",
-		pdfPath,
-		extra,
-	)
-}
-
-func (s *service) CompileLayout(originalPdf string, payload []byte) (*workerJobSubmission, error) {
-	return postCompileJob(
-		workerBaseURL()+"/api/v1/editor/compile",
-		originalPdf,
-		payload,
-	)
+func (s *service) CompileLayout(sourceKey string, pagesJSONKey string, sourceName string) (*workerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/editor/compile", editorCompileRequest{
+		SourceKey:    sourceKey,
+		PagesJSONKey: pagesJSONKey,
+		SourceName:   sourceName,
+	})
 }
 
 func (s *service) GetJobStatus(jobID string) (*workerJobRecord, error) {
