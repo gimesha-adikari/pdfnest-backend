@@ -23,6 +23,7 @@ Platen PDF is split into two services:
 
 - Go backend: public API, billing, auth, database access, landing page, and route orchestration
 - FastAPI worker: PDF processing runtime for the tools that used to rely on local Python execution
+#### Find the Worker here :-https://github.com/gimesha-adikari/pdfnest-worker.git
 
 The backend now talks to the worker through `PDFNEST_WORKER_URL` instead of running Python scripts locally.
 
