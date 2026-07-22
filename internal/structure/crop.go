@@ -11,7 +11,7 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
-func (s *structureService) CropPDF(inputPath string, cropBoxDesc string) (string, error) {
+func (s *structureService) CropPDF(inputPath string, cropBoxDesc string, selectedPages []string) (string, error) {
 	tempDir := os.TempDir()
 	outputFile := "cropped-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
@@ -23,8 +23,7 @@ func (s *structureService) CropPDF(inputPath string, cropBoxDesc string) (string
 		return "", fmt.Errorf("failed to parse crop box geometry parameters: %w", err)
 	}
 
-	err = api.CropFile(inputPath, outputPath, nil, box, config)
-	if err != nil {
+	if err := api.CropFile(inputPath, outputPath, selectedPages, box, config); err != nil {
 		return "", err
 	}
 

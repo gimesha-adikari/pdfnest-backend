@@ -10,7 +10,7 @@ type Service interface {
 	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
-	CropPDF(inputPath string, cropBoxDesc string) (string, error)
+	CropPDF(inputPath string, cropBoxDesc string, selectedPages []string) (string, error)
 	DuplicatePDFPages(inputPath string, pageSelection string, copies int) (string, error)
 	InsertBlankPages(inputPath string, insertAt string, targetPage int, count int) (string, error)
 	AddTextToPDF(inputPath string, elements []TextElement) (string, error)

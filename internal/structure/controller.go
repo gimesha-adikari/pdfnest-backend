@@ -617,8 +617,24 @@ func (ctrl *Controller) Sign(c *fiber.Ctx) error {
 	return c.SendFile(outputPath)
 }
 
-func (ctrl *Controller) Crop(c *fiber.Ctx) error {
+func parseSelectedPages(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
 
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 	cropBoxDesc := c.FormValue("box")
 	if cropBoxDesc == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -626,6 +642,8 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 			Message: "A target crop box boundary dimension map is required.",
 		})
 	}
+
+	selectedPages := parseSelectedPages(c.FormValue("pages"))
 
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -645,13 +663,14 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 			Message: "Failed to isolate document file parameters into scratch space.",
 		})
 	}
+
 	defer func() {
 		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
 			log.Printf("[CLEANUP WARNING] Crop: Failed to delete input file at %s: %v", inputPath, err)
 		}
 	}()
 
-	outputPath, err := ctrl.service.CropPDF(inputPath, cropBoxDesc)
+	outputPath, err := ctrl.service.CropPDF(inputPath, cropBoxDesc, selectedPages)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "CROPPING_ENGINE_FAILED",
@@ -661,6 +680,7 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("cropped_document.pdf")
+
 	err = c.SendFile(outputPath)
 
 	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
