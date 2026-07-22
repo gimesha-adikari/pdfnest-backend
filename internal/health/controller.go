@@ -23,8 +23,8 @@ func (h *Controller) Health(c *fiber.Ctx) error {
 		"status": "healthy",
 
 		"service": fiber.Map{
-			"name":        "pdfnest-backend",
-			"description": "PDFNest Backend API",
+			"name":        "platen-pdf-backend",
+			"description": "Platen PDF Backend API",
 			"version":     getEnv("APP_VERSION", "development"),
 			"environment": getEnv("APP_ENV", "development"),
 		},

@@ -1,8 +1,8 @@
 ![Project cover](cover.png)
 
-# PDFNest Backend
+# Platen PDF Backend
 
-PDFNest Backend is the Go/Fiber API that powers the PDFNest platform. It handles document security, optimization, page organization, conversion, extraction, and editing workflows, while a separate FastAPI worker service performs the heavier PDF processing tasks over HTTP.
+Platen PDF Backend is the Go/Fiber API that powers the Platen PDF platform. It handles document security, optimization, page organization, conversion, extraction, and editing workflows, while a separate FastAPI worker service performs the heavier PDF processing tasks over HTTP.
 
 ## What this backend does
 
@@ -19,7 +19,7 @@ The Go backend is now the orchestration layer for:
 
 ## Architecture
 
-PDFNest is split into two services:
+Platen PDF is split into two services:
 
 - Go backend: public API, billing, auth, database access, landing page, and route orchestration
 - FastAPI worker: PDF processing runtime for the tools that used to rely on local Python execution

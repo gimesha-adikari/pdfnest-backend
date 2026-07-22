@@ -109,7 +109,7 @@ func SeedSiteContent() {
 			SecuritySubtitle: "Document security is built into the core architecture.",
 			SecurityTags:     "Temporary processing,Secure transfers,Automatic cleanup,No permanent storage",
 
-			CtaGuestTitle: "Create a free account and start using PDFNest today.",
+			CtaGuestTitle: "Create a free account and start using Platen PDF today.",
 
 			CtaFreeTitle:    "Need more power?",
 			CtaFreeSubtitle: "Choose monthly or yearly billing and start with a 7-day free trial.",
@@ -122,7 +122,7 @@ func SeedSiteContent() {
 
 			FaqsJSON: `[
     {
-        "q":"Is PDFNest free?",
+        "q":"Is Platen PDF free?",
         "a":"Yes. The Free plan includes essential PDF tools with limited daily usage."
     },
     {
@@ -156,11 +156,11 @@ func SeedSiteContent() {
 	if count == 0 {
 		initialAbout := models.AboutPageContent{
 			ID:                  1,
-			HeroTag:             "About PDFNest",
+			HeroTag:             "About Platen PDF",
 			HeroTitle:           "Built For Modern PDF Workflows",
-			HeroDescription:     "PDFNest combines powerful PDF tools, visual workspaces, and secure cloud processing into a single platform. Whether you're editing a document, creating a portfolio, preparing reports, or managing complex PDF workflows, PDFNest helps you work faster and smarter.",
+			HeroDescription:     "Platen PDF combines powerful PDF tools, visual workspaces, and secure cloud processing into a single platform. Whether you're editing a document, creating a portfolio, preparing reports, or managing complex PDF workflows, Platen PDF helps you work faster and smarter.",
 			StatsJson:           `[{"value":"37+","label":"PDF Tools"},{"value":"3","label":"Workspace Types"},{"value":"Free","label":"Plan Available"},{"value":"Pro","label":"Advanced Workspaces"}]`,
-			SectionTitle:        "What Makes PDFNest Different",
+			SectionTitle:        "What Makes Platen PDF Different",
 			SectionSubtitle:     "More than a PDF converter. A complete PDF workspace.",
 			HighlightsJson:      `[{"title":"37+ PDF Tools","description":"Merge, split, compress, convert, secure, and organize PDFs with fast and reliable tools built for everyday work.","icon_type":"file"},{"title":"Virtual Document Studio","description":"Manage pages, watermarks, metadata, merging, compression, and document workflows from a single workspace.","icon_type":"layers"},{"title":"Interactive Canvas","description":"Design PDFs visually using drag-and-drop positioning, scaling controls, layer management, and visual editing.","icon_type":"pen"}]`,
 			StudioTitle:         "Virtual Document Studio",
@@ -170,12 +170,12 @@ func SeedSiteContent() {
 			CanvasDescription:   "Design PDFs visually using drag-and-drop tools. Position images, manage layers, resize content, and create custom page layouts before exporting.",
 			CanvasFeaturesJson:  `["Drag & drop editing","Layer management","Position controls","Custom layouts","Professional PDF exports"]`,
 			SecurityTitle:       "Privacy & Security",
-			SecurityDescription: "Your files remain yours. Documents are processed securely, used only for the requested operation, and automatically removed after processing. We design PDFNest around simplicity, security, and performance without unnecessary complexity.",
+			SecurityDescription: "Your files remain yours. Documents are processed securely, used only for the requested operation, and automatically removed after processing. We design Platen PDF around simplicity, security, and performance without unnecessary complexity.",
 			RoadmapTitle:        "Looking Ahead",
-			RoadmapDescription:  "PDFNest continues to evolve with new tools, workspaces, and automation features.",
+			RoadmapDescription:  "Platen PDF continues to evolve with new tools, workspaces, and automation features.",
 			RoadmapJson:         `["Advanced OCR","Team Workspaces","Batch Processing","Workflow Automation","Template Library","AI Assisted PDF Tools"]`,
 			MissionTitle:        "Our Mission",
-			MissionDescription:  "We believe powerful document tools should be accessible, intuitive, and fast. PDFNest was created to bring together everyday PDF utilities and advanced professional workspaces under one platform, allowing anyone to work with documents more efficiently without complicated software installations or unnecessary friction.",
+			MissionDescription:  "We believe powerful document tools should be accessible, intuitive, and fast. Platen PDF was created to bring together everyday PDF utilities and advanced professional workspaces under one platform, allowing anyone to work with documents more efficiently without complicated software installations or unnecessary friction.",
 		}
 		config.DB.Create(&initialAbout)
 	}

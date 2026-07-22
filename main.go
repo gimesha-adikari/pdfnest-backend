@@ -132,7 +132,7 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("PDFNest Engine starting securely on port %s...", port)
+	log.Printf("Platen PDF Engine starting securely on port %s...", port)
 	if err := app.Listen(":" + port); err != nil {
 		log.Fatalf("Server dynamic socket capture failed: %v", err)
 	}

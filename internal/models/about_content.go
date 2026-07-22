@@ -6,11 +6,11 @@ import (
 
 type AboutPageContent struct {
 	ID                  uint   `gorm:"primaryKey;autoIncrement"`
-	HeroTag             string `gorm:"type:varchar(255);not null;default:'About PDFNest'"`
+	HeroTag             string `gorm:"type:varchar(255);not null;default:'About Platen PDF'"`
 	HeroTitle           string `gorm:"type:varchar(255);not null;default:'Built For Modern PDF Workflows'"`
 	HeroDescription     string `gorm:"type:text;not null"`
 	StatsJson           string `gorm:"type:text;default:'[]'"`
-	SectionTitle        string `gorm:"type:varchar(255);not null;default:'What Makes PDFNest Different'"`
+	SectionTitle        string `gorm:"type:varchar(255);not null;default:'What Makes Platen PDF Different'"`
 	SectionSubtitle     string `gorm:"type:varchar(255);not null;default:'More than a PDF converter. A complete PDF workspace.'"`
 	HighlightsJson      string `gorm:"type:text;default:'[]'"`
 	StudioTitle         string `gorm:"type:varchar(255);not null;default:'Virtual Document Studio'"`

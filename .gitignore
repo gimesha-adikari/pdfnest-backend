@@ -38646,3 +38646,6 @@
 /venv/.lock
 /venv/lib64/
 /venv/pyvenv.cfg
+.env.compose
+.env.compose
+.env.compose

@@ -118,12 +118,12 @@ func sendVerificationEmail(toEmail, rawToken string) error {
 	params := &resend.SendEmailRequest{
 		From:    fromEmail,
 		To:      []string{toEmail},
-		Subject: "Verify your PDFNest email",
+		Subject: "Verify your Platen PDF email",
 
 		Text: fmt.Sprintf(
 			`Verify your email
 
-Thanks for creating your PDFNest account.
+Thanks for creating your Platen PDF account.
 
 Click the link below to verify your email:
 
@@ -143,7 +143,7 @@ If you didn't create this account, you can safely ignore this email.`,
 
 <h2>Verify your email</h2>
 
-<p>Thanks for creating your PDFNest account.</p>
+<p>Thanks for creating your Platen PDF account.</p>
 
 <p>Please click the button below to verify your email address.</p>
 

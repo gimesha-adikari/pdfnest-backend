@@ -1,4 +1,4 @@
-# PDFNest Backend - Render Deployment
+# Platen PDF Backend - Render Deployment
 
 ## What to commit
 
@@ -16,7 +16,7 @@
 
 - The Go application is built in a separate builder stage.
 - The runtime image contains only the Go server and its required system dependencies.
-- The backend communicates with the PDFNest Worker over HTTP for PDF processing.
+- The backend communicates with the Platen PDF Worker over HTTP for PDF processing.
 - Chromium is included only if your backend still uses `chromedp` or performs HTML-to-PDF conversion. If not, it can be removed.
 
 ---
