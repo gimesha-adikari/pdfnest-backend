@@ -28,10 +28,10 @@ func (s *ConversionService) ImagesToPDF(imagePaths []string) (string, error) {
 	outputPath := filepath.Join(tempDir, outputFile)
 
 	pdf := gofpdf.New("P", "mm", "A4", "")
+	pdf.SetMargins(0, 0, 0)
+	pdf.SetAutoPageBreak(false, 0)
 
-	pageWidth, _ := pdf.GetPageSize()
-	margin := 10.0
-	targetWidth := pageWidth - (margin * 2)
+	pageW, pageH := pdf.GetPageSize()
 
 	var intermediatePaths []string
 	defer func() {
@@ -57,8 +57,31 @@ func (s *ConversionService) ImagesToPDF(imagePaths []string) (string, error) {
 			intermediatePaths = append(intermediatePaths, standardizedPath)
 		}
 
+		imgW, imgH, err := getImageSizeMM(processedPath)
+		if err != nil {
+			return "", err
+		}
+
+		// Scale to fit inside the page while preserving aspect ratio.
+		// This ensures one dimension always touches the page edge.
+		scale := minFloat(pageW/imgW, pageH/imgH)
+		drawW := imgW * scale
+		drawH := imgH * scale
+		posX := (pageW - drawW) / 2
+		posY := (pageH - drawH) / 2
+
 		pdf.AddPage()
-		pdf.ImageOptions(processedPath, margin, margin, targetWidth, 0, false, gofpdf.ImageOptions{}, 0, "")
+		pdf.ImageOptions(
+			processedPath,
+			posX,
+			posY,
+			drawW,
+			drawH,
+			false,
+			gofpdf.ImageOptions{},
+			0,
+			"",
+		)
 
 		if pdf.Err() {
 			errMessage := pdf.Error()
@@ -67,12 +90,37 @@ func (s *ConversionService) ImagesToPDF(imagePaths []string) (string, error) {
 		}
 	}
 
-	err := pdf.OutputFileAndClose(outputPath)
-	if err != nil {
+	if err := pdf.OutputFileAndClose(outputPath); err != nil {
 		return "", err
 	}
 
 	return outputPath, nil
+}
+
+func getImageSizeMM(path string) (float64, float64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to read image dimensions: %w", err)
+	}
+
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return 0, 0, errors.New("invalid image dimensions")
+	}
+
+	return float64(cfg.Width), float64(cfg.Height), nil
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func convertToCompatibleJPEG(srcPath, tempDir string) (string, error) {
@@ -94,8 +142,7 @@ func convertToCompatibleJPEG(srcPath, tempDir string) (string, error) {
 	}
 	defer outFile.Close()
 
-	err = jpeg.Encode(outFile, img, &jpeg.Options{Quality: 90})
-	if err != nil {
+	if err := jpeg.Encode(outFile, img, &jpeg.Options{Quality: 90}); err != nil {
 		return "", fmt.Errorf("failed fallback format pipeline rewrite: %w", err)
 	}
 
