@@ -433,36 +433,32 @@ func (ctrl *Controller) GetSubscriptionStatus(c *fiber.Ctx) error {
 	limits := limitsForTier(sub.Tier)
 	syncWindows(&sub, time.Now())
 
-	monthlyRemaining := limits.UnitsMonth + sub.CustomCredits - sub.UsedUnitsMonthly
-	if monthlyRemaining < 0 {
-		monthlyRemaining = 0
-	}
-	dailyRemaining := limits.UnitsDay - sub.UsedUnitsDaily
-	if dailyRemaining < 0 {
-		dailyRemaining = 0
-	}
-	threeHourRemaining := limits.Units3H - sub.UsedUnits3h
-	if threeHourRemaining < 0 {
-		threeHourRemaining = 0
-	}
+	threeHourRemaining := max(limits.Units3H-sub.UsedUnits3h, 0)
+
+	dailyRemaining := max(limits.UnitsDay-sub.UsedUnitsDaily, 0)
+
+	monthlyRemaining := max(limits.UnitsMonth-sub.UsedUnitsMonthly, 0)
 
 	return c.JSON(fiber.Map{
-		"tier":                  sub.Tier,
-		"status":                sub.Status,
-		"current_period_end":    sub.CurrentPeriodEnd,
-		"custom_credits":        sub.CustomCredits,
-		"update_url":            sub.UpdateURL,
-		"cancel_url":            sub.CancelURL,
-		"role":                  role,
-		"used_units_3h":         sub.UsedUnits3h,
-		"used_units_daily":      sub.UsedUnitsDaily,
-		"used_units_monthly":    sub.UsedUnitsMonthly,
-		"three_hour_limit":      limits.Units3H,
-		"daily_limit":           limits.UnitsDay,
-		"monthly_limit":         limits.UnitsMonth + sub.CustomCredits,
-		"three_hour_remaining":  threeHourRemaining,
-		"daily_remaining":       dailyRemaining,
-		"monthly_remaining":     monthlyRemaining,
+		"tier":               sub.Tier,
+		"status":             sub.Status,
+		"current_period_end": sub.CurrentPeriodEnd,
+		"custom_credits":     sub.CustomCredits,
+		"update_url":         sub.UpdateURL,
+		"cancel_url":         sub.CancelURL,
+		"role":               role,
+		"used_units_3h":      sub.UsedUnits3h,
+		"used_units_daily":   sub.UsedUnitsDaily,
+		"used_units_monthly": sub.UsedUnitsMonthly,
+
+		"three_hour_limit": limits.Units3H + sub.CustomCredits,
+		"daily_limit":      limits.UnitsDay + sub.CustomCredits,
+		"monthly_limit":    limits.UnitsMonth + sub.CustomCredits,
+
+		"three_hour_remaining": threeHourRemaining + sub.CustomCredits,
+		"daily_remaining":      dailyRemaining + sub.CustomCredits,
+		"monthly_remaining":    monthlyRemaining + sub.CustomCredits,
+
 		"window_3h_reset_at":    sub.Window3HResetAt,
 		"window_daily_reset_at": sub.WindowDailyResetAt,
 		"window_month_reset_at": sub.WindowMonthlyResetAt,

@@ -61,34 +61,59 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 
 		limits := GetTierLimits(sub.Tier)
 
-		if sub.UsedUnits3h+totals.Units+units > limits.Units3H {
-			return HourlyLimitError(units)
-		}
-		if sub.UsedUnitsDaily+totals.Units+units > limits.UnitsDay {
-			return DailyLimitError(units)
+		// 1. Calculate available plan units for each time window
+		available3H := limits.Units3H - (sub.UsedUnits3h + totals.PlanUnits)
+		if available3H < 0 {
+			available3H = 0
 		}
 
-		availablePlan := limits.UnitsMonth - (sub.UsedUnitsMonthly + totals.PlanUnits)
-		if availablePlan < 0 {
-			availablePlan = 0
+		availableDaily := limits.UnitsDay - (sub.UsedUnitsDaily + totals.PlanUnits)
+		if availableDaily < 0 {
+			availableDaily = 0
 		}
+
+		availableMonthly := limits.UnitsMonth - (sub.UsedUnitsMonthly + totals.PlanUnits)
+		if availableMonthly < 0 {
+			availableMonthly = 0
+		}
+
+		// 2. The max plan units we can consume is the bottleneck (minimum) of all windows
+		planUnits := units
+		if planUnits > available3H {
+			planUnits = available3H
+		}
+		if planUnits > availableDaily {
+			planUnits = availableDaily
+		}
+		if planUnits > availableMonthly {
+			planUnits = availableMonthly
+		}
+
+		// 3. Any excess must be covered by custom credits
+		creditUnits := units - planUnits
 
 		availableCredits := sub.CustomCredits - totals.CreditUnits
 		if availableCredits < 0 {
 			availableCredits = 0
 		}
 
-		if sub.UsedUnitsMonthly+totals.Units+units > limits.UnitsMonth+availableCredits {
-			return MonthlyLimitError(units)
-		}
-
-		planUnits := units
-		if planUnits > availablePlan {
-			planUnits = availablePlan
-		}
-
-		creditUnits := units - planUnits
+		// 4. If they don't have enough credits, determine the correct error to send back
 		if creditUnits > availableCredits {
+			// If they have some credits but just not enough for this job
+			if availableCredits > 0 {
+				return CreditsExhaustedError(units)
+			}
+
+			// If they have 0 credits, throw the error for the specific plan window that blocked them
+			if available3H < units && planUnits == available3H {
+				return HourlyLimitError(units)
+			}
+			if availableDaily < units && planUnits == availableDaily {
+				return DailyLimitError(units)
+			}
+			if availableMonthly < units && planUnits == availableMonthly {
+				return MonthlyLimitError(units)
+			}
 			return CreditsExhaustedError(units)
 		}
 
@@ -148,9 +173,10 @@ func (s *Service) Commit(reservationID string) error {
 
 		syncWindows(&sub, now)
 
-		sub.UsedUnits3h += res.Units
-		sub.UsedUnitsDaily += res.Units
-		sub.UsedUnitsMonthly += res.Units
+		sub.UsedUnits3h += res.PlanUnits
+		sub.UsedUnitsDaily += res.PlanUnits
+		sub.UsedUnitsMonthly += res.PlanUnits
+
 		sub.CustomCredits -= res.CreditUnits
 		if sub.CustomCredits < 0 {
 			sub.CustomCredits = 0
