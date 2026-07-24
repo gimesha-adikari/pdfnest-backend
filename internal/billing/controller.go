@@ -442,6 +442,7 @@ func (ctrl *Controller) GetSubscriptionStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"tier":               sub.Tier,
 		"status":             sub.Status,
+		"billing_interval":   sub.BillingInterval,
 		"current_period_end": sub.CurrentPeriodEnd,
 		"custom_credits":     sub.CustomCredits,
 		"update_url":         sub.UpdateURL,

@@ -101,6 +101,22 @@ type WebhookLog struct {
 	CreatedAt time.Time
 }
 
+type UserSetting struct {
+	ID     string `gorm:"type:uuid;primaryKey"`
+	UserID string `gorm:"type:uuid;uniqueIndex;not null"`
+	User   User   `gorm:"constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+
+	EmailNotifications bool   `gorm:"default:true;not null"`
+	ProductUpdates     bool   `gorm:"default:true;not null"`
+	BillingEmails      bool   `gorm:"default:true;not null"`
+	SecurityAlerts     bool   `gorm:"default:true;not null"`
+	Theme              string `gorm:"type:varchar(20);default:'system'"`
+	Language           string `gorm:"type:varchar(20);default:'en'"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 func ConnectDB() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -125,6 +141,7 @@ func ConnectDB() {
 		&UsageLog{},
 		&WebhookLog{},
 		&BillingReservation{},
+		&UserSetting{},
 		&models.HomePageContent{},
 		&models.SubscribePageContent{},
 		&models.DynamicToolItem{},
@@ -216,4 +233,8 @@ func LogToolUsage(userID string, toolName string, isCredit bool) {
 	if err := DB.Create(&logEntry).Error; err != nil {
 		log.Printf("Failed to log usage for user %s on tool %s: %v", userID, toolName, err)
 	}
+}
+
+func NewUUID() string {
+	return uuid.New().String()
 }

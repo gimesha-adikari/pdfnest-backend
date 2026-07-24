@@ -19,6 +19,7 @@ import (
 	"pdfnest-backend/internal/security"
 	"pdfnest-backend/internal/structure"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/user"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -126,6 +127,9 @@ func main() {
 
 	healthController := health.NewController()
 	health.RegisterRoutes(apiGroup, healthController)
+
+	userController := user.NewController()
+	user.RegisterRoutes(apiGroup, userController)
 
 	port := os.Getenv("PORT")
 	if port == "" {
