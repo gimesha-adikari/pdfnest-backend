@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 type Controller struct{}
@@ -97,8 +98,14 @@ func (ctrl *Controller) UpdateUserTier(c *fiber.Ctx) error {
 	}
 
 	var sub config.Subscription
-	if err := config.DB.Where("user_id = ?", targetID).First(&sub).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"error": "Subscription row unavailable"})
+	if err := config.DB.Where("user_id = ?", targetID).FirstOrInit(&sub).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to process subscription row"})
+	}
+
+	if sub.ID == "" {
+		sub.ID = uuid.New().String()
+		sub.UserID = targetID
+		sub.CreatedAt = time.Now()
 	}
 
 	if req.Tier != "" {
@@ -113,6 +120,8 @@ func (ctrl *Controller) UpdateUserTier(c *fiber.Ctx) error {
 		sub.CurrentPeriodEnd = time.Now().AddDate(0, 0, req.DaysToPlus)
 	}
 
+	sub.UpdatedAt = time.Now()
+
 	config.DB.Save(&sub)
 	return c.JSON(fiber.Map{"status": "success", "new_tier": sub.Tier, "custom_credits": sub.CustomCredits})
 }
@@ -126,7 +135,7 @@ func (ctrl *Controller) GetUserDetails(c *fiber.Ctx) error {
 	}
 
 	var subscription config.Subscription
-	config.DB.Where("user_id = ?", targetID).First(&subscription)
+	config.DB.Where("user_id = ?", targetID).Limit(1).Find(&subscription)
 
 	var transactions []config.Transaction
 	config.DB.Where("user_id = ?", targetID).Order("created_at desc").Find(&transactions)
