@@ -129,7 +129,19 @@ func ConnectDB() {
 	}
 
 	//log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
-	//err = database.Migrator().DropTable(&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &WebhookLog{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{}, models.AboutPageContent{})
+	//err = database.Migrator().DropTable(
+	//	&UserSetting{},
+	//	&BillingReservation{},
+	//	&Subscription{},
+	//	&Transaction{},
+	//	&UsageLog{},
+	//	&WebhookLog{},
+	//	&User{},
+	//	&models.HomePageContent{},
+	//	&models.SubscribePageContent{},
+	//	&models.DynamicToolItem{},
+	//	models.AboutPageContent{},
+	//)
 	//if err != nil {
 	//	log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
 	//}
@@ -148,13 +160,16 @@ func ConnectDB() {
 		models.AboutPageContent{},
 	)
 
-	err = database.AutoMigrate(&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &WebhookLog{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{}, models.AboutPageContent{})
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)
 	}
 
 	DB = database
 	log.Println("Database connection pool securely initialized and synced.")
+
+	tables, _ := database.Migrator().GetTables()
+
+	log.Println("TABLES:", tables)
 
 	adminEmail := os.Getenv("ADMIN_EMAIL")
 	if adminEmail == "" {

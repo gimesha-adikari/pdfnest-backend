@@ -16,6 +16,8 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	billingGroup.Post("/checkout", ctrl.CreateCheckout)
 	billingGroup.Post("/checkout-credits", ctrl.CreateCreditCheckout)
 
+	billingGroup.Post("/portal-session", ctrl.CreatePortalSession)
+
 	billingGroup.Post("/upgrade-mock", ctrl.UpgradeMock)
 	billingGroup.Post("/buy-credits-mock", ctrl.BuyCreditsMock)
 }

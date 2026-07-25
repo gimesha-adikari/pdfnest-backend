@@ -1,11 +1,15 @@
 package billing
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"pdfnest-backend/config"
 	"strconv"
@@ -588,6 +592,119 @@ func (ctrl *Controller) BuyCreditsMock(c *fiber.Ctx) error {
 		"status":         "success",
 		"custom_credits": sub.CustomCredits,
 	})
+}
+
+type PaddlePortalSessionResponse struct {
+	Data struct {
+		ID         string `json:"id"`
+		CustomerID string `json:"customer_id"`
+		URLs       struct {
+			General struct {
+				Overview string `json:"overview"`
+			} `json:"general"`
+			Subscriptions []struct {
+				ID                              string `json:"id"`
+				CancelSubscription              string `json:"cancel_subscription"`
+				UpdateSubscriptionPaymentMethod string `json:"update_subscription_payment_method"`
+			} `json:"subscriptions"`
+		} `json:"urls"`
+	} `json:"data"`
+}
+
+func paddleAPIBaseURL() string {
+	base := strings.TrimSpace(os.Getenv("PADDLE_API_BASE_URL"))
+	if base == "" {
+		base = "https://sandbox-api.paddle.com"
+	}
+	return strings.TrimRight(base, "/")
+}
+
+func (ctrl *Controller) CreatePortalSession(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+	if userID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	var sub config.Subscription
+	if err := config.DB.Where("user_id = ?", userID).First(&sub).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Subscription not found"})
+	}
+
+	// Your free-plan seed uses fake IDs like free_cust_... and free_sub_...
+	// Paddle portal sessions require real Paddle IDs.
+	//if !strings.HasPrefix(sub.PaddleCustomerID, "ctm_") {
+	//	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+	//		"error": "Billing portal is only available for paid Paddle customers.",
+	//	})
+	//}
+
+	apiKey := strings.TrimSpace(os.Getenv("PADDLE_API_KEY"))
+	if apiKey == "" {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "PADDLE_API_KEY is not configured",
+		})
+	}
+
+	reqBody := map[string]any{}
+	if strings.HasPrefix(sub.PaddleSubscriptionID, "sub_") {
+		reqBody["subscription_ids"] = []string{sub.PaddleSubscriptionID}
+	}
+
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to build portal request",
+		})
+	}
+
+	endpoint := fmt.Sprintf("%s/customers/%s/portal-sessions", paddleAPIBaseURL(), sub.PaddleCustomerID)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to create portal request",
+		})
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Paddle-Version", "1")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error": "Failed to contact Paddle",
+		})
+	}
+	defer res.Body.Close()
+
+	body, _ := io.ReadAll(res.Body)
+
+	log.Default().Print(string(body))
+	if res.StatusCode != http.StatusCreated {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"error":   "Paddle portal session failed",
+			"details": string(body),
+		})
+	}
+
+	var decoded PaddlePortalSessionResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Failed to parse Paddle response",
+		})
+	}
+
+	resp := fiber.Map{
+		"overview_url": decoded.Data.URLs.General.Overview,
+	}
+
+	if len(decoded.Data.URLs.Subscriptions) > 0 {
+		resp["update_payment_url"] = decoded.Data.URLs.Subscriptions[0].UpdateSubscriptionPaymentMethod
+		resp["cancel_subscription_url"] = decoded.Data.URLs.Subscriptions[0].CancelSubscription
+	}
+
+	return c.JSON(resp)
 }
 
 func resetBillingWindows(sub *config.Subscription, now time.Time) {
