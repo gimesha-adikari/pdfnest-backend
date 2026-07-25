@@ -128,23 +128,23 @@ func ConnectDB() {
 		log.Fatalf("Failed to establish target connection database: %v", err)
 	}
 
-	//log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
-	//err = database.Migrator().DropTable(
-	//	&UserSetting{},
-	//	&BillingReservation{},
-	//	&Subscription{},
-	//	&Transaction{},
-	//	&UsageLog{},
-	//	&WebhookLog{},
-	//	&User{},
-	//	&models.HomePageContent{},
-	//	&models.SubscribePageContent{},
-	//	&models.DynamicToolItem{},
-	//	models.AboutPageContent{},
-	//)
-	//if err != nil {
-	//	log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
-	//}
+	log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
+	err = database.Migrator().DropTable(
+		&UserSetting{},
+		&BillingReservation{},
+		&Subscription{},
+		&Transaction{},
+		&UsageLog{},
+		&WebhookLog{},
+		&User{},
+		&models.HomePageContent{},
+		&models.SubscribePageContent{},
+		&models.DynamicToolItem{},
+		models.AboutPageContent{},
+	)
+	if err != nil {
+		log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
+	}
 
 	err = database.AutoMigrate(
 		&User{},
