@@ -1,4 +1,3 @@
-// file: internal/models/site_setting.go
 package models
 
 import "time"
@@ -8,9 +7,11 @@ type HomePageContent struct {
 	// Badges & Hero Main Copy Loops
 	HeroBadgeGuest        string `gorm:"type:varchar(255);not null" json:"heroBadgeGuest"`
 	HeroBadgeFree         string `gorm:"type:varchar(255);not null" json:"heroBadgeFree"`
+	HeroBadgePlus         string `gorm:"type:varchar(255);not null" json:"heroBadgePlus"`
 	HeroBadgePro          string `gorm:"type:varchar(255);not null" json:"heroBadgePro"`
 	HeroWelcomeBack       string `gorm:"type:varchar(255);not null" json:"heroWelcomeBack"`
 	HeroTitleGuest        string `gorm:"type:varchar(255);not null" json:"heroTitleGuest"`
+	HeroTitlePlus         string `gorm:"type:varchar(255);not null" json:"heroTitlePlus"`
 	HeroTitlePro          string `gorm:"type:varchar(255);not null" json:"heroTitlePro"`
 	HeroSubtitleGuest     string `gorm:"type:text;not null" json:"heroSubtitleGuest"`
 	HeroSubtitleGuestBold string `gorm:"type:varchar(255);not null" json:"heroSubtitleGuestBold"`

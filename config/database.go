@@ -213,7 +213,7 @@ func ConnectDB() {
 			PaddleCustomerID:     "admin_cust_" + adminUser.ID,
 			PaddleSubscriptionID: "admin_sub_" + adminUser.ID,
 			Status:               "active",
-			Tier:                 "pro",
+			Tier:                 "plus",
 			CustomCredits:        9999,
 			CurrentPeriodEnd:     now.AddDate(50, 0, 0),
 

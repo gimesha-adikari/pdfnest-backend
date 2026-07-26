@@ -1,4 +1,3 @@
-// file: internal/content/site_content_seed.go
 package content
 
 import (
@@ -14,9 +13,11 @@ func SeedSiteContent() {
 			ID:                    1,
 			HeroBadgeGuest:        "Professional PDF Workspace",
 			HeroBadgeFree:         "Free Plan Active",
+			HeroBadgePlus:         "Plus Workspace Active",
 			HeroBadgePro:          "Pro Workspace Active",
 			HeroWelcomeBack:       "Welcome Back",
 			HeroTitleGuest:        "PDF Workspace",
+			HeroTitlePlus:         "Plus Workspace",
 			HeroTitlePro:          "Pro Workspace",
 			HeroSubtitleGuest:     "Edit, convert, secure, and organize PDFs online with advanced, cloud-native processing tools.",
 			HeroSubtitleGuestBold: "Start free. Upgrade anytime.",

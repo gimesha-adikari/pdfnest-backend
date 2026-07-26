@@ -2,6 +2,7 @@ package billing
 
 import (
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
@@ -97,6 +98,8 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 			availableCredits = 0
 		}
 
+		log.Print(available3H)
+
 		// 4. If they don't have enough credits, determine the correct error to send back
 		if creditUnits > availableCredits {
 			// If they have some credits but just not enough for this job
@@ -106,6 +109,7 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 
 			// If they have 0 credits, throw the error for the specific plan window that blocked them
 			if available3H < units && planUnits == available3H {
+				log.Print(available3H)
 				return HourlyLimitError(units)
 			}
 			if availableDaily < units && planUnits == availableDaily {

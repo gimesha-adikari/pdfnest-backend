@@ -788,7 +788,7 @@ func limitsForTier(tier string) billingLimits {
 	case "plus":
 		return billingLimits{Units3H: 20, UnitsDay: 60, UnitsMonth: 250}
 	default:
-		return billingLimits{Units3H: 8, UnitsDay: 20, UnitsMonth: 80}
+		return billingLimits{Units3H: 10, UnitsDay: 20, UnitsMonth: 80}
 	}
 }
 
