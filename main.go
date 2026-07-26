@@ -50,6 +50,11 @@ func main() {
 		WriteTimeout: 120 * time.Second,
 	})
 
+	app.Use(func(c *fiber.Ctx) error {
+		log.Printf(">>> %s %s", c.Method(), c.OriginalURL())
+		return c.Next()
+	})
+
 	app.Use(recover.New())
 
 	tasks.StartCleanupWorker(5*time.Minute, 30*time.Minute)
