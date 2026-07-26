@@ -3,15 +3,15 @@ package structure
 import (
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/middleware"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-
 	router.Post("/structure/analyze", ctrl.Analyze)
 
-	structureGroup := router.Group("/structure", middleware.Protect())
+	structureGroup := router.Group("/structure", middleware.Protect(), uploads.Prepare())
 
 	structureGroup.Post(
 		"/merge",

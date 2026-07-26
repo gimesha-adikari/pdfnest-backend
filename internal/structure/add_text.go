@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/uploads"
 	"strconv"
 	"strings"
 
@@ -99,7 +100,7 @@ func (ctrl *Controller) AddText(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "MISSING_UPLOAD_FILE",
@@ -107,35 +108,24 @@ func (ctrl *Controller) AddText(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "DISK_WRITE_FAILURE",
-			"message": "Failed to store asset into temporary scratch bounds.",
-		})
-	}
-	defer func() {
-		_ = os.Remove(inputPath)
-	}()
-
-	outputPath, err := ctrl.service.AddTextToPDF(inputPath, elements)
+	outputPath, err := ctrl.service.AddTextToPDF(upload.Path, elements)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "TEXT_ENGINE_FAILED",
 			"message": "Text rendering transaction failed: " + err.Error(),
 		})
 	}
-
-	c.Set("Content-Type", "application/pdf")
-	c.Attachment(fmt.Sprintf("%s-text-added.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
-
-	sendErr := c.SendFile(outputPath)
-
 	defer func() {
 		_ = os.Remove(outputPath)
 	}()
 
-	return sendErr
+	c.Set("Content-Type", "application/pdf")
+	c.Attachment(
+		fmt.Sprintf(
+			"%s-text-added.pdf",
+			strings.TrimSuffix(upload.Header.Filename, filepath.Ext(upload.Header.Filename)),
+		),
+	)
+
+	return c.SendFile(outputPath)
 }

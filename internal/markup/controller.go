@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/uploads"
 	"strings"
 
 	"pdfnest-backend/internal/storage"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 )
 
 type Controller struct {
@@ -35,7 +34,7 @@ func (cr *Controller) HandleStrikeout(c *fiber.Ctx) error {
 }
 
 func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
@@ -45,6 +44,7 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 
 	boxesStr := c.FormValue("boxes")
 	filePassword := c.FormValue("file_password")
+
 	mode := strings.ToLower(strings.TrimSpace(c.FormValue("mode")))
 	if mode == "" {
 		mode = "smart"
@@ -58,15 +58,6 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 		})
 	}
 
-	tempPdfPath := filepath.Join(os.TempDir(), "source_"+uuid.New().String()+".pdf")
-	if err := c.SaveFile(fileHeader, tempPdfPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to stage original document on server disk",
-		})
-	}
-	defer func() { _ = os.Remove(tempPdfPath) }()
-
 	store, err := storage.Default()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -75,8 +66,17 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 		})
 	}
 
-	sourceKey := storage.BuildKey("markup/source", filepath.Ext(fileHeader.Filename))
-	if err := store.UploadFile(tempPdfPath, sourceKey, fileHeader.Header.Get("Content-Type")); err != nil {
+	contentType := upload.Header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/pdf"
+	}
+
+	sourceKey := storage.BuildKey(
+		"markup/source",
+		filepath.Ext(upload.Header.Filename),
+	)
+
+	if err := store.UploadFile(upload.Path, sourceKey, contentType); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
@@ -105,13 +105,29 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 	}
 
 	var submission *workerJobSubmission
+
 	switch action {
 	case ActionHighlight:
-		submission, err = cr.service.HighlightPDF(sourceKey, payloadKey, fileHeader.Filename)
+		submission, err = cr.service.HighlightPDF(
+			sourceKey,
+			payloadKey,
+			upload.Header.Filename,
+		)
+
 	case ActionUnderline:
-		submission, err = cr.service.UnderlinePDF(sourceKey, payloadKey, fileHeader.Filename)
+		submission, err = cr.service.UnderlinePDF(
+			sourceKey,
+			payloadKey,
+			upload.Header.Filename,
+		)
+
 	case ActionStrikeout:
-		submission, err = cr.service.StrikeoutPDF(sourceKey, payloadKey, fileHeader.Filename)
+		submission, err = cr.service.StrikeoutPDF(
+			sourceKey,
+			payloadKey,
+			upload.Header.Filename,
+		)
+
 	default:
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,

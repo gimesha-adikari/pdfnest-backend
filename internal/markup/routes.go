@@ -2,12 +2,18 @@ package markup
 
 import (
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/middleware"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	structureGroup := router.Group("/markup")
+	structureGroup := router.Group(
+		"/markup",
+		middleware.Protect(),
+		uploads.Prepare(),
+	)
 
 	structureGroup.Post("/highlight", billing.Use(billing.HighlightPDF), ctrl.HandleHighlight)
 	structureGroup.Post("/underline", billing.Use(billing.UnderlinePDF), ctrl.HandleUnderline)

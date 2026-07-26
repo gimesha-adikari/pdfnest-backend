@@ -3,12 +3,12 @@ package billing
 import (
 	"errors"
 	"log"
-	"os"
-	"path/filepath"
 	"pdfnest-backend/config"
 	"strconv"
 	"strings"
 	"time"
+
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -62,7 +62,6 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 
 		limits := GetTierLimits(sub.Tier)
 
-		// 1. Calculate available plan units for each time window
 		available3H := limits.Units3H - (sub.UsedUnits3h + totals.PlanUnits)
 		if available3H < 0 {
 			available3H = 0
@@ -78,7 +77,6 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 			availableMonthly = 0
 		}
 
-		// 2. The max plan units we can consume is the bottleneck (minimum) of all windows
 		planUnits := units
 		if planUnits > available3H {
 			planUnits = available3H
@@ -90,7 +88,6 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 			planUnits = availableMonthly
 		}
 
-		// 3. Any excess must be covered by custom credits
 		creditUnits := units - planUnits
 
 		availableCredits := sub.CustomCredits - totals.CreditUnits
@@ -100,14 +97,11 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 
 		log.Print(available3H)
 
-		// 4. If they don't have enough credits, determine the correct error to send back
 		if creditUnits > availableCredits {
-			// If they have some credits but just not enough for this job
 			if availableCredits > 0 {
 				return CreditsExhaustedError(units)
 			}
 
-			// If they have 0 credits, throw the error for the specific plan window that blocked them
 			if available3H < units && planUnits == available3H {
 				log.Print(available3H)
 				return HourlyLimitError(units)
@@ -309,19 +303,17 @@ func syncWindows(sub *config.Subscription, now time.Time) {
 }
 
 func CountUploadedPDFPages(c *fiber.Ctx, formField string) int {
-	fh, err := c.FormFile(formField)
-	if err != nil || fh == nil {
+	ctx := uploads.FromCtx(c)
+	if ctx == nil {
 		return 0
 	}
 
-	tempDir := os.TempDir()
-	tmp := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fh.Filename))
-	if err := c.SaveFile(fh, tmp); err != nil {
+	file, ok := ctx.First(formField)
+	if !ok || file == nil || file.Path == "" {
 		return 0
 	}
-	defer func() { _ = os.Remove(tmp) }()
 
-	pages, err := api.PageCountFile(tmp)
+	pages, err := api.PageCountFile(file.Path)
 	if err != nil || pages <= 0 {
 		return 0
 	}
@@ -329,11 +321,11 @@ func CountUploadedPDFPages(c *fiber.Ctx, formField string) int {
 }
 
 func CountUploadedImages(c *fiber.Ctx, formField string) int {
-	form, err := c.MultipartForm()
-	if err != nil || form == nil {
+	ctx := uploads.FromCtx(c)
+	if ctx == nil {
 		return 0
 	}
-	return len(form.File[formField])
+	return len(ctx.All(formField))
 }
 
 func CountSelectedPages(selection string) int {

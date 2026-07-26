@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -23,8 +24,7 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Compress(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -32,46 +32,30 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
+	log.Printf("Filename: %s", upload.Header.Filename)
+	log.Printf("Size: %d", upload.Header.Size)
 
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Failed to save target compression PDF to path %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to allocate local scratch workspace metrics.",
-		})
-	}
-
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Failed to delete temporary unoptimized input PDF at %s: %v", inputPath, err)
-		}
-	}()
-
-	outputPath, err := ctrl.service.OptimizePDF(inputPath)
+	outputPath, err := ctrl.service.OptimizePDF(upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "COMPRESSION_ENGINE_FAILED",
 			Message: "Compression processing failure: " + err.Error(),
 		})
 	}
+	defer func() {
+		if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary optimized output PDF at %s: %v", outputPath, cleanupErr)
+		}
+	}()
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment("optimized_" + filepath.Base(fileHeader.Filename))
+	c.Attachment("optimized_" + filepath.Base(upload.Header.Filename))
 
-	err = c.SendFile(outputPath)
-
-	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-		log.Printf("[CLEANUP WARNING] Failed to delete temporary optimized output PDF at %s: %v", outputPath, cleanupErr)
-	}
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -79,32 +63,23 @@ func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
-	inputPath := filepath.Join(tempDir, sessionID+"-input-"+filepath.Base(fileHeader.Filename))
-	outputPath := filepath.Join(tempDir, sessionID+"-output-"+filepath.Base(fileHeader.Filename))
+	outputPath := filepath.Join(os.TempDir(), sessionID+"-output-"+filepath.Base(upload.Header.Filename))
 
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to allocate local scratch workspace.",
-		})
-	}
-
-	defer func() {
-		os.Remove(inputPath)
-		os.Remove(outputPath)
-	}()
-
-	if err := ConvertToGrayscale(inputPath, outputPath); err != nil {
+	if err := ConvertToGrayscale(upload.Path, outputPath); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "GRAYSCALE_ENGINE_FAILED",
 			Message: "Color conversion failure: " + err.Error(),
 		})
 	}
+	defer func() {
+		if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary grayscale output PDF at %s: %v", outputPath, cleanupErr)
+		}
+	}()
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment("grayscale_" + filepath.Base(fileHeader.Filename))
+	c.Attachment("grayscale_" + filepath.Base(upload.Header.Filename))
 
 	return c.SendFile(outputPath)
 }

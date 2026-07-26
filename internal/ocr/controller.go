@@ -1,11 +1,13 @@
 package ocr
 
 import (
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -25,8 +27,7 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -34,30 +35,13 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Failed to save source PDF for OCR processing at %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to allocate workspace scratch environment parameters.",
-		})
-	}
-
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Failed to delete temporary uploaded OCR source file: %v", err)
-		}
-	}()
-
-	outputPath, err := ctrl.service.ExtractTextFromPDF(inputPath)
+	outputPath, err := ctrl.service.ExtractTextFromPDF(upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OCR_PROCESSING_FAILED",
 			Message: "Tesseract engine pipeline failed extraction process: " + err.Error(),
 		})
 	}
-
 	defer func() {
 		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
 			log.Printf("[CLEANUP WARNING] Failed to delete temporary output data file: %v", err)
@@ -71,15 +55,14 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
-	form, err := c.MultipartForm()
+	files, err := uploads.MustFiles(c, "images")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
-			Code:    "INVALID_MULTIPART_FORM",
-			Message: "Multipart payload format is corrupted or parsing structure is broken.",
+			Code:    "MISSING_IMAGE_DATASET",
+			Message: "No valid file matrices array detected within the 'images' field required for text processing compilation.",
 		})
 	}
 
-	files := form.File["images"]
 	if len(files) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_IMAGE_DATASET",
@@ -87,27 +70,9 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	var temporaryImagePaths []string
-
-	defer func() {
-		for _, path := range temporaryImagePaths {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.Printf("[CLEANUP WARNING] Failed to delete temporary input image at %s: %v", path, err)
-			}
-		}
-	}()
-
-	for _, fileHeader := range files {
-		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
-			log.Printf("[SERVER ERROR] Failed to allocate file to workspace path %s: %v", uniquePath, err)
-			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-				Code:    "DISK_WRITE_FAILURE",
-				Message: "Failed to allocate workspace processing paths.",
-			})
-		}
-		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
+	temporaryImagePaths := make([]string, 0, len(files))
+	for _, f := range files {
+		temporaryImagePaths = append(temporaryImagePaths, f.Path)
 	}
 
 	outputPath, err := ctrl.service.ImageToTextPDF(temporaryImagePaths)
@@ -117,20 +82,21 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 			Message: "Smart image extraction pipeline failure: " + err.Error(),
 		})
 	}
+	defer func() {
+		if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary output data file: %v", err)
+		}
+	}()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("ocr_processed_document.pdf")
-	err = c.SendFile(outputPath)
-
-	_ = os.Remove(outputPath)
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(400).JSON(APIError{Code: "MISSING_FILE", Message: "No file uploaded"})
 	}
@@ -138,9 +104,8 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing Document Ingestion Matrix...", "")
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+	inputPath := filepath.Join(os.TempDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
+	if err := copyFile(upload.Path, inputPath); err != nil {
 		return c.Status(500).JSON(APIError{Code: "DISK_ERR", Message: "Failed to write workspace data cache"})
 	}
 
@@ -192,12 +157,11 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 
-	form, err := c.MultipartForm()
+	files, err := uploads.MustFiles(c, "images")
 	if err != nil {
 		return c.Status(400).JSON(APIError{Code: "INVALID_FORM", Message: "Form structure processing error"})
 	}
 
-	files := form.File["images"]
 	if len(files) == 0 {
 		return c.Status(400).JSON(APIError{Code: "MISSING_IMAGES", Message: "No file targets dropped inside body array"})
 	}
@@ -205,11 +169,10 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
 
-	tempDir := os.TempDir()
-	var tempPaths []string
+	tempPaths := make([]string, 0, len(files))
 	for _, f := range files {
-		path := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(f.Filename))
-		if err := c.SaveFile(f, path); err == nil {
+		path := filepath.Join(os.TempDir(), uuid.New().String()+"-"+filepath.Base(f.Header.Filename))
+		if err := copyFile(f.Path, path); err == nil {
 			tempPaths = append(tempPaths, path)
 		}
 	}
@@ -255,4 +218,24 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	}(taskId, tempPaths, reservation.ID)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return out.Sync()
 }

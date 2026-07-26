@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 )
 
 type Controller struct {
@@ -23,7 +22,7 @@ func NewController(s Service) *Controller {
 }
 
 func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
@@ -33,15 +32,6 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	filePassword := c.FormValue("file_password")
 
-	tempPdfPath := filepath.Join(os.TempDir(), "source_"+uuid.New().String()+".pdf")
-	if err := c.SaveFile(fileHeader, tempPdfPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   "Failed to stage original document on server disk",
-		})
-	}
-	defer func() { _ = os.Remove(tempPdfPath) }()
-
 	store, err := storage.Default()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -50,15 +40,20 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		})
 	}
 
-	sourceKey := storage.BuildKey("edit/source", filepath.Ext(fileHeader.Filename))
-	if err := store.UploadFile(tempPdfPath, sourceKey, fileHeader.Header.Get("Content-Type")); err != nil {
+	contentType := upload.Header.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/pdf"
+	}
+
+	sourceKey := storage.BuildKey("edit/source", filepath.Ext(upload.Header.Filename))
+	if err := store.UploadFile(upload.Path, sourceKey, contentType); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
 			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
 		})
 	}
 
-	submission, err := cr.service.ExtractLayout(sourceKey, filePassword, fileHeader.Filename)
+	submission, err := cr.service.ExtractLayout(sourceKey, filePassword, upload.Header.Filename)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -72,7 +67,7 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		"status":         submission.Status,
 		"queue_name":     submission.QueueName,
 		"source_tracker": sourceKey,
-		"source_name":    fileHeader.Filename,
+		"source_name":    upload.Header.Filename,
 	})
 }
 

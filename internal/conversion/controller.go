@@ -3,11 +3,13 @@ package conversion
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/uploads"
 	"strconv"
 
 	"github.com/gofiber/fiber/v2"
@@ -42,16 +44,14 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
-
-	form, err := c.MultipartForm()
+	files, err := uploads.MustFiles(c, "images")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
-			Code:    "INVALID_MULTIPART_FORM",
-			Message: "Invalid multipart form transmission asset array.",
+			Code:    "MISSING_FILES",
+			Message: "At least one image file is required for compilation.",
 		})
 	}
 
-	files := form.File["images"]
 	if len(files) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_FILES",
@@ -59,27 +59,9 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	var temporaryImagePaths []string
-
-	defer func() {
-		for _, path := range temporaryImagePaths {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.Printf("[CLEANUP WARNING] Failed to delete temporary input image at %s: %v", path, err)
-			}
-		}
-	}()
-
-	for _, fileHeader := range files {
-		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
-			log.Printf("[SERVER ERROR] Failed to save multipart file to unique path %s: %v", uniquePath, err)
-			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-				Code:    "DISK_WRITE_FAILURE",
-				Message: "Failed to initialize internal workspace allocation streams.",
-			})
-		}
-		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
+	temporaryImagePaths := make([]string, 0, len(files))
+	for _, file := range files {
+		temporaryImagePaths = append(temporaryImagePaths, file.Path)
 	}
 
 	outputPath, err := ctrl.service.ImagesToPDF(temporaryImagePaths)
@@ -89,21 +71,19 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 			Message: "Image matrix processing pipeline failure: " + err.Error(),
 		})
 	}
+	defer func() {
+		if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			log.Printf("[CLEANUP WARNING] Failed to purge temporary output compiled PDF at %s: %v", outputPath, cleanupErr)
+		}
+	}()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("compiled_images.pdf")
-	err = c.SendFile(outputPath)
-
-	if cleanupErr := os.Remove(outputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-		log.Printf("[CLEANUP WARNING] Failed to purge temporary output compiled PDF at %s: %v", outputPath, cleanupErr)
-	}
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -111,43 +91,26 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Failed to save source PDF target upload path %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to allocate local scratch environment parameters.",
-		})
-	}
-
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Failed to delete temporary uploaded input PDF at %s: %v", inputPath, err)
-		}
-	}()
-
-	zipOutputPath, err := ctrl.service.PdfToImagesBackend(inputPath)
+	zipOutputPath, err := ctrl.service.PdfToImagesBackend(upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "RASTERIZATION_FAILED",
 			Message: "PDF extraction routine runtime failure: " + err.Error(),
 		})
 	}
+	defer func() {
+		if cleanupErr := os.Remove(zipOutputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			log.Printf("[CLEANUP WARNING] Failed to delete temporary output ZIP file archive at %s: %v", zipOutputPath, cleanupErr)
+		}
+	}()
 
 	c.Set("Content-Type", "application/zip")
 	c.Attachment("extracted_pages.zip")
-	err = c.SendFile(zipOutputPath)
-
-	if cleanupErr := os.Remove(zipOutputPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-		log.Printf("[CLEANUP WARNING] Failed to delete temporary output ZIP file archive at %s: %v", zipOutputPath, cleanupErr)
-	}
-
-	return err
+	return c.SendFile(zipOutputPath)
 }
 
 func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
-	file, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{
 			"code":    "MISSING_FILE",
@@ -167,7 +130,7 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 		scale = 2.0
 	}
 
-	imgBytes, err := cc.service.ConvertPageToImageStream(file, pageNum, scale)
+	imgBytes, err := cc.service.ConvertPageToImageStream(upload.Header, pageNum, scale)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"code":    "RASTER_ENGINE_CRASH",
@@ -177,7 +140,6 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "image/jpeg")
 	c.Set("Content-Length", strconv.Itoa(length(imgBytes)))
-
 	c.Set("Cache-Control", "public, max-age=60")
 
 	return c.Send(imgBytes)
@@ -188,8 +150,7 @@ func length(b []byte) int {
 }
 
 func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -197,32 +158,21 @@ func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "DISK_WRITE_FAILURE", Message: err.Error()})
-	}
-	defer func() { _ = os.Remove(inputPath) }()
-
-	outputPath, err := ctrl.service.OfficeToPdf(inputPath)
+	outputPath, err := ctrl.service.OfficeToPdf(upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OFFICE_CONVERSION_FAILED",
 			Message: "Office calculation matrix routine failed: " + err.Error(),
 		})
 	}
+	defer func() { _ = os.Remove(outputPath) }()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("converted_office_doc.pdf")
-	err = c.SendFile(outputPath)
-
-	defer func() { _ = os.Remove(outputPath) }()
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
-
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -249,14 +199,11 @@ func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
 			Message: "Web render pipeline crash layout execution error: " + err.Error(),
 		})
 	}
+	defer func() { _ = os.Remove(outputPath) }()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("webpage_capture.pdf")
-	err = c.SendFile(outputPath)
-
-	defer func() { _ = os.Remove(outputPath) }()
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 type PrintOptions struct {
@@ -269,8 +216,7 @@ type PrintOptions struct {
 }
 
 func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -284,33 +230,22 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 		opts.PaperSize = "A4"
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "DISK_WRITE_FAILURE", Message: err.Error()})
-	}
-	defer func() { _ = os.Remove(inputPath) }()
-
-	outputPath, err := ctrl.service.MarkdownToPdf(inputPath, opts)
+	outputPath, err := ctrl.service.MarkdownToPdf(upload.Path, opts)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "MARKDOWN_CONVERSION_FAILED",
 			Message: "Markdown vector mapping rendering execution failure: " + err.Error(),
 		})
 	}
+	defer func() { _ = os.Remove(outputPath) }()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("compiled_markdown_report.pdf")
-	err = c.SendFile(outputPath)
-
-	defer func() { _ = os.Remove(outputPath) }()
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -329,28 +264,18 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 	opts.MarginLeft, _ = strconv.ParseFloat(c.FormValue("marginLeft"), 64)
 	opts.MarginRight, _ = strconv.ParseFloat(c.FormValue("marginRight"), 64)
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "DISK_WRITE_FAILURE", Message: err.Error()})
-	}
-	defer func() { _ = os.Remove(inputPath) }()
-
-	outputPath, err := ctrl.service.CodeToPdf(inputPath, fileHeader.Filename, opts)
+	outputPath, err := ctrl.service.CodeToPdf(upload.Path, upload.Header.Filename, opts)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "CODE_CONVERSION_FAILED",
 			Message: "Source script rendering pipeline processing crashed: " + err.Error(),
 		})
 	}
+	defer func() { _ = os.Remove(outputPath) }()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("compiled_code_document.pdf")
-	err = c.SendFile(outputPath)
-
-	defer func() { _ = os.Remove(outputPath) }()
-
-	return err
+	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
@@ -430,7 +355,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Missing input target Markdown file resource payload.",
@@ -441,8 +366,8 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing compilation text nodes...", "")
 
 	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
+	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))
+	if err := copyFile(upload.Path, inputPath); err != nil {
 		tasks.Registry.Set(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.")
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Disk caching allocation error",
@@ -477,7 +402,6 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	}
 
 	go func(id, srcPath string, printOpts PrintOptions, reservationID string) {
-
 		defer func() {
 			_ = os.Remove(srcPath)
 
@@ -511,7 +435,6 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 
 		if err := billing.Default.Commit(reservationID); err != nil {
-
 			_ = os.Remove(outPath)
 			_ = billing.Default.Release(reservationID)
 
@@ -536,50 +459,33 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-
-		file, err := c.FormFile("file")
+		upload, err := uploads.MustFile(c, "file")
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PDF file is required"})
 		}
 
 		tempDir := "./temp_uploads"
-		os.MkdirAll(tempDir, os.ModePerm)
+		_ = os.MkdirAll(tempDir, os.ModePerm)
 
 		fileID := uuid.New().String()
-		inputPdfPath := filepath.Join(tempDir, fmt.Sprintf("%s.pdf", fileID))
 		outputFilePath := filepath.Join(tempDir, fmt.Sprintf("%s.%s", fileID, targetFormat))
+		defer func() { _ = os.Remove(outputFilePath) }()
 
-		defer os.Remove(inputPdfPath)
-		defer os.Remove(outputFilePath)
-
-		if err := c.SaveFile(file, inputPdfPath); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save file"})
-		}
-
-		err = ProcessOfficeConversion(targetFormat, inputPdfPath, outputFilePath)
+		err = ProcessOfficeConversion(targetFormat, upload.Path, outputFilePath)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Conversion failed: " + err.Error()})
 		}
 
 		c.Set("Content-Type", "application/octet-stream")
-		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", file.Filename, targetFormat))
+		c.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s.%s", upload.Header.Filename, targetFormat))
 
 		return c.SendFile(outputFilePath)
 	}
 }
 
 func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
-
-	form, err := c.MultipartForm()
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(APIError{
-			Code:    "INVALID_MULTIPART_FORM",
-			Message: "Invalid multipart form transmission asset array.",
-		})
-	}
-
-	layoutData := form.Value["canvasLayout"]
-	if len(layoutData) == 0 {
+	layoutData := c.FormValue("canvasLayout")
+	if layoutData == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_LAYOUT_METADATA",
 			Message: "Custom canvas configuration mapping data is required.",
@@ -587,14 +493,21 @@ func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
 	}
 
 	var layout []CanvasLayoutItem
-	if err := json.Unmarshal([]byte(layoutData[0]), &layout); err != nil {
+	if err := json.Unmarshal([]byte(layoutData), &layout); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MALFORMED_LAYOUT_JSON",
 			Message: "Failed to parse structural canvas coordinate parameters accurately.",
 		})
 	}
 
-	files := form.File["images"]
+	files, err := uploads.MustFiles(c, "images")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "MISSING_FILES",
+			Message: "At least one image binary is required for layout mapping context.",
+		})
+	}
+
 	if len(files) == 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_FILES",
@@ -602,21 +515,9 @@ func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	var temporaryImagePaths []string
-
-	defer func() {
-		for _, path := range temporaryImagePaths {
-			_ = os.Remove(path)
-		}
-	}()
-
-	for _, fileHeader := range files {
-		uniquePath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-		if err := c.SaveFile(fileHeader, uniquePath); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "DISK_WRITE_FAILURE", Message: "Internal staging issue."})
-		}
-		temporaryImagePaths = append(temporaryImagePaths, uniquePath)
+	temporaryImagePaths := make([]string, 0, len(files))
+	for _, file := range files {
+		temporaryImagePaths = append(temporaryImagePaths, file.Path)
 	}
 
 	outputPath, err := ctrl.service.CustomImagesToPDF(temporaryImagePaths, layout)
@@ -626,12 +527,29 @@ func (ctrl *Controller) ConvertCustomImagesToPDF(c *fiber.Ctx) error {
 			Message: "Error rendering layered graphic objects to target PDF matrix: " + err.Error(),
 		})
 	}
+	defer func() { _ = os.Remove(outputPath) }()
 
 	c.Set("Content-Type", "application/pdf")
 	c.Attachment("custom_compiled_images.pdf")
-	err = c.SendFile(outputPath)
+	return c.SendFile(outputPath)
+}
 
-	_ = os.Remove(outputPath)
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
 
-	return err
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = out.Close() }()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+
+	return out.Sync()
 }

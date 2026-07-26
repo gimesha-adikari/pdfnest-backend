@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"mime/multipart"
-	"os"
-	"path/filepath"
 	"strings"
 
+	"pdfnest-backend/internal/uploads"
+
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 )
 
@@ -64,7 +62,7 @@ func EstimateNone() Estimator {
 
 func EstimateUploadedPDF(field string) Estimator {
 	return func(c *fiber.Ctx) (int, int, error) {
-		return CountUploadedPDFPages(c, field), 0, nil
+		return CountUploadedPDFPagesFromFields(c, field), 0, nil
 	}
 }
 
@@ -76,7 +74,7 @@ func EstimateUploadedPDFFields(fields ...string) Estimator {
 
 func EstimateUploadedImages(field string) Estimator {
 	return func(c *fiber.Ctx) (int, int, error) {
-		return 0, CountUploadedImages(c, field), nil
+		return 0, CountUploadedImagesFromFields(c, field), nil
 	}
 }
 
@@ -111,14 +109,11 @@ func EstimateSourceTrackerFromBody(field string) Estimator {
 			return 0, 0, nil
 		}
 
-		if _, err := os.Stat(raw); err != nil {
-			return 0, 0, nil
-		}
-
 		pages, err := api.PageCountFile(raw)
 		if err != nil {
 			return 0, 0, err
 		}
+
 		return pages, 0, nil
 	}
 }
@@ -440,7 +435,6 @@ var (
 		PageFactor: 0.20,
 		Estimate:   EstimateOCRMarkupPDF("boxes"),
 	}
-
 	StrikeoutPDF = Tool{
 		Name:       "strikeout",
 		Aliases:    []string{"structure_strikeout"},
@@ -449,7 +443,6 @@ var (
 		PageFactor: 0.20,
 		Estimate:   EstimateOCRMarkupPDF("boxes"),
 	}
-
 	UnderlinePDF = Tool{
 		Name:       "underline",
 		Aliases:    []string{"structure_underline"},
@@ -550,65 +543,58 @@ func Lookup(name string) (Tool, bool) {
 }
 
 func CountUploadedPDFPagesFromFields(c *fiber.Ctx, fields ...string) int {
-	form, err := c.MultipartForm()
-	if err != nil || form == nil {
+	ctx := uploads.FromCtx(c)
+	if ctx == nil {
 		return 0
 	}
 
 	total := 0
 	for _, field := range fields {
-		for _, fh := range form.File[field] {
-			total += countPDFPagesForHeader(c, fh)
+		for _, f := range ctx.All(field) {
+			if f == nil || f.Path == "" {
+				continue
+			}
+
+			pages, err := api.PageCountFile(f.Path)
+			if err != nil || pages <= 0 {
+				continue
+			}
+			total += pages
 		}
 	}
 	return total
 }
 
 func CountUploadedImagesFromFields(c *fiber.Ctx, fields ...string) int {
-	form, err := c.MultipartForm()
-	if err != nil || form == nil {
+	ctx := uploads.FromCtx(c)
+	if ctx == nil {
 		return 0
 	}
 
 	total := 0
 	for _, field := range fields {
-		total += len(form.File[field])
+		total += len(ctx.All(field))
 	}
 	return total
 }
 
 func CountUploadedFilesFromFields(c *fiber.Ctx, fields ...string) int {
-	form, err := c.MultipartForm()
-	if err != nil || form == nil {
+	ctx := uploads.FromCtx(c)
+	if ctx == nil {
 		return 0
 	}
 
 	total := 0
 	for _, field := range fields {
-		total += len(form.File[field])
+		total += len(ctx.All(field))
 	}
 	return total
-}
-
-func countPDFPagesForHeader(c *fiber.Ctx, fh *multipart.FileHeader) int {
-	tempDir := os.TempDir()
-	tmp := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fh.Filename))
-	if err := c.SaveFile(fh, tmp); err != nil {
-		return 0
-	}
-	defer func() { _ = os.Remove(tmp) }()
-
-	pages, err := api.PageCountFile(tmp)
-	if err != nil || pages <= 0 {
-		return 0
-	}
-	return pages
 }
 
 func EstimateOCRMarkupPDF(boxField string) Estimator {
 	return func(c *fiber.Ctx) (int, int, error) {
 		// Base PDF pages always count.
-		pages := CountUploadedPDFPages(c, "file")
+		pages := CountUploadedPDFPagesFromFields(c, "file")
 
 		// If mode is not OCR, there is no OCR surcharge.
 		mode := strings.ToLower(strings.TrimSpace(c.FormValue("mode")))
