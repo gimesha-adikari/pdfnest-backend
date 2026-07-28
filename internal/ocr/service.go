@@ -1,8 +1,8 @@
 package ocr
 
 type Service interface {
-	ExtractTextFromPDF(inputPath string) (string, error)
-	ImageToTextPDF(imagePaths []string) (string, error)
+	ExtractTextFromPDF(inputPath string, lang string) (string, error)
+	ImageToTextPDF(imagePaths []string, lang string) (string, error)
 }
 
 type ocrService struct{}

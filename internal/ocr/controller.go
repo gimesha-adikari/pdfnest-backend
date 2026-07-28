@@ -35,11 +35,13 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 		})
 	}
 
-	outputPath, err := ctrl.service.ExtractTextFromPDF(upload.Path)
+	lang := c.FormValue("lang", "eng")
+
+	outputPath, err := ctrl.service.ExtractTextFromPDF(upload.Path, lang)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OCR_PROCESSING_FAILED",
-			Message: "Tesseract engine pipeline failed extraction process: " + err.Error(),
+			Message: "OCR extraction failed: " + err.Error(),
 		})
 	}
 	defer func() {
@@ -50,7 +52,6 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "text/plain")
 	c.Attachment(filepath.Base(outputPath))
-
 	return c.SendFile(outputPath)
 }
 
@@ -70,16 +71,18 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	lang := c.FormValue("lang", "eng")
+
 	temporaryImagePaths := make([]string, 0, len(files))
 	for _, f := range files {
 		temporaryImagePaths = append(temporaryImagePaths, f.Path)
 	}
 
-	outputPath, err := ctrl.service.ImageToTextPDF(temporaryImagePaths)
+	outputPath, err := ctrl.service.ImageToTextPDF(temporaryImagePaths, lang)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "SEARCHABLE_PDF_COMPILATION_FAILED",
-			Message: "Smart image extraction pipeline failure: " + err.Error(),
+			Message: "OCR image compilation failed: " + err.Error(),
 		})
 	}
 	defer func() {
@@ -95,6 +98,7 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 
 func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
+	lang := c.FormValue("lang", "eng")
 
 	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
@@ -118,7 +122,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, srcPath, reservationID string) {
+	go func(id, srcPath, reservationID, lang string) {
 		defer func() {
 			_ = os.Remove(srcPath)
 			if r := recover(); r != nil {
@@ -127,15 +131,9 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 			}
 		}()
 
-		tasks.Registry.Set(
-			id,
-			"PROCESSING",
-			35,
-			"Running OCR and creating searchable PDF...",
-			"",
-		)
+		tasks.Registry.Set(id, "PROCESSING", 35, "Running OCR and creating searchable PDF...", "")
 
-		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath)
+		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
@@ -149,13 +147,14 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, inputPath, reservation.ID)
+	}(taskId, inputPath, reservation.ID, lang)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
+	lang := c.FormValue("lang", "eng")
 
 	files, err := uploads.MustFiles(c, "images")
 	if err != nil {
@@ -188,7 +187,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id string, imgPaths []string, reservationID string) {
+	go func(id string, imgPaths []string, reservationID, lang string) {
 		defer func() {
 			for _, p := range imgPaths {
 				_ = os.Remove(p)
@@ -201,7 +200,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "PROCESSING", 35, "Scanning character grid topologies and building PDF layout layers...", "")
 
-		outPath, err := ctrl.service.ImageToTextPDF(imgPaths)
+		outPath, err := ctrl.service.ImageToTextPDF(imgPaths, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
@@ -215,9 +214,21 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, tempPaths, reservation.ID)
+	}(taskId, tempPaths, reservation.ID, lang)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+}
+
+func (ctrl *Controller) Languages(c *fiber.Ctx) error {
+	langs, err := GetOCRLanguages()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "OCR_LANGUAGES_FAILED",
+			Message: err.Error(),
+		})
+	}
+
+	return c.JSON(langs)
 }
 
 func copyFile(src, dst string) error {

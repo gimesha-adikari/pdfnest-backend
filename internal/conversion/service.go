@@ -4,7 +4,7 @@ import "mime/multipart"
 
 type Service interface {
 	ImagesToPDF(imagePaths []string) (string, error)
-	PdfToImagesBackend(inputPath string) (string, error)
+	PdfToImagesBackend(inputPath string, imageType string) (string, error)
 	CustomImagesToPDF(imagePaths []string, layout []CanvasLayoutItem) (string, error)
 	ConvertPageToImageStream(fileHeader *multipart.FileHeader, pageNum int, scale float64) ([]byte, error)
 	OfficeToPdf(inputPath string) (string, error)

@@ -1,3 +1,4 @@
+// file: /home/gimesha/My_Projects/go/pdfnest-backend/internal/conversion/pdfToImg.go
 package conversion
 
 import (
@@ -8,13 +9,58 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 )
 
-func (s *ConversionService) PdfToImagesBackend(inputPath string) (string, error) {
+type ImageOutputFormat struct {
+	Device      string
+	FileExt     string
+	DisplayName string
+}
+
+func resolveImageOutputFormat(input string) ImageOutputFormat {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "jpg", "jpeg", "":
+		return ImageOutputFormat{
+			Device:      "jpeg",
+			FileExt:     "jpg",
+			DisplayName: "JPEG",
+		}
+	case "png":
+		return ImageOutputFormat{
+			Device:      "png16m",
+			FileExt:     "png",
+			DisplayName: "PNG",
+		}
+	case "pnggray", "gray", "grayscale":
+		return ImageOutputFormat{
+			Device:      "pnggray",
+			FileExt:     "png",
+			DisplayName: "Grayscale PNG",
+		}
+	case "pngmono", "mono", "bw", "blackwhite", "black-white":
+		return ImageOutputFormat{
+			Device:      "pngmono",
+			FileExt:     "png",
+			DisplayName: "Monochrome PNG",
+		}
+	default:
+		// Safe fallback
+		return ImageOutputFormat{
+			Device:      "jpeg",
+			FileExt:     "jpg",
+			DisplayName: "JPEG",
+		}
+	}
+}
+
+func (s *ConversionService) PdfToImagesBackend(inputPath string, imageType string) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
+
+	format := resolveImageOutputFormat(imageType)
 
 	workDir := filepath.Join(tempDir, "pdf-raster-"+sessionID)
 	if err := os.MkdirAll(workDir, 0755); err != nil {
@@ -25,15 +71,22 @@ func (s *ConversionService) PdfToImagesBackend(inputPath string) (string, error)
 
 	outputZipPath := filepath.Join(tempDir, "extracted-"+sessionID+".zip")
 
+	outputPattern := filepath.Join(workDir, fmt.Sprintf("page-%%03d.%s", format.FileExt))
+
 	cmd := exec.Command("gs",
 		"-dNOPAUSE",
 		"-dBATCH",
 		"-dSAFER",
-		"-sDEVICE=jpeg",
+		"-sDEVICE="+format.Device,
 		"-r200",
-		"-sOutputFile="+filepath.Join(workDir, "page-%03d.jpg"),
+		"-sOutputFile="+outputPattern,
 		inputPath,
 	)
+
+	// Better JPEG quality without affecting PNG modes.
+	if format.Device == "jpeg" {
+		cmd.Args = append(cmd.Args, "-dJPEGQ=95")
+	}
 
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("ghostscript rendering engine failed: %v, trace: %s", err, string(output))
@@ -64,7 +117,7 @@ func (s *ConversionService) PdfToImagesBackend(inputPath string) (string, error)
 	var zipClosed bool
 	defer func() {
 		if !zipClosed {
-			zipFile.Close()
+			_ = zipFile.Close()
 		}
 	}()
 
@@ -74,7 +127,7 @@ func (s *ConversionService) PdfToImagesBackend(inputPath string) (string, error)
 		filePath := filepath.Join(workDir, name)
 
 		if err := appendFileToZip(archive, filePath, name); err != nil {
-			archive.Close()
+			_ = archive.Close()
 			return "", err
 		}
 	}

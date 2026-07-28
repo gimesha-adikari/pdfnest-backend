@@ -11,6 +11,8 @@ import (
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	ocrGroup := router.Group("/ocr", middleware.Protect(), uploads.Prepare())
 
+	ocrGroup.Get("/languages", ctrl.Languages)
+
 	ocrGroup.Post("/extract-text", billing.Use(billing.ExtractTextPDF), ctrl.ProcessOCR)
 	ocrGroup.Post("/to-text-pdf", billing.Use(billing.ImageToTextPDF), ctrl.ProcessImageToTextPDF)
 

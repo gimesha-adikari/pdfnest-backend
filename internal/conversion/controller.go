@@ -91,7 +91,9 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 		})
 	}
 
-	zipOutputPath, err := ctrl.service.PdfToImagesBackend(upload.Path)
+	imageType := c.FormValue("image_type", "jpg")
+
+	zipOutputPath, err := ctrl.service.PdfToImagesBackend(upload.Path, imageType)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "RASTERIZATION_FAILED",
