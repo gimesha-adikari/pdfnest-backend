@@ -9,13 +9,16 @@ import (
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	ocrGroup := router.Group("/ocr", middleware.Protect(), uploads.Prepare())
+	ocrGroup := router.Group("/ocr", middleware.Protect())
 
 	ocrGroup.Get("/languages", ctrl.Languages)
+	ocrGroup.Post("/jobs", ctrl.HandleAsyncImageToTextPDFR2)
 
-	ocrGroup.Post("/extract-text", billing.Use(billing.ExtractTextPDF), ctrl.ProcessOCR)
-	ocrGroup.Post("/to-text-pdf", billing.Use(billing.ImageToTextPDF), ctrl.ProcessImageToTextPDF)
+	uploadGroup := ocrGroup.Group("", uploads.Prepare())
 
-	ocrGroup.Post("/extract-text-async", ctrl.HandleAsyncExtractText)
-	ocrGroup.Post("/to-text-pdf-async", ctrl.HandleAsyncImageToTextPDF)
+	uploadGroup.Post("/extract-text", billing.Use(billing.ExtractTextPDF), ctrl.ProcessOCR)
+	uploadGroup.Post("/to-text-pdf", billing.Use(billing.ImageToTextPDF), ctrl.ProcessImageToTextPDF)
+
+	uploadGroup.Post("/extract-text-async", ctrl.HandleAsyncExtractText)
+	uploadGroup.Post("/to-text-pdf-async", ctrl.HandleAsyncImageToTextPDF)
 }

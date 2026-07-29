@@ -17,6 +17,7 @@ import (
 	"pdfnest-backend/internal/ocr"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/structure"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/user"
@@ -135,6 +136,9 @@ func main() {
 
 	userController := user.NewController()
 	user.RegisterRoutes(apiGroup, userController)
+
+	storageController := storage.NewController()
+	storage.RegisterRoutes(apiGroup, storageController)
 
 	port := os.Getenv("PORT")
 	if port == "" {
