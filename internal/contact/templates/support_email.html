@@ -1,162 +1,165 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>New Support Ticket</title>
 </head>
 
-<body style="margin:0;padding:32px;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;color:#111827;">
-
-<table width="100%" cellpadding="0" cellspacing="0" border="0">
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;padding:32px 16px;">
     <tr>
         <td align="center">
 
-            <table width="700" cellpadding="0" cellspacing="0" border="0"
-                   style="background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb;">
+            <table width="700" cellpadding="0" cellspacing="0" border="0" style="width:700px;max-width:700px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.06);">
 
                 <!-- Header -->
                 <tr>
-                    <td style="background:#111827;padding:28px 36px;color:#ffffff;">
-                        <h1 style="margin:0;font-size:26px;font-weight:bold;">
-                            📩 New Support Ticket
-                        </h1>
-
-                        <p style="margin:8px 0 0;font-size:14px;color:#d1d5db;">
-                            A new support request has been submitted from the Platen website.
-                        </p>
+                    <td style="background:linear-gradient(135deg,#111827 0%,#1f2937 100%);padding:28px 32px;color:#ffffff;">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td>
+                                    <div style="display:inline-block;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.14);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#e5e7eb;">
+                                        New Support Ticket
+                                    </div>
+                                    <h1 style="margin:14px 0 8px;font-size:26px;line-height:1.2;font-weight:700;color:#ffffff;">
+                                        {{ .TicketNumber }}
+                                    </h1>
+                                    <p style="margin:0;font-size:14px;line-height:1.7;color:#cbd5e1;">
+                                        A new support request has been submitted through Platen.
+                                    </p>
+                                </td>
+                            </tr>
+                        </table>
                     </td>
                 </tr>
 
-                <!-- Ticket -->
+                <!-- Summary cards -->
                 <tr>
-                    <td style="padding:36px;">
-
-                        <table width="100%" cellpadding="8" cellspacing="0">
-
+                    <td style="padding:24px 32px 8px;">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
                             <tr>
-                                <td width="180"><strong>Ticket Number</strong></td>
-                                <td>{{ .TicketNumber }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Status</strong></td>
-                                <td>{{ .Status }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Priority</strong></td>
-                                <td>{{ .Priority }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Category</strong></td>
-                                <td>{{ .Category }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Source</strong></td>
-                                <td>{{ .Source }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Name</strong></td>
-                                <td>{{ .Name }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Email</strong></td>
-                                <td>
-                                    <a href="mailto:{{ .Email }}">{{ .Email }}</a>
+                                <td style="padding:0 8px 12px 0;" width="25%">
+                                    <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:14px 16px;">
+                                        <div style="font-size:11px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#6b7280;margin-bottom:6px;">Status</div>
+                                        <div style="font-size:14px;font-weight:bold;color:#111827;">{{ .Status }}</div>
+                                    </div>
+                                </td>
+                                <td style="padding:0 8px 12px;" width="25%">
+                                    <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:14px 16px;">
+                                        <div style="font-size:11px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#6b7280;margin-bottom:6px;">Priority</div>
+                                        <div style="font-size:14px;font-weight:bold;color:#111827;">{{ .Priority }}</div>
+                                    </div>
+                                </td>
+                                <td style="padding:0 8px 12px;" width="25%">
+                                    <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:14px 16px;">
+                                        <div style="font-size:11px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#6b7280;margin-bottom:6px;">Category</div>
+                                        <div style="font-size:14px;font-weight:bold;color:#111827;">{{ .Category }}</div>
+                                    </div>
+                                </td>
+                                <td style="padding:0 0 12px 8px;" width="25%">
+                                    <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:12px;padding:14px 16px;">
+                                        <div style="font-size:11px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#6b7280;margin-bottom:6px;">Source</div>
+                                        <div style="font-size:14px;font-weight:bold;color:#111827;">{{ .Source }}</div>
+                                    </div>
                                 </td>
                             </tr>
-
-                            <tr>
-                                <td><strong>Subject</strong></td>
-                                <td>{{ .Subject }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>Submitted</strong></td>
-                                <td>{{ .CreatedAt }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>IP Address</strong></td>
-                                <td>{{ .IPAddress }}</td>
-                            </tr>
-
-                            <tr>
-                                <td><strong>User Agent</strong></td>
-                                <td style="word-break:break-word;">
-                                    {{ .UserAgent }}
-                                </td>
-                            </tr>
-
                         </table>
+                    </td>
+                </tr>
 
+                <!-- Details -->
+                <tr>
+                    <td style="padding:12px 32px 0;">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:0;">
+                            <tr>
+                                <td style="padding:0 0 24px;">
+                                    <div style="font-size:18px;font-weight:700;color:#111827;margin-bottom:14px;">Ticket Details</div>
+
+                                    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;">
+                                        <tr>
+                                            <td width="170" style="background:#f9fafb;padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:bold;color:#374151;">Name</td>
+                                            <td style="padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">{{ .Name }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f9fafb;padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:bold;color:#374151;">Email</td>
+                                            <td style="padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">
+                                                <a href="mailto:{{ .Email }}" style="color:#4f46e5;text-decoration:none;font-weight:bold;">{{ .Email }}</a>
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f9fafb;padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:bold;color:#374151;">Subject</td>
+                                            <td style="padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">{{ .Subject }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f9fafb;padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:bold;color:#374151;">Submitted</td>
+                                            <td style="padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">{{ .CreatedAt }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f9fafb;padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:bold;color:#374151;">IP Address</td>
+                                            <td style="padding:14px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;">{{ .IPAddress }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td style="background:#f9fafb;padding:14px 16px;font-size:13px;font-weight:bold;color:#374151;vertical-align:top;">User Agent</td>
+                                            <td style="padding:14px 16px;font-size:13px;line-height:1.7;color:#374151;word-break:break-word;">{{ .UserAgent }}</td>
+                                        </tr>
+                                    </table>
+                                </td>
+                            </tr>
+                        </table>
                     </td>
                 </tr>
 
                 <!-- Message -->
                 <tr>
-                    <td style="padding:0 36px 36px;">
-
-                        <h2 style="margin-top:0;font-size:18px;">
-                            Message
-                        </h2>
-
-                        <div style="
-background:#f9fafb;
-border:1px solid #e5e7eb;
-border-radius:8px;
-padding:18px;
-white-space:pre-wrap;
-line-height:1.7;
-font-size:15px;
-">
+                    <td style="padding:0 32px 24px;">
+                        <div style="font-size:18px;font-weight:700;color:#111827;margin-bottom:14px;">Message</div>
+                        <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:14px;padding:18px;line-height:1.8;font-size:14px;color:#111827;white-space:pre-wrap;">
                             {{ .Message }}
                         </div>
-
                     </td>
                 </tr>
 
                 <!-- Attachments -->
                 {{ if .HasAttachments }}
                 <tr>
-                    <td style="padding:0 36px 36px;">
+                    <td style="padding:0 32px 24px;">
+                        <div style="font-size:18px;font-weight:700;color:#111827;margin-bottom:14px;">Attachments</div>
 
-                        <h2 style="margin-top:0;font-size:18px;">
-                            Attachments
-                        </h2>
+                        <table cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                {{ range .Attachments }}
+                                <td style="padding:0 8px 8px 0;">
+                                        <span style="display:inline-block;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;border-radius:999px;padding:8px 12px;font-size:13px;font-weight:600;">
+                                            {{ . }}
+                                        </span>
+                                </td>
+                                {{ end }}
+                            </tr>
+                        </table>
 
-                        <ul style="margin:0;padding-left:18px;line-height:1.8;">
-                            {{ range .Attachments }}
-                            <li>{{ . }}</li>
-                            {{ end }}
-                        </ul>
-
-                        <p style="margin-top:16px;color:#6b7280;font-size:13px;">
+                        <p style="margin:12px 0 0;font-size:13px;line-height:1.7;color:#6b7280;">
                             The uploaded files are attached to this email.
                         </p>
-
                     </td>
                 </tr>
                 {{ end }}
 
                 <!-- Footer -->
                 <tr>
-                    <td style="padding:24px 36px;background:#f9fafb;border-top:1px solid #e5e7eb;">
-
-                        <p style="margin:0;font-size:13px;color:#6b7280;">
-                            This email was automatically generated by the
-                            <strong>Platen Support System</strong>.
-                        </p>
-
-                        <p style="margin-top:8px;font-size:13px;color:#9ca3af;">
-                            Ticket Reference:
-                            <strong>{{ .TicketNumber }}</strong>
-                        </p>
-
+                    <td style="padding:20px 32px;background:#f9fafb;border-top:1px solid #e5e7eb;">
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td style="font-size:13px;line-height:1.7;color:#6b7280;">
+                                    This email was automatically generated by the <strong style="color:#111827;">Platen Support System</strong>.
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="padding-top:8px;font-size:12px;color:#9ca3af;">
+                                    Ticket Reference: <strong style="color:#111827;">{{ .TicketNumber }}</strong>
+                                </td>
+                            </tr>
+                        </table>
                     </td>
                 </tr>
 
@@ -165,6 +168,5 @@ font-size:15px;
         </td>
     </tr>
 </table>
-
 </body>
 </html>
