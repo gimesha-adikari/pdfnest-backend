@@ -10,35 +10,65 @@
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f4f4f5;padding:32px 16px;">
     <tr>
         <td align="center">
-            <table width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.06);">
+            <table width="640" cellpadding="0" cellspacing="0" border="0" style="width:640px;max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:18px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,0.06);">
 
                 <tr>
-                    <td style="background:linear-gradient(135deg,#111827 0%,#1f2937 100%);padding:28px 32px;color:#ffffff;">
-                        <div style="display:inline-block;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.14);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:bold;letter-spacing:0.04em;text-transform:uppercase;color:#e5e7eb;">
-                            Platen PDF
+                    <td style="background:linear-gradient(135deg,#0f172a 0%,#111827 100%);padding:28px 32px 30px;color:#ffffff;">
+                        <table cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td width="42" valign="top">
+                                    <img
+                                            src="https://pdfnest.gimesha.dev/platen-logo.svg"
+                                            alt="Platen PDF"
+                                            width="42"
+                                            style="display:block;border:0;outline:none;text-decoration:none;height:auto;"
+                                    />
+                                </td>
+                                <td style="padding-left:14px;">
+                                    <div style="font-size:22px;line-height:1;font-weight:800;letter-spacing:-0.04em;">
+                                        <span style="color:#ffffff;">PLATEN</span>
+                                        <span style="
+                                                color:#8b5cf6;
+                                                background:linear-gradient(90deg,#c4b5fd 0%,#8b5cf6 55%,#ec4899 100%);
+                                                -webkit-background-clip:text;
+                                                background-clip:text;
+                                                -webkit-text-fill-color:transparent;
+                                            "> PDF</span>
+                                    </div>
+                                    <div style="margin-top:6px;font-size:11px;line-height:1.4;letter-spacing:0.12em;text-transform:uppercase;color:#cbd5e1;">
+                                        Free PDF Tools
+                                    </div>
+                                </td>
+                            </tr>
+                        </table>
+
+                        <div style="height:22px;"></div>
+
+                        <div style="display:inline-block;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:999px;padding:7px 12px;font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#e5e7eb;">
+                            Account security
                         </div>
 
-                        <h1 style="margin:14px 0 8px;font-size:26px;line-height:1.2;font-weight:700;color:#ffffff;">
+                        <h1 style="margin:16px 0 8px;font-size:30px;line-height:1.15;font-weight:800;color:#ffffff;letter-spacing:-0.03em;">
                             Verify your email
                         </h1>
 
-                        <p style="margin:0;font-size:14px;line-height:1.7;color:#cbd5e1;">
-                            Thanks for creating your account. Please verify your email address to continue.
+                        <p style="margin:0;max-width:520px;font-size:14px;line-height:1.8;color:#cbd5e1;">
+                            Thanks for creating your account. Please verify your email address to continue using Platen PDF.
                         </p>
                     </td>
                 </tr>
 
                 <tr>
                     <td style="padding:32px;">
-                        <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:14px;padding:22px;">
+                        <div style="background:#f8fafc;border:1px solid #e5e7eb;border-radius:16px;padding:24px;">
                             <p style="margin:0 0 16px;font-size:15px;line-height:1.8;color:#111827;">
                                 Click the button below to verify your email address.
                             </p>
 
-                            <table cellpadding="0" cellspacing="0" border="0" style="margin:24px 0;">
+                            <table cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 20px;">
                                 <tr>
                                     <td>
-                                        <a href="{{ .VerifyURL }}" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:14px 22px;border-radius:10px;">
+                                        <a href="{{ .VerifyURL }}" style="display:inline-block;background:#7c3aed;color:#ffffff;text-decoration:none;font-weight:700;font-size:14px;padding:14px 22px;border-radius:12px;box-shadow:0 10px 24px rgba(124,58,237,0.24);">
                                             Verify Email
                                         </a>
                                     </td>
@@ -50,22 +80,28 @@
                             </p>
 
                             <p style="margin:0;font-size:13px;line-height:1.8;word-break:break-all;">
-                                <a href="{{ .VerifyURL }}" style="color:#4f46e5;text-decoration:none;">{{ .VerifyURL }}</a>
+                                <a href="{{ .VerifyURL }}" style="color:#7c3aed;text-decoration:none;font-weight:700;">{{ .VerifyURL }}</a>
                             </p>
                         </div>
 
                         <div style="margin:28px 0;border-top:1px solid #e5e7eb;"></div>
 
-                        <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                            <div style="display:inline-block;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;border-radius:999px;padding:8px 12px;font-size:13px;font-weight:600;">
-                                Expires in {{ .Expiry }}
-                            </div>
-                            <div style="display:inline-block;background:#f8fafc;border:1px solid #e5e7eb;color:#374151;border-radius:999px;padding:8px 12px;font-size:13px;font-weight:600;">
-                                Platen account security
-                            </div>
-                        </div>
+                        <table cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td style="padding-right:10px; padding-bottom:10px;">
+                                        <span style="display:inline-block;background:#eef2ff;border:1px solid #c7d2fe;color:#4338ca;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:700;">
+                                            Expires in {{ .Expiry }}
+                                        </span>
+                                </td>
+                                <td style="padding-bottom:10px;">
+                                        <span style="display:inline-block;background:#f8fafc;border:1px solid #e5e7eb;color:#374151;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:700;">
+                                            Platen account security
+                                        </span>
+                                </td>
+                            </tr>
+                        </table>
 
-                        <p style="margin:18px 0 0;font-size:13px;line-height:1.8;color:#6b7280;">
+                        <p style="margin:6px 0 0;font-size:13px;line-height:1.8;color:#6b7280;">
                             If you did not create this account, you can safely ignore this email.
                         </p>
                     </td>
@@ -73,9 +109,13 @@
 
                 <tr>
                     <td style="padding:18px 32px;background:#f9fafb;border-top:1px solid #e5e7eb;">
-                        <p style="margin:0;font-size:12px;color:#9ca3af;">
-                            This email was automatically generated by Platen PDF.
-                        </p>
+                        <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                            <tr>
+                                <td style="font-size:12px;color:#9ca3af;line-height:1.7;">
+                                    This email was automatically generated by Platen PDF.
+                                </td>
+                            </tr>
+                        </table>
                     </td>
                 </tr>
 
