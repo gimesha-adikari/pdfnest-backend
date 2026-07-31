@@ -2,11 +2,14 @@ package contact
 
 import (
 	"bytes"
+	"embed"
 	"fmt"
 	"html/template"
 	"io"
+	"log"
 	"mime/multipart"
 	"os"
+	"strings"
 
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/mailer"
@@ -33,20 +36,33 @@ type SupportEmailData struct {
 
 	HasAttachments bool
 	Attachments    []string
+
+	ContactURL string
 }
+
+//go:embed templates/support_email.html
+var supportEmailTemplates embed.FS
 
 func (s *Service) sendSupportEmail(
 	ticket *config.ContactTicket,
 	files []*multipart.FileHeader,
 ) error {
-
 	supportEmail := os.Getenv("SUPPORT_EMAIL")
 	if supportEmail == "" {
 		return fmt.Errorf("SUPPORT_EMAIL is not configured")
 	}
 
-	htmlBody, err := buildSupportEmailHTML(ticket, files)
+	frontendURL := strings.TrimRight(os.Getenv("FRONTEND_URL"), "/")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3000"
+	}
+	contactURL := fmt.Sprintf("%s/contact", frontendURL)
+
+	log.Printf("[CONTACT EMAIL] preparing support email ticket=%s attachments=%d", ticket.TicketNumber, len(files))
+
+	htmlBody, err := buildSupportEmailHTML(ticket, files, contactURL)
 	if err != nil {
+		log.Printf("[CONTACT EMAIL] template render failed for ticket=%s: %v", ticket.TicketNumber, err)
 		return err
 	}
 
@@ -64,27 +80,33 @@ Subject:
 
 Message:
 
+%s
+
+Need help with the website?
 %s`,
 		ticket.TicketNumber,
 		ticket.Category,
 		ticket.Email,
 		ticket.Subject,
 		ticket.Message,
+		contactURL,
 	)
 
 	var attachments []mailer.Attachment
 
 	for _, file := range files {
+		log.Printf("[CONTACT EMAIL] attaching file=%s ticket=%s", file.Filename, ticket.TicketNumber)
 
 		f, err := file.Open()
 		if err != nil {
+			log.Printf("[CONTACT EMAIL] failed opening attachment=%s ticket=%s: %v", file.Filename, ticket.TicketNumber, err)
 			return err
 		}
 
 		content, err := io.ReadAll(f)
 		_ = f.Close()
-
 		if err != nil {
+			log.Printf("[CONTACT EMAIL] failed reading attachment=%s ticket=%s: %v", file.Filename, ticket.TicketNumber, err)
 			return err
 		}
 
@@ -94,42 +116,39 @@ Message:
 		})
 	}
 
-	return mailer.Send(mailer.Email{
+	err = mailer.Send(mailer.Email{
 		To: []string{
 			supportEmail,
 		},
-
-		Subject: fmt.Sprintf(
-			"[%s] %s",
-			ticket.TicketNumber,
-			ticket.Subject,
-		),
-
+		Subject:     fmt.Sprintf("[%s] %s", ticket.TicketNumber, ticket.Subject),
 		Text:        textBody,
 		Html:        htmlBody,
 		Attachments: attachments,
 	})
+	if err != nil {
+		log.Printf("[CONTACT EMAIL] send failed ticket=%s: %v", ticket.TicketNumber, err)
+		return err
+	}
+
+	log.Printf("[CONTACT EMAIL] support email sent successfully ticket=%s to=%s", ticket.TicketNumber, supportEmail)
+	return nil
 }
 
 func buildSupportEmailHTML(
 	ticket *config.ContactTicket,
 	files []*multipart.FileHeader,
+	contactURL string,
 ) (string, error) {
+	log.Printf("[CONTACT EMAIL] rendering support template ticket=%s", ticket.TicketNumber)
 
-	tmpl, err := template.ParseFiles(
-		"internal/contact/templates/support_email.html",
-	)
+	tmpl, err := template.ParseFS(supportEmailTemplates, "templates/support_email.html")
 	if err != nil {
 		return "", err
 	}
 
 	var attachmentNames []string
-
 	for _, file := range files {
-		attachmentNames = append(
-			attachmentNames,
-			file.Filename,
-		)
+		attachmentNames = append(attachmentNames, file.Filename)
 	}
 
 	data := SupportEmailData{
@@ -153,11 +172,13 @@ func buildSupportEmailHTML(
 
 		HasAttachments: len(attachmentNames) > 0,
 		Attachments:    attachmentNames,
+
+		ContactURL: contactURL,
 	}
 
 	var body bytes.Buffer
-
 	if err := tmpl.Execute(&body, data); err != nil {
+		log.Printf("[CONTACT EMAIL] template execute failed ticket=%s: %v", ticket.TicketNumber, err)
 		return "", err
 	}
 
@@ -168,6 +189,5 @@ func stringOrDash(value *string) string {
 	if value == nil || *value == "" {
 		return "-"
 	}
-
 	return *value
 }

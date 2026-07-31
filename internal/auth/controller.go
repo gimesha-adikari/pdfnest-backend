@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,11 +12,10 @@ import (
 	"log"
 	"net/mail"
 	"os"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/mailer"
 	"strings"
 	"time"
-
-	"pdfnest-backend/config"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -48,17 +48,19 @@ type ResendVerificationRequest struct {
 }
 
 type VerificationEmailData struct {
-	VerifyURL string
-	Expiry    string
+	VerifyURL  string
+	ContactURL string
+	Expiry     string
 }
+
+//go:embed templates/verification_email.html
+var verificationEmailTemplates embed.FS
 
 func isLocal() bool {
 	local := os.Getenv("LOCAL")
-	if local == "true" {
-		return true
-	}
-	return false
+	return local == "true"
 }
+
 func NewController(s Service) *Controller {
 	return &Controller{service: s}
 }
@@ -89,6 +91,7 @@ func ensureFreeSubscription(tx *gorm.DB, userID string) error {
 	if err := tx.Model(&config.Subscription{}).Where("user_id = ?", userID).Count(&count).Error; err != nil {
 		return err
 	}
+
 	if count > 0 {
 		return nil
 	}
@@ -113,9 +116,14 @@ func sendVerificationEmail(toEmail, rawToken string) error {
 	}
 
 	verifyURL := fmt.Sprintf("%s/verify-email?token=%s", frontendURL, rawToken)
+	contactURL := fmt.Sprintf("%s/contact", frontendURL)
 
-	htmlBody, err := buildVerificationEmailHTML(verifyURL)
+	log.Printf("[AUTH EMAIL] preparing verification email for %s", toEmail)
+	log.Printf("[AUTH EMAIL] verify URL: %s", verifyURL)
+
+	htmlBody, err := buildVerificationEmailHTML(verifyURL, contactURL)
 	if err != nil {
+		log.Printf("[AUTH EMAIL] template render failed: %v", err)
 		return err
 	}
 
@@ -128,30 +136,44 @@ Click the link below to verify your email:
 
 %s
 
+Need help? Contact us:
+%s
+
 This verification link expires in 30 minutes.
 
 If you didn't create this account, you can safely ignore this email.`,
 		verifyURL,
+		contactURL,
 	)
 
-	return mailer.Send(mailer.Email{
+	err = mailer.Send(mailer.Email{
 		To:      []string{toEmail},
 		Subject: "Verify your Platen PDF email",
 		Text:    textBody,
 		Html:    htmlBody,
 	})
+	if err != nil {
+		log.Printf("[AUTH EMAIL] send failed for %s: %v", toEmail, err)
+		return err
+	}
+
+	log.Printf("[AUTH EMAIL] verification email sent to %s", toEmail)
+	return nil
 }
 
-func buildVerificationEmailHTML(verifyURL string) (string, error) {
-	tmpl, err := template.ParseFiles("internal/auth/templates/verification_email.html")
+func buildVerificationEmailHTML(verifyURL, contactURL string) (string, error) {
+	log.Println("[AUTH EMAIL] rendering verification template from embedded assets")
+
+	tmpl, err := template.ParseFS(verificationEmailTemplates, "templates/verification_email.html")
 	if err != nil {
 		return "", err
 	}
 
 	var body bytes.Buffer
 	if err := tmpl.Execute(&body, VerificationEmailData{
-		VerifyURL: verifyURL,
-		Expiry:    "30 minutes",
+		VerifyURL:  verifyURL,
+		ContactURL: contactURL,
+		Expiry:     "30 minutes",
 	}); err != nil {
 		return "", err
 	}
@@ -459,7 +481,6 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Logout(c *fiber.Ctx) error {
-
 	isProduction := os.Getenv("APP_ENV") == "production"
 
 	cookie := &fiber.Cookie{
