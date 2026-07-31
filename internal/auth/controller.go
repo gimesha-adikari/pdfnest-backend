@@ -1,14 +1,17 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html/template"
 	"log"
 	"net/mail"
 	"os"
+	"pdfnest-backend/internal/mailer"
 	"strings"
 	"time"
 
@@ -16,7 +19,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"github.com/resend/resend-go/v2"
 	"gorm.io/gorm"
 )
 
@@ -43,6 +45,11 @@ type VerifyEmailRequest struct {
 
 type ResendVerificationRequest struct {
 	Email string `json:"email"`
+}
+
+type VerificationEmailData struct {
+	VerifyURL string
+	Expiry    string
 }
 
 func isLocal() bool {
@@ -100,17 +107,6 @@ func ensureFreeSubscription(tx *gorm.DB, userID string) error {
 }
 
 func sendVerificationEmail(toEmail, rawToken string) error {
-	apiKey := os.Getenv("RESEND_API_KEY")
-	fromEmail := os.Getenv("FROM_EMAIL")
-
-	if apiKey == "" {
-		return fmt.Errorf("RESEND_API_KEY is not configured")
-	}
-
-	if fromEmail == "" {
-		return fmt.Errorf("FROM_EMAIL is not configured")
-	}
-
 	frontendURL := strings.TrimRight(os.Getenv("FRONTEND_URL"), "/")
 	if frontendURL == "" {
 		frontendURL = "http://localhost:3000"
@@ -118,15 +114,13 @@ func sendVerificationEmail(toEmail, rawToken string) error {
 
 	verifyURL := fmt.Sprintf("%s/verify-email?token=%s", frontendURL, rawToken)
 
-	client := resend.NewClient(apiKey)
+	htmlBody, err := buildVerificationEmailHTML(verifyURL)
+	if err != nil {
+		return err
+	}
 
-	params := &resend.SendEmailRequest{
-		From:    fromEmail,
-		To:      []string{toEmail},
-		Subject: "Verify your Platen PDF email",
-
-		Text: fmt.Sprintf(
-			`Verify your email
+	textBody := fmt.Sprintf(
+		`Verify your email
 
 Thanks for creating your Platen PDF account.
 
@@ -137,66 +131,32 @@ Click the link below to verify your email:
 This verification link expires in 30 minutes.
 
 If you didn't create this account, you can safely ignore this email.`,
-			verifyURL,
-		),
+		verifyURL,
+	)
 
-		Html: fmt.Sprintf(`
-<!DOCTYPE html>
-<html>
-<body style="font-family:Arial,sans-serif;background:#f5f5f5;padding:40px;">
-<div style="max-width:600px;margin:auto;background:white;padding:40px;border-radius:12px;">
+	return mailer.Send(mailer.Email{
+		To:      []string{toEmail},
+		Subject: "Verify your Platen PDF email",
+		Text:    textBody,
+		Html:    htmlBody,
+	})
+}
 
-<h2>Verify your email</h2>
-
-<p>Thanks for creating your Platen PDF account.</p>
-
-<p>Please click the button below to verify your email address.</p>
-
-<p style="margin:30px 0;">
-<a href="%s"
-style="
-background:#4f46e5;
-color:white;
-padding:14px 28px;
-border-radius:8px;
-text-decoration:none;
-font-weight:bold;
-display:inline-block;">
-Verify Email
-</a>
-</p>
-
-<p>If the button doesn't work, use this link:</p>
-
-<p>
-<a href="%s">%s</a>
-</p>
-
-<hr>
-
-<p style="color:#666">
-This verification link expires in 30 minutes.
-</p>
-
-<p style="color:#666">
-If you didn't create this account, you can safely ignore this email.
-</p>
-
-</div>
-</body>
-</html>
-`, verifyURL, verifyURL, verifyURL),
-	}
-
-	email, err := client.Emails.Send(params)
+func buildVerificationEmailHTML(verifyURL string) (string, error) {
+	tmpl, err := template.ParseFiles("internal/auth/templates/verification_email.html")
 	if err != nil {
-		log.Printf("Resend error: %v", err)
-		return err
+		return "", err
 	}
 
-	log.Printf("Email sent: %+v", email)
+	var body bytes.Buffer
+	if err := tmpl.Execute(&body, VerificationEmailData{
+		VerifyURL: verifyURL,
+		Expiry:    "30 minutes",
+	}); err != nil {
+		return "", err
+	}
 
-	return nil
+	return body.String(), nil
 }
 
 func (ctrl *Controller) Register(c *fiber.Ctx) error {

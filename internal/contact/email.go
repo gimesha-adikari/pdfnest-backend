@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"log"
 	"mime/multipart"
 	"os"
-	"pdfnest-backend/config"
 
-	"github.com/resend/resend-go/v2"
+	"pdfnest-backend/config"
+	"pdfnest-backend/internal/mailer"
 )
 
 type SupportEmailData struct {
@@ -41,16 +40,6 @@ func (s *Service) sendSupportEmail(
 	files []*multipart.FileHeader,
 ) error {
 
-	apiKey := os.Getenv("RESEND_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("RESEND_API_KEY is not configured")
-	}
-
-	fromEmail := os.Getenv("FROM_EMAIL")
-	if fromEmail == "" {
-		return fmt.Errorf("FROM_EMAIL is not configured")
-	}
-
 	supportEmail := os.Getenv("SUPPORT_EMAIL")
 	if supportEmail == "" {
 		return fmt.Errorf("SUPPORT_EMAIL is not configured")
@@ -61,22 +50,8 @@ func (s *Service) sendSupportEmail(
 		return err
 	}
 
-	client := resend.NewClient(apiKey)
-
-	params := &resend.SendEmailRequest{
-		From: fromEmail,
-		To:   []string{supportEmail},
-
-		Subject: fmt.Sprintf(
-			"[%s] %s",
-			ticket.TicketNumber,
-			ticket.Subject,
-		),
-
-		Html: htmlBody,
-
-		Text: fmt.Sprintf(
-			`New Support Ticket
+	textBody := fmt.Sprintf(
+		`New Support Ticket
 
 Ticket: %s
 
@@ -90,13 +65,14 @@ Subject:
 Message:
 
 %s`,
-			ticket.TicketNumber,
-			ticket.Category,
-			ticket.Email,
-			ticket.Subject,
-			ticket.Message,
-		),
-	}
+		ticket.TicketNumber,
+		ticket.Category,
+		ticket.Email,
+		ticket.Subject,
+		ticket.Message,
+	)
+
+	var attachments []mailer.Attachment
 
 	for _, file := range files {
 
@@ -106,30 +82,33 @@ Message:
 		}
 
 		content, err := io.ReadAll(f)
-		f.Close()
+		_ = f.Close()
 
 		if err != nil {
 			return err
 		}
 
-		params.Attachments = append(
-			params.Attachments,
-			&resend.Attachment{
-				Filename: file.Filename,
-				Content:  content,
-			},
-		)
+		attachments = append(attachments, mailer.Attachment{
+			Filename: file.Filename,
+			Content:  content,
+		})
 	}
 
-	email, err := client.Emails.Send(params)
-	if err != nil {
-		log.Printf("Resend error: %v", err)
-		return err
-	}
+	return mailer.Send(mailer.Email{
+		To: []string{
+			supportEmail,
+		},
 
-	log.Printf("Support email sent successfully: %+v", email)
+		Subject: fmt.Sprintf(
+			"[%s] %s",
+			ticket.TicketNumber,
+			ticket.Subject,
+		),
 
-	return nil
+		Text:        textBody,
+		Html:        htmlBody,
+		Attachments: attachments,
+	})
 }
 
 func buildSupportEmailHTML(
@@ -147,7 +126,10 @@ func buildSupportEmailHTML(
 	var attachmentNames []string
 
 	for _, file := range files {
-		attachmentNames = append(attachmentNames, file.Filename)
+		attachmentNames = append(
+			attachmentNames,
+			file.Filename,
+		)
 	}
 
 	data := SupportEmailData{
