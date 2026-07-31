@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/mail"
@@ -19,17 +20,21 @@ import (
 	"gorm.io/gorm"
 )
 
+var errPolicyConsentRequired = errors.New("policy consent required")
+
 type Controller struct {
 	service Service
 }
 
 type GoogleAuthRequest struct {
-	IDToken string `json:"id_token"`
+	IDToken        string `json:"id_token"`
+	PolicyAccepted bool   `json:"policy_accepted"`
 }
 
 type AuthRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email          string `json:"email"`
+	Password       string `json:"password"`
+	PolicyAccepted bool   `json:"policy_accepted"`
 }
 
 type VerifyEmailRequest struct {
@@ -207,6 +212,12 @@ func (ctrl *Controller) Register(c *fiber.Ctx) error {
 
 	if len(req.Password) < 8 {
 		return c.Status(400).JSON(fiber.Map{"error": "Password must be at least 8 characters"})
+	}
+
+	if !req.PolicyAccepted {
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Policy consent is required before creating an account",
+		})
 	}
 
 	var existing config.User
@@ -413,6 +424,10 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 	err = config.DB.Transaction(func(tx *gorm.DB) error {
 		findErr := tx.Where("google_id = ? OR email = ?", googleID, email).First(&user).Error
 		if findErr != nil {
+			if !req.PolicyAccepted {
+				return errPolicyConsentRequired
+			}
+
 			user = config.User{
 				ID:            uuid.New().String(),
 				Email:         email,
@@ -444,6 +459,11 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return ensureFreeSubscription(tx, user.ID)
 	})
 	if err != nil {
+		if errors.Is(err, errPolicyConsentRequired) {
+			return c.Status(400).JSON(fiber.Map{
+				"error": "Policy consent is required before creating an account",
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{"error": "Failed processing Google sign-in"})
 	}
 
