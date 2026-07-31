@@ -117,6 +117,40 @@ type UserSetting struct {
 	UpdatedAt time.Time
 }
 
+type ContactTicket struct {
+	ID string `gorm:"type:uuid;primaryKey"`
+
+	TicketNumber string `gorm:"type:varchar(30);uniqueIndex;not null"`
+
+	UserID *string `gorm:"type:uuid;index"`
+	User   *User   `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL;"`
+
+	AssignedToID *string `gorm:"type:uuid;index"`
+	AssignedTo   *User   `gorm:"foreignKey:AssignedToID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL;"`
+
+	Name  *string `gorm:"type:varchar(150)"`
+	Email string  `gorm:"type:varchar(255);index;not null"`
+
+	Category string `gorm:"type:varchar(50);index;not null"`
+	Subject  string `gorm:"type:varchar(255);not null"`
+	Message  string `gorm:"type:text;not null"`
+
+	Status   string `gorm:"type:varchar(30);default:'open';index"`
+	Priority string `gorm:"type:varchar(30);default:'normal';index"`
+
+	Source string `gorm:"type:varchar(30);default:'website'"`
+
+	IPAddress string `gorm:"type:varchar(64)"`
+	UserAgent string `gorm:"type:text"`
+
+	ResolvedAt *time.Time
+	ClosedAt   *time.Time
+
+	CreatedAt   time.Time `gorm:"index"`
+	UpdatedAt   time.Time
+	EmailStatus string
+}
+
 func ConnectDB() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -128,23 +162,24 @@ func ConnectDB() {
 		log.Fatalf("Failed to establish target connection database: %v", err)
 	}
 
-	//log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
-	//err = database.Migrator().DropTable(
-	//	&UserSetting{},
-	//	&BillingReservation{},
-	//	&Subscription{},
-	//	&Transaction{},
-	//	&UsageLog{},
-	//	&WebhookLog{},
-	//	&User{},
-	//	&models.HomePageContent{},
-	//	&models.SubscribePageContent{},
-	//	&models.DynamicToolItem{},
-	//	models.AboutPageContent{},
-	//)
-	//if err != nil {
-	//	log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
-	//}
+	log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
+	err = database.Migrator().DropTable(
+		&UserSetting{},
+		&ContactTicket{},
+		&BillingReservation{},
+		&Subscription{},
+		&Transaction{},
+		&UsageLog{},
+		&WebhookLog{},
+		&User{},
+		&models.HomePageContent{},
+		&models.SubscribePageContent{},
+		&models.DynamicToolItem{},
+		models.AboutPageContent{},
+	)
+	if err != nil {
+		log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
+	}
 
 	err = database.AutoMigrate(
 		&User{},
@@ -154,6 +189,7 @@ func ConnectDB() {
 		&WebhookLog{},
 		&BillingReservation{},
 		&UserSetting{},
+		&ContactTicket{},
 		&models.HomePageContent{},
 		&models.SubscribePageContent{},
 		&models.DynamicToolItem{},
@@ -162,6 +198,11 @@ func ConnectDB() {
 
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)
+	}
+
+	err = database.Exec("CREATE SEQUENCE IF NOT EXISTS contact_ticket_sequence START 1").Error
+	if err != nil {
+		log.Fatalf("Failed to create sequence contact_ticket_sequence: %v", err)
 	}
 
 	DB = database

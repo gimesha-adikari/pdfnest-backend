@@ -8,6 +8,7 @@ import (
 	"pdfnest-backend/internal/admin"
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/contact"
 	"pdfnest-backend/internal/content"
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/edit"
@@ -139,6 +140,9 @@ func main() {
 
 	storageController := storage.NewController()
 	storage.RegisterRoutes(apiGroup, storageController)
+
+	contactController := contact.NewController()
+	contact.RegisterRoutes(apiGroup, contactController)
 
 	port := os.Getenv("PORT")
 	if port == "" {
