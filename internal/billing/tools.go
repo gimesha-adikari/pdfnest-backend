@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"pdfnest-backend/internal/storage"
 	"strings"
 
 	"pdfnest-backend/internal/uploads"
@@ -109,7 +111,19 @@ func EstimateSourceTrackerFromBody(field string) Estimator {
 			return 0, 0, nil
 		}
 
-		pages, err := api.PageCountFile(raw)
+		store, err := storage.Default()
+		if err != nil {
+			return 0, 0, fmt.Errorf("storage not configured: %w", err)
+		}
+
+		tmpPath, err := store.DownloadToTemp(raw, "billing-", ".pdf")
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to fetch file for billing estimate: %w", err)
+		}
+
+		defer os.Remove(tmpPath)
+
+		pages, err := api.PageCountFile(tmpPath)
 		if err != nil {
 			return 0, 0, err
 		}

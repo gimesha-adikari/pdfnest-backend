@@ -1,9 +1,12 @@
 package markup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/uploads"
 	"strings"
@@ -167,6 +170,14 @@ func (cr *Controller) HandleJobStatus(c *fiber.Ctx) error {
 func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 	jobID := c.Params("job_id")
 
+	job, err := cr.service.GetJobStatus(jobID)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+			"success": false,
+			"error":   "Failed to fetch job status: " + err.Error(),
+		})
+	}
+
 	resp, err := cr.service.GetJobDownload(jobID)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
@@ -176,10 +187,39 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return c.Status(resp.StatusCode).Send(b)
+	}
+
 	pdfBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
+
+	go func(record *workerJobRecord) {
+		store, err := storage.Default()
+		if err != nil || record == nil {
+			return
+		}
+
+		ctx := context.Background()
+
+		if record.Result != nil {
+			if artifact, ok := record.Result["artifact_key"].(string); ok && artifact != "" {
+				_ = store.DeleteObject(ctx, artifact)
+			}
+		}
+
+		if record.Payload != nil {
+			if src, ok := record.Payload["source_key"].(string); ok && src != "" {
+				_ = store.DeleteObject(ctx, src)
+			}
+			if payload, ok := record.Payload["payload_key"].(string); ok && payload != "" {
+				_ = store.DeleteObject(ctx, payload)
+			}
+		}
+	}(job)
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		c.Set("Content-Type", ct)
@@ -191,5 +231,31 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		c.Set("Content-Disposition", cd)
 	}
 
+	return c.Send(pdfBytes)
+}
+
+func (cr *Controller) HandleGetFile(c *fiber.Ctx) error {
+	path := c.Query("path")
+	if path == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "path query parameter is required"})
+	}
+
+	store, err := storage.Default()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "storage not configured"})
+	}
+
+	tmpPath, err := store.DownloadToTemp(path, "preview", ".pdf")
+	if err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "file not found or decryption failed"})
+	}
+	defer os.Remove(tmpPath)
+
+	pdfBytes, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to read decrypted file"})
+	}
+
+	c.Set("Content-Type", "application/pdf")
 	return c.Send(pdfBytes)
 }

@@ -1,11 +1,13 @@
 package ocr
 
 import (
+	"context"
 	"log"
 	"os"
 	"strings"
 
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
 
 	"github.com/gofiber/fiber/v2"
@@ -62,6 +64,20 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
 		defer func() {
+			// 1. CLEANUP R2 IMAGES
+			store, err := storage.Default()
+			if err == nil {
+				ctx := context.Background()
+				for _, ref := range refs {
+					if ref.Key != "" {
+						_ = store.DeleteObject(ctx, ref.Key)
+					}
+				}
+			} else {
+				log.Printf("[OCR R2 JOB] Warning: Failed to init storage for cleanup: %v", err)
+			}
+
+			// 2. Handle Panics gracefully
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", "Unexpected worker crash while building OCR PDF.")

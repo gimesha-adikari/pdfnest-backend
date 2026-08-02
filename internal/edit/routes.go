@@ -15,4 +15,6 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 
 	editGroup.Get("/jobs/:job_id", ctrl.HandleJobStatus)
 	editGroup.Get("/jobs/:job_id/download", ctrl.HandleJobDownload)
+
+	editGroup.Get("/file", ctrl.HandleGetFile)
 }

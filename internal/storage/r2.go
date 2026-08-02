@@ -3,6 +3,9 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"mime"
@@ -29,6 +32,65 @@ var (
 	defaultErr   error
 	once         sync.Once
 )
+
+// --- ENCRYPTION LOGIC ---
+
+func getEncryptionKey() []byte {
+	key := strings.TrimSpace(os.Getenv("FILE_ENCRYPTION_KEY"))
+	if len(key) == 32 {
+		return []byte(key)
+	}
+	return nil
+}
+
+func encryptData(data []byte) ([]byte, error) {
+	key := getEncryptionKey()
+	if key == nil {
+		return data, nil // Skip encryption if key is missing
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+func decryptData(data []byte) ([]byte, error) {
+	key := getEncryptionKey()
+	if key == nil {
+		return data, nil
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return data, nil // Too short, likely an old unencrypted file
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+
+	decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		// If decryption fails, gracefully fallback to treating it as an old unencrypted file
+		return data, nil
+	}
+	return decrypted, nil
+}
+
+// --- STORE LOGIC ---
 
 func Default() (*Store, error) {
 	once.Do(func() {
@@ -102,15 +164,14 @@ func BuildKey(prefix, ext string) string {
 }
 
 func (s *Store) UploadFile(path, key, contentType string) error {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	stat, err := f.Stat()
+	encrypted, err := encryptData(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("encryption failed: %w", err)
 	}
 
 	if contentType == "" {
@@ -120,12 +181,13 @@ func (s *Store) UploadFile(path, key, contentType string) error {
 		contentType = "application/octet-stream"
 	}
 
+	reader := bytes.NewReader(encrypted)
 	_, err = s.client.PutObject(
 		context.Background(),
 		s.bucket,
 		key,
-		f,
-		stat.Size(),
+		reader,
+		int64(len(encrypted)),
 		minio.PutObjectOptions{ContentType: contentType},
 	)
 	if err != nil {
@@ -142,40 +204,54 @@ func (s *Store) DownloadToTemp(key, prefix, suffix string) (string, error) {
 		suffix = "." + suffix
 	}
 
+	obj, err := s.client.GetObject(context.Background(), s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return "", fmt.Errorf("download from r2 failed: %w", err)
+	}
+	defer obj.Close()
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return "", fmt.Errorf("read r2 object failed: %w", err)
+	}
+
+	decrypted, err := decryptData(data)
+	if err != nil {
+		return "", fmt.Errorf("decryption failed: %w", err)
+	}
+
 	tmp, err := os.CreateTemp("", prefix+"-*"+suffix)
 	if err != nil {
 		return "", err
 	}
 	defer tmp.Close()
 
-	obj, err := s.client.GetObject(context.Background(), s.bucket, key, minio.GetObjectOptions{})
-	if err != nil {
+	if _, err := tmp.Write(decrypted); err != nil {
 		_ = os.Remove(tmp.Name())
-		return "", fmt.Errorf("download from r2 failed: %w", err)
-	}
-	defer obj.Close()
-
-	if _, err := io.Copy(tmp, obj); err != nil {
-		_ = os.Remove(tmp.Name())
-		return "", fmt.Errorf("copy r2 object to temp failed: %w", err)
+		return "", fmt.Errorf("write temp failed: %w", err)
 	}
 
 	return tmp.Name(), nil
 }
 
 func (s *Store) UploadBytes(data []byte, key, contentType string) error {
-	reader := bytes.NewReader(data)
+	encrypted, err := encryptData(data)
+	if err != nil {
+		return fmt.Errorf("encryption failed: %w", err)
+	}
+
+	reader := bytes.NewReader(encrypted)
 
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	_, err := s.client.PutObject(
+	_, err = s.client.PutObject(
 		context.Background(),
 		s.bucket,
 		key,
 		reader,
-		int64(len(data)),
+		int64(len(encrypted)),
 		minio.PutObjectOptions{
 			ContentType: contentType,
 		},
@@ -186,6 +262,15 @@ func (s *Store) UploadBytes(data []byte, key, contentType string) error {
 
 	return nil
 }
+
+func (s *Store) DeleteObject(ctx context.Context, key string) error {
+	if key == "" {
+		return nil
+	}
+	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+}
+
+// --- PRESIGN LOGIC ---
 
 type PresignFile struct {
 	Name string `json:"name"`
@@ -233,7 +318,7 @@ func sanitizeObjectKey(raw string) (string, error) {
 func (s *Store) PresignPutObject(
 	ctx context.Context,
 	key string,
-	_ string, // contentType no longer used
+	_ string,
 	expires time.Duration,
 ) (string, error) {
 	key, err := sanitizeObjectKey(key)

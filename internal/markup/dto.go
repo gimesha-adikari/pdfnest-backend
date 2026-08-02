@@ -54,4 +54,5 @@ type workerJobRecord struct {
 	Result          map[string]any `json:"result"`
 	Error           string         `json:"error"`
 	CancelRequested bool           `json:"cancel_requested"`
+	Payload         map[string]any `json:"payload"`
 }
