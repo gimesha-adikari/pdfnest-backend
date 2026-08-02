@@ -117,6 +117,19 @@ type UserSetting struct {
 	UpdatedAt time.Time
 }
 
+type ContactCategory struct {
+	ID          string `gorm:"type:uuid;primaryKey"`
+	Name        string `gorm:"type:varchar(120);not null"`
+	Slug        string `gorm:"type:varchar(120);uniqueIndex;not null"`
+	Type        string `gorm:"type:varchar(60);index;not null"` // billing, technical, security, feedback, account, other
+	Description string `gorm:"type:text"`
+	Color       string `gorm:"type:varchar(30)"`
+	SortOrder   int    `gorm:"default:0;index"`
+	IsActive    bool   `gorm:"default:true;not null"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type ContactTicket struct {
 	ID string `gorm:"type:uuid;primaryKey"`
 
@@ -140,11 +153,15 @@ type ContactTicket struct {
 
 	Source string `gorm:"type:varchar(30);default:'website'"`
 
+	InternalNotes string `gorm:"type:text"`
+
 	IPAddress string `gorm:"type:varchar(64)"`
 	UserAgent string `gorm:"type:text"`
 
 	ResolvedAt *time.Time
 	ClosedAt   *time.Time
+
+	LastActivityAt time.Time `gorm:"index"`
 
 	CreatedAt   time.Time `gorm:"index"`
 	UpdatedAt   time.Time
@@ -162,24 +179,25 @@ func ConnectDB() {
 		log.Fatalf("Failed to establish target connection database: %v", err)
 	}
 
-	//log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
-	//err = database.Migrator().DropTable(
-	//	&UserSetting{},
-	//	&ContactTicket{},
-	//	&BillingReservation{},
-	//	&Subscription{},
-	//	&Transaction{},
-	//	&UsageLog{},
-	//	&WebhookLog{},
-	//	&User{},
-	//	&models.HomePageContent{},
-	//	&models.SubscribePageContent{},
-	//	&models.DynamicToolItem{},
-	//	models.AboutPageContent{},
-	//)
-	//if err != nil {
-	//	log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
-	//}
+	log.Println("DEVELOPMENT WARNING: Dropping existing schema tables for a clean runtime run...")
+	err = database.Migrator().DropTable(
+		&UserSetting{},
+		&ContactTicket{},
+		&ContactCategory{},
+		&BillingReservation{},
+		&Subscription{},
+		&Transaction{},
+		&UsageLog{},
+		&WebhookLog{},
+		&User{},
+		&models.HomePageContent{},
+		&models.SubscribePageContent{},
+		&models.DynamicToolItem{},
+		models.AboutPageContent{},
+	)
+	if err != nil {
+		log.Printf("Warning: Failed to clear old tables during startup sweep: %v", err)
+	}
 
 	err = database.AutoMigrate(
 		&User{},
@@ -189,13 +207,13 @@ func ConnectDB() {
 		&WebhookLog{},
 		&BillingReservation{},
 		&UserSetting{},
+		&ContactCategory{},
 		&ContactTicket{},
 		&models.HomePageContent{},
 		&models.SubscribePageContent{},
 		&models.DynamicToolItem{},
 		models.AboutPageContent{},
 	)
-
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)
 	}
@@ -211,6 +229,20 @@ func ConnectDB() {
 	tables, _ := database.Migrator().GetTables()
 
 	log.Println("TABLES:", tables)
+
+	var categoryCount int64
+	if err := DB.Model(&ContactCategory{}).Count(&categoryCount).Error; err == nil && categoryCount == 0 {
+		now := time.Now()
+		defaultCategories := []ContactCategory{
+			{ID: uuid.New().String(), Name: "Bug Report", Slug: "bug-report", Type: "technical", Description: "Technical errors and broken behavior", Color: "indigo", SortOrder: 1, IsActive: true, CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New().String(), Name: "Billing", Slug: "billing", Type: "billing", Description: "Payments, invoices, subscriptions, refunds", Color: "emerald", SortOrder: 2, IsActive: true, CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New().String(), Name: "Account", Slug: "account", Type: "account", Description: "Login, verification, account access", Color: "amber", SortOrder: 3, IsActive: true, CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New().String(), Name: "Security", Slug: "security", Type: "security", Description: "Suspicious activity and security concerns", Color: "rose", SortOrder: 4, IsActive: true, CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New().String(), Name: "Feedback", Slug: "feedback", Type: "feedback", Description: "Suggestions and product feedback", Color: "purple", SortOrder: 5, IsActive: true, CreatedAt: now, UpdatedAt: now},
+			{ID: uuid.New().String(), Name: "General", Slug: "general", Type: "other", Description: "Anything else", Color: "slate", SortOrder: 6, IsActive: true, CreatedAt: now, UpdatedAt: now},
+		}
+		_ = DB.Create(&defaultCategories).Error
+	}
 
 	adminEmail := os.Getenv("ADMIN_EMAIL")
 	if adminEmail == "" {

@@ -144,6 +144,9 @@ func main() {
 	contactController := contact.NewController()
 	contact.RegisterRoutes(apiGroup, contactController)
 
+	contactAdminController := contact.NewAdminController()
+	contact.RegisterAdminRoutes(apiGroup, contactAdminController)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
