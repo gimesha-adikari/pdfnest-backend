@@ -13,6 +13,7 @@ import (
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/health"
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/landing"
 	"pdfnest-backend/internal/markup"
 	"pdfnest-backend/internal/ocr"
@@ -28,7 +29,6 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-
 	"github.com/joho/godotenv"
 )
 
@@ -45,6 +45,21 @@ func main() {
 
 	config.ConnectDB()
 	content.SeedSiteContent()
+
+	config.ConnectDB()
+	config.ConnectRedis()
+
+	identityStore := identity.NewStore(
+		config.Redis,
+		90*24*time.Hour,
+	)
+
+	billing.Initialize(
+		billing.NewGuestQuotaStore(
+			config.Redis,
+			90*24*time.Hour,
+		),
+	)
 
 	app := fiber.New(fiber.Config{
 		BodyLimit:    100 * 1024 * 1024,
@@ -68,7 +83,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint",
 		AllowMethods:     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		AllowCredentials: true,
 	}))
@@ -78,15 +93,13 @@ func main() {
 	}))
 
 	tasks.RegisterRoutes(app)
-
 	landing.RegisterRoutes(app)
 
 	apiGroup := app.Group("/api")
 
-	// Core Identity Infrastructure Package Mounting Domain Blocks
 	authService := auth.NewService()
 	authController := auth.NewController(authService)
-	auth.RegisterRoutes(apiGroup, authController)
+	auth.RegisterRoutes(apiGroup, authController, identityStore)
 
 	adminController := admin.NewController()
 	admin.RegisterRoutes(apiGroup, adminController)
@@ -94,40 +107,35 @@ func main() {
 	billingController := billing.NewController()
 	billing.RegisterRoutes(apiGroup, billingController)
 
-	// Domain 1: Security (Lock/Unlock)
+	toolGroup := apiGroup.Group("", identity.Resolve(identityStore))
+
 	securityService := security.NewService()
 	securityController := security.NewController(securityService)
-	security.RegisterRoutes(apiGroup, securityController)
+	security.RegisterRoutes(toolGroup, securityController)
 
-	// Domain 2: Optimization (Compress)
 	optimizeService := optimize.NewService()
 	optimizeController := optimize.NewController(optimizeService)
-	optimize.RegisterRoutes(apiGroup, optimizeController)
+	optimize.RegisterRoutes(toolGroup, optimizeController)
 
-	// Domain 3: Document Structure (Merge/Split/Delete)
 	structureService := structure.NewService()
 	structureController := structure.NewController(structureService)
-	structure.RegisterRoutes(apiGroup, structureController)
+	structure.RegisterRoutes(toolGroup, structureController)
 
-	// Domain 4: Document Conversion (PDF to Img / Img to PDF)
 	conversionService := conversion.NewService()
 	conversionController := conversion.NewController(conversionService)
-	conversion.RegisterRoutes(apiGroup, conversionController)
+	conversion.RegisterRoutes(toolGroup, conversionController)
 
-	// Domain 5: Extraction (PDF to Text)
 	ocrService := ocr.NewService()
 	ocrController := ocr.NewController(ocrService)
-	ocr.RegisterRoutes(apiGroup, ocrController)
+	ocr.RegisterRoutes(toolGroup, ocrController)
 
-	// Domain 6: Edit (PDF edit)
 	editService := edit.NewService()
 	editController := edit.NewController(editService)
-	edit.RegisterRoutes(apiGroup, editController)
+	edit.RegisterRoutes(toolGroup, editController)
 
-	// Domain 7: Markup (Highlight / Underline / Strikeout)
 	markupService := markup.NewService()
 	markupController := markup.NewController(markupService)
-	markup.RegisterRoutes(apiGroup, markupController)
+	markup.RegisterRoutes(toolGroup, markupController)
 
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)

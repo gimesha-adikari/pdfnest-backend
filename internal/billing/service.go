@@ -238,28 +238,6 @@ func (s *Service) Release(reservationID string) error {
 	})
 }
 
-func ReserveFromRequest(c *fiber.Ctx, userID string, tool Tool) (*config.BillingReservation, error) {
-	pages, images, err := EstimateFromRequest(c, tool)
-	if err != nil {
-		return nil, err
-	}
-	return Default.Reserve(userID, tool, pages, images, c.Path())
-}
-
-func EstimateFromRequest(c *fiber.Ctx, tool Tool) (pages, images int, err error) {
-	if tool.Estimate == nil {
-		return 0, 0, nil
-	}
-	return tool.Estimate(c)
-}
-
-func Finalize(reservationID string, success bool) error {
-	if success {
-		return Default.Commit(reservationID)
-	}
-	return Default.Release(reservationID)
-}
-
 func activeReservationTotals(tx *gorm.DB, userID string, now time.Time) (reservationTotals, error) {
 	var totals reservationTotals
 	err := tx.Model(&config.BillingReservation{}).
@@ -359,4 +337,26 @@ func CountSelectedPages(selection string) int {
 		}
 	}
 	return total
+}
+
+func ReserveFromRequest(c *fiber.Ctx, userID string, tool Tool) (*config.BillingReservation, error) {
+	pages, images, err := EstimateFromRequest(c, tool)
+	if err != nil {
+		return nil, err
+	}
+	return Default.Reserve(userID, tool, pages, images, c.Path())
+}
+
+func EstimateFromRequest(c *fiber.Ctx, tool Tool) (pages, images int, err error) {
+	if tool.Estimate == nil {
+		return 0, 0, nil
+	}
+	return tool.Estimate(c)
+}
+
+func Finalize(reservationID string, success bool) error {
+	if success {
+		return Default.Commit(reservationID)
+	}
+	return Default.Release(reservationID)
 }

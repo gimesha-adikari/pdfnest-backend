@@ -2,14 +2,13 @@ package ocr
 
 import (
 	"pdfnest-backend/internal/billing"
-	"pdfnest-backend/internal/middleware"
 	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	ocrGroup := router.Group("/ocr", middleware.Protect())
+	ocrGroup := router.Group("/ocr")
 
 	ocrGroup.Get("/languages", ctrl.Languages)
 	ocrGroup.Post("/jobs", ctrl.HandleAsyncImageToTextPDFR2)

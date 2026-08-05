@@ -1,13 +1,19 @@
 package auth
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"pdfnest-backend/internal/identity"
 
-func RegisterRoutes(router fiber.Router, ctrl *Controller) {
+	"github.com/gofiber/fiber/v2"
+)
+
+func RegisterRoutes(router fiber.Router, ctrl *Controller, identityStore *identity.Store) {
 	authGroup := router.Group("/auth")
 	authGroup.Post("/register", ctrl.Register)
 	authGroup.Post("/login", ctrl.Login)
 	authGroup.Post("/google", ctrl.GoogleSignIn)
 	authGroup.Post("/logout", ctrl.Logout)
+
+	authGroup.Get("/session", identity.Resolve(identityStore), ctrl.Session)
 
 	authGroup.Get("/verify-email", ctrl.VerifyEmail)
 	authGroup.Post("/verify-email", ctrl.VerifyEmail)

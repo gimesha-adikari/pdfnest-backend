@@ -813,15 +813,6 @@ func packageUnits(packageType string) int {
 	}
 }
 
-func nextMidnight(now time.Time) time.Time {
-	y, m, d := now.Date()
-	return time.Date(y, m, d, 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
-}
-
-func nextMonthStart(now time.Time) time.Time {
-	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).AddDate(0, 1, 0)
-}
-
 func maxInt(a, b int) int {
 	if a > b {
 		return a
