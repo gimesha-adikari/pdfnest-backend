@@ -253,13 +253,18 @@ func ConnectDB() {
 	DB.Model(&User{}).Where("email = ?", adminEmail).Count(&count)
 
 	if count == 0 {
-		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
-
 		adminPassword := os.Getenv("ADMIN_PASSWORD")
+		isProd := os.Getenv("APP_ENV") == "production"
+
 		if adminPassword == "" {
+			if isProd {
+				log.Printf("[SEEDER WARNING] APP_ENV=production but ADMIN_PASSWORD is not configured. Skipping admin account creation.")
+				return
+			}
 			adminPassword = "admin"
 		}
 
+		log.Printf("[SEEDER] Creating administrative core profile account for: %s", adminEmail)
 		passwordHash, _ := HashPassword(adminPassword)
 
 		adminUser := User{
