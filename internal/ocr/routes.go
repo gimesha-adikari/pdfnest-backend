@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/uploads"
 
@@ -19,6 +20,6 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	uploadGroup.Post("/extract-text", billing.Use(billing.ExtractTextPDF), ctrl.ProcessOCR)
 	uploadGroup.Post("/to-text-pdf", billing.Use(billing.ImageToTextPDF), ctrl.ProcessImageToTextPDF)
 
-	uploadGroup.Post("/extract-text-async", ctrl.HandleAsyncExtractText)
-	uploadGroup.Post("/to-text-pdf-async", ctrl.HandleAsyncImageToTextPDF)
+	uploadGroup.Post("/extract-text-async", idempotency.Use(nil), ctrl.HandleAsyncExtractText)
+	uploadGroup.Post("/to-text-pdf-async", idempotency.Use(nil), ctrl.HandleAsyncImageToTextPDF)
 }

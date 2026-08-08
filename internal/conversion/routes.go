@@ -2,6 +2,7 @@ package conversion
 
 import (
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/uploads"
 
@@ -25,8 +26,8 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	conversionGroup.Post("/markdown-to-pdf", billing.Use(billing.ConvertMarkdownToPDF), ctrl.ConvertMarkdownToPDF)
 	conversionGroup.Post("/code-to-pdf", billing.Use(billing.ConvertCodeToPDF), ctrl.ConvertCodeToPDF)
 
-	conversionGroup.Post("/html-to-pdf-async", ctrl.HandleAsyncHTMLToPDF)
-	conversionGroup.Post("/markdown-to-pdf-async", ctrl.HandleAsyncMarkdownToPDF)
+	conversionGroup.Post("/html-to-pdf-async", idempotency.Use(nil), ctrl.HandleAsyncHTMLToPDF)
+	conversionGroup.Post("/markdown-to-pdf-async", idempotency.Use(nil), ctrl.HandleAsyncMarkdownToPDF)
 
 	conversionGroup.Post("/pdf-to-word", billing.Use(billing.ConvertPDFToWord), ConvertPdfToOfficeHandler("docx"))
 	conversionGroup.Post("/pdf-to-excel", billing.Use(billing.ConvertPDFToExcel), ConvertPdfToOfficeHandler("xlsx"))

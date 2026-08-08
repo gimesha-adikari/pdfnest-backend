@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
@@ -300,6 +301,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating sandboxed headless rendering nodes...", "")
+	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	opts := PrintOptions{}
 	if paperSize := c.FormValue("paperSize"); paperSize != "" {
@@ -386,6 +388,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing compilation text nodes...", "")
+	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))

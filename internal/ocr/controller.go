@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
@@ -119,10 +120,12 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 
 	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
+		idempotency.Release(c, nil)
 		return c.Status(400).JSON(APIError{Code: "MISSING_FILE", Message: "No file uploaded"})
 	}
 
 	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_OCR", 150); err != nil {
+		idempotency.Release(c, nil)
 		return c.Status(400).JSON(APIError{
 			Code:    "PAGE_LIMIT_EXCEEDED",
 			Message: err.Error(),
@@ -131,9 +134,11 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing Document Ingestion Matrix...", "")
+	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	inputPath := filepath.Join(os.TempDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
 	if err := copyFile(upload.Path, inputPath); err != nil {
+		idempotency.Release(c, nil)
 		return c.Status(500).JSON(APIError{Code: "DISK_ERR", Message: "Failed to write workspace data cache"})
 	}
 
@@ -210,6 +215,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
+	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	tempPaths := make([]string, 0, len(files))
 	for _, f := range files {
