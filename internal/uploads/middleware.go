@@ -1,10 +1,12 @@
 package uploads
 
 import (
+	"fmt"
 	"log"
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/temp"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -64,8 +66,9 @@ func Prepare() fiber.Handler {
 }
 
 func saveHeader(c *fiber.Ctx, fh *multipart.FileHeader) (string, error) {
-	tempDir := os.TempDir()
-	target := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fh.Filename))
+	tempDir := temp.GetDir()
+	safeBasename := filepath.Base(fh.Filename)
+	target := filepath.Join(tempDir, fmt.Sprintf("pdfnest-upload-%s-%s", uuid.New().String(), safeBasename))
 	if err := c.SaveFile(fh, target); err != nil {
 		return "", err
 	}

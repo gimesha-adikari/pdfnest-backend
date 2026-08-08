@@ -106,6 +106,14 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 		})
 	}
 
+	requiredBytes := disk.EstimateRequiredSpace(upload.Header.Size, 15.0, 100*1024*1024)
+	if diskErr := disk.CheckAvailableSpace(temp.GetDir(), requiredBytes); diskErr != nil {
+		return c.Status(fiber.StatusInsufficientStorage).JSON(APIError{
+			Code:    "INSUFFICIENT_STORAGE",
+			Message: "Insufficient server disk space available to perform PDF rasterization operation.",
+		})
+	}
+
 	imageType := c.FormValue("image_type", "jpg")
 
 	zipOutputPath, err := ctrl.service.PdfToImagesBackend(c.UserContext(), upload.Path, imageType)
