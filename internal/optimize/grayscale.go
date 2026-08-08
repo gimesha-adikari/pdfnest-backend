@@ -1,12 +1,17 @@
 package optimize
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 func ConvertToGrayscale(inputPath, outputPath string) error {
-	cmd := exec.Command("gs",
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gs",
 		"-sDEVICE=pdfwrite",
 		"-sColorConversionStrategy=Gray",
 		"-dProcessColorModel=/DeviceGray",

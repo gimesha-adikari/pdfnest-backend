@@ -32,6 +32,13 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 		})
 	}
 
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_COMPRESS", 500); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
+		})
+	}
+
 	log.Printf("Filename: %s", upload.Header.Filename)
 	log.Printf("Size: %d", upload.Header.Size)
 
@@ -60,6 +67,13 @@ func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
 			Message: "Missing target PDF document file parameter.",
+		})
+	}
+
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GRAYSCALE", 500); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 

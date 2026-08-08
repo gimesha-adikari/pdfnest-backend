@@ -32,6 +32,14 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		})
 	}
 
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "PAGE_LIMIT_EXCEEDED",
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+
 	filePassword := c.FormValue("file_password")
 
 	store, err := storage.Default()

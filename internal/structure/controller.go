@@ -66,10 +66,10 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 				Message: "Failed to initialize staging area for file compilation.",
 			})
 		}
-		if err := uploads.ValidatePDFHeader(inputPath); err != nil {
+		if _, err := uploads.CheckPDFPageLimit(inputPath, "MAX_PAGES_GENERAL", 1000); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(APIError{
-				Code:    "INVALID_PDF_FILE",
-				Message: "Invalid PDF document header in uploaded file.",
+				Code:    "PAGE_LIMIT_EXCEEDED",
+				Message: err.Error(),
 			})
 		}
 		inputPaths = append(inputPaths, inputPath)
@@ -122,10 +122,10 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 			Message: "Failed to allocate scratch file parameters.",
 		})
 	}
-	if err := uploads.ValidatePDFHeader(inputPath); err != nil {
+	if _, err := uploads.CheckPDFPageLimit(inputPath, "MAX_PAGES_GENERAL", 1000); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
-			Code:    "INVALID_PDF_FILE",
-			Message: "Invalid PDF document header in uploaded file.",
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 	defer func() {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 	"strconv"
@@ -88,6 +89,13 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
 			Message: "Missing source PDF file upload parameter.",
+		})
+	}
+
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_RASTERIZE", 300); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 
@@ -318,15 +326,27 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 	}
 
+	release, ok := limiter.Default.TryAcquire()
+	if !ok {
+		c.Set("Retry-After", "5")
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "SERVER_BUSY",
+			"error":   "Server processing capacity reached. Please try again in a few seconds.",
+			"message": "Server processing capacity reached. Please try again in a few seconds.",
+		})
+	}
+
 	reservation, err := billing.Default.Reserve(userID, billing.HTMLToPDF, 0, 0, c.Path())
 	if err != nil {
+		release()
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	go func(id, target string, printOpts PrintOptions, reservationID string) {
+	go func(id, target string, printOpts PrintOptions, reservationID string, releaseToken func()) {
 		defer func() {
+			releaseToken()
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r))
@@ -349,7 +369,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, targetURL, opts, reservation.ID)
+	}(taskId, targetURL, opts, reservation.ID, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
@@ -388,6 +408,17 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
+	release, ok := limiter.Default.TryAcquire()
+	if !ok {
+		_ = os.Remove(inputPath)
+		c.Set("Retry-After", "5")
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "SERVER_BUSY",
+			"error":   "Server processing capacity reached. Please try again in a few seconds.",
+			"message": "Server processing capacity reached. Please try again in a few seconds.",
+		})
+	}
+
 	reservation, err := billing.Default.Reserve(
 		userID,
 		billing.ConvertMarkdownToPDF,
@@ -396,6 +427,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		c.Path(),
 	)
 	if err != nil {
+		release()
 		_ = os.Remove(inputPath)
 
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
@@ -403,8 +435,9 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, srcPath string, printOpts PrintOptions, reservationID string) {
+	go func(id, srcPath string, printOpts PrintOptions, reservationID string, releaseToken func()) {
 		defer func() {
+			releaseToken()
 			_ = os.Remove(srcPath)
 
 			if r := recover(); r != nil {
@@ -452,7 +485,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 
-	}(taskId, inputPath, opts, reservation.ID)
+	}(taskId, inputPath, opts, reservation.ID, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"taskId": taskId,
@@ -466,7 +499,15 @@ func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PDF file is required"})
 		}
 
-		tempDir := "./temp_uploads"
+		if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_OFFICE_CONVERT", 200); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"code":    "PAGE_LIMIT_EXCEEDED",
+				"error":   err.Error(),
+				"message": err.Error(),
+			})
+		}
+
+		tempDir := os.TempDir()
 		_ = os.MkdirAll(tempDir, os.ModePerm)
 
 		fileID := uuid.New().String()

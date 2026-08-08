@@ -1,12 +1,14 @@
 package conversion
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -21,7 +23,10 @@ func (s *ConversionService) OfficeToPdf(inputPath string) (string, error) {
 	}
 	defer os.RemoveAll(workDir) // cleanup our work folder sandbox
 
-	cmd := exec.Command("libreoffice",
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "libreoffice",
 		"-env:UserInstallation=file://"+filepath.ToSlash(filepath.Join(workDir, "profile")),
 		"--headless",
 		"--convert-to", "pdf:writer_pdf_Export",

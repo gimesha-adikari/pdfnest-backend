@@ -3,6 +3,7 @@ package conversion
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -73,7 +75,10 @@ func (s *ConversionService) PdfToImagesBackend(inputPath string, imageType strin
 
 	outputPattern := filepath.Join(workDir, fmt.Sprintf("page-%%03d.%s", format.FileExt))
 
-	cmd := exec.Command("gs",
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gs",
 		"-dNOPAUSE",
 		"-dBATCH",
 		"-dSAFER",

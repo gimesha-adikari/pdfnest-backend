@@ -1,11 +1,13 @@
 package ocr
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 
@@ -32,6 +34,13 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
 			Message: "Missing source PDF file upload parameter.",
+		})
+	}
+
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_OCR", 150); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 
@@ -71,6 +80,14 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	maxImages := uploads.GetEnvInt("MAX_PAGES_OCR", 150)
+	if len(files) > maxImages {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: fmt.Sprintf("Number of uploaded images (%d) exceeds maximum allowed limit of %d images for OCR operations.", len(files), maxImages),
+		})
+	}
+
 	lang := c.FormValue("lang", "eng")
 
 	temporaryImagePaths := make([]string, 0, len(files))
@@ -105,6 +122,13 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		return c.Status(400).JSON(APIError{Code: "MISSING_FILE", Message: "No file uploaded"})
 	}
 
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_OCR", 150); err != nil {
+		return c.Status(400).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
+		})
+	}
+
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing Document Ingestion Matrix...", "")
 
@@ -113,8 +137,18 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		return c.Status(500).JSON(APIError{Code: "DISK_ERR", Message: "Failed to write workspace data cache"})
 	}
 
+	release, ok := limiter.Default.TryAcquire()
+	if !ok {
+		c.Set("Retry-After", "5")
+		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
+			Code:    "SERVER_BUSY",
+			Message: "Server processing capacity reached. Please try again in a few seconds.",
+		})
+	}
+
 	reservation, err := billing.ReserveFromRequest(c, userID, billing.ExtractTextPDF)
 	if err != nil {
+		release()
 		_ = os.Remove(inputPath)
 		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
 			Code:    "BILLING_BLOCKED",
@@ -122,8 +156,9 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, srcPath, reservationID, lang string) {
+	go func(id, srcPath, reservationID, lang string, releaseToken func()) {
 		defer func() {
+			releaseToken()
 			_ = os.Remove(srcPath)
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
@@ -147,7 +182,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, inputPath, reservation.ID, lang)
+	}(taskId, inputPath, reservation.ID, lang, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
@@ -165,6 +200,14 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		return c.Status(400).JSON(APIError{Code: "MISSING_IMAGES", Message: "No file targets dropped inside body array"})
 	}
 
+	maxImages := uploads.GetEnvInt("MAX_PAGES_OCR", 150)
+	if len(files) > maxImages {
+		return c.Status(400).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: fmt.Sprintf("Number of uploaded images (%d) exceeds maximum allowed limit of %d images for OCR operations.", len(files), maxImages),
+		})
+	}
+
 	taskId := uuid.New().String()
 	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
 
@@ -176,8 +219,21 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 	}
 
+	release, ok := limiter.Default.TryAcquire()
+	if !ok {
+		for _, p := range tempPaths {
+			_ = os.Remove(p)
+		}
+		c.Set("Retry-After", "5")
+		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
+			Code:    "SERVER_BUSY",
+			Message: "Server processing capacity reached. Please try again in a few seconds.",
+		})
+	}
+
 	reservation, err := billing.ReserveFromRequest(c, userID, billing.ImageToTextPDF)
 	if err != nil {
+		release()
 		for _, p := range tempPaths {
 			_ = os.Remove(p)
 		}
@@ -187,8 +243,9 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id string, imgPaths []string, reservationID, lang string) {
+	go func(id string, imgPaths []string, reservationID, lang string, releaseToken func()) {
 		defer func() {
+			releaseToken()
 			for _, p := range imgPaths {
 				_ = os.Remove(p)
 			}
@@ -214,7 +271,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 
 		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, tempPaths, reservation.ID, lang)
+	}(taskId, tempPaths, reservation.ID, lang, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }

@@ -1,10 +1,12 @@
 package optimize
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -24,7 +26,10 @@ func (s *optimizeService) OptimizePDF(inputPath string) (string, error) {
 	outputFile := "compressed-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
 
-	cmd := exec.Command("gs",
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "gs",
 		"-dNOPAUSE",
 		"-dBATCH",
 		"-dSAFER",

@@ -6,17 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"pdfnest-backend/internal/worker"
 	"strings"
 	"time"
 )
 
 func workerBaseURL() string {
-	base := os.Getenv("PDFNEST_WORKER_URL")
-	if base == "" {
-		base = "http://localhost:8000"
-	}
-	return strings.TrimRight(base, "/")
+	return worker.GetWorkerURL()
 }
 
 type markupRequest struct {
@@ -37,8 +33,7 @@ func postJSON(url string, payload any) (*workerJobSubmission, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("worker request failed: %w", err)
 	}
@@ -67,8 +62,7 @@ func getJSON[T any](url string, timeout time.Duration) (*T, error) {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
 
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -120,8 +114,7 @@ func (s *service) GetJobDownload(jobID string) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to build download request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download request failed: %w", err)
 	}
