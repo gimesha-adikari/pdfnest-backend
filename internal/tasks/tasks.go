@@ -23,12 +23,14 @@ const (
 )
 
 type TaskStatus struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Progress  int    `json:"progress"`
-	ResultURL string `json:"resultUrl,omitempty"`
-	Error     string `json:"error,omitempty"`
-	UpdatedAt int64  `json:"updatedAt,omitempty"`
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	Progress      int    `json:"progress"`
+	ResultKey     string `json:"resultKey,omitempty"`
+	ResultURL     string `json:"resultUrl,omitempty"`
+	OwnerIdentity string `json:"ownerIdentity,omitempty"`
+	Error         string `json:"error,omitempty"`
+	UpdatedAt     int64  `json:"updatedAt,omitempty"`
 }
 
 type TaskRegistry struct {
@@ -71,9 +73,9 @@ if val and val ~= '' then
 
     if curStatus == 'COMPLETED' or curStatus == 'FAILED' then
         if curStatus == newStatus then
-            return val
+            return 'REJECTED'
         end
-        return val
+        return 'REJECTED'
     end
 
     if curStatus == 'PROCESSING' and newStatus == 'PROCESSING' then
@@ -87,7 +89,7 @@ if val and val ~= '' then
 end
 
 redis.call('SET', key, newValStr, 'EX', ttlSeconds)
-return newValStr
+return 'ACCEPTED'
 `
 
 const atomicGetCheckStaleLua = `
@@ -153,20 +155,91 @@ func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
 	return &status, nil
 }
 
+func (r *TaskRegistry) SetWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string) (bool, error) {
+	client := r.getClient()
+	if client == nil {
+		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
+		return false, errors.New("redis client not configured")
+	}
+
+	task := &TaskStatus{
+		ID:            id,
+		Status:        status,
+		Progress:      progress,
+		ResultKey:     resultKey,
+		Error:         errStr,
+		UpdatedAt:     time.Now().Unix(),
+		OwnerIdentity: ownerIdentity,
+	}
+
+	if resultKey != "" {
+		task.ResultURL = "r2://" + resultKey
+	}
+
+	data, err := json.Marshal(task)
+	if err != nil {
+		log.Printf("[TASK REGISTRY ERROR] Failed to marshal task %s: %v", id, err)
+		return false, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+	res, err := client.Eval(ctx, atomicSetTaskLua, []string{key}, string(data), int(TaskTTL.Seconds())).Result()
+	if err != nil {
+		log.Printf("[TASK REGISTRY ERROR] Redis Set (atomic) failed for task %s: %v", id, err)
+		return false, err
+	}
+
+	resStr, ok := res.(string)
+	if ok && resStr == "ACCEPTED" {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *TaskRegistry) Set(id string, status string, progress int, resultURL string, errStr string) error {
+	var resultKey string
+	if strings.HasPrefix(resultURL, "r2://") {
+		resultKey = strings.TrimPrefix(resultURL, "r2://")
+	}
+
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
 		return errors.New("redis client not configured")
 	}
 
+	// Read existing task to preserve OwnerIdentity if available
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+	var ownerIdentity string
+	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
+		var existingTask TaskStatus
+		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
+			ownerIdentity = existingTask.OwnerIdentity
+			if resultKey == "" && existingTask.ResultKey != "" {
+				resultKey = existingTask.ResultKey
+			}
+		}
+	}
+
 	task := &TaskStatus{
-		ID:        id,
-		Status:    status,
-		Progress:  progress,
-		ResultURL: resultURL,
-		Error:     errStr,
-		UpdatedAt: time.Now().Unix(),
+		ID:            id,
+		Status:        status,
+		Progress:      progress,
+		ResultKey:     resultKey,
+		ResultURL:     resultURL,
+		Error:         errStr,
+		UpdatedAt:     time.Now().Unix(),
+		OwnerIdentity: ownerIdentity,
+	}
+
+	if resultKey != "" && task.ResultURL == "" {
+		task.ResultURL = "r2://" + resultKey
 	}
 
 	data, err := json.Marshal(task)
@@ -175,10 +248,6 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	key := TaskKeyPrefix + strings.TrimSpace(id)
 	res, err := client.Eval(ctx, atomicSetTaskLua, []string{key}, string(data), int(TaskTTL.Seconds())).Result()
 	if err != nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis Set (atomic) failed for task %s: %v", id, err)

@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/idempotency"
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 	"strconv"
@@ -292,6 +294,11 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 
+	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if ownerIdentity == "" {
+		ownerIdentity = c.IP()
+	}
+
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -300,7 +307,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating sandboxed headless rendering nodes...", "")
+	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity)
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	opts := PrintOptions{}
@@ -346,38 +353,76 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, target string, printOpts PrintOptions, reservationID string, releaseToken func()) {
+	go func(id, target string, printOpts PrintOptions, reservationID, owner string, releaseToken func()) {
+		var localOutPath string
 		defer func() {
 			releaseToken()
+			if localOutPath != "" {
+				_ = os.Remove(localOutPath)
+			}
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
-				tasks.Registry.Set(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r))
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r), owner)
 			}
 		}()
 
-		tasks.Registry.Set(id, "PROCESSING", 35, "Spawning layout canvas compilation layers...", "")
+		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Spawning layout canvas compilation layers...", owner)
 
 		outPath, err := ctrl.service.HtmlToPdf(target, printOpts)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			return
+		}
+		localOutPath = outPath
+
+		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
+		r2Store, r2Err := storage.Default()
+		isProd := os.Getenv("APP_ENV") == "production"
+
+		if r2Err != nil || r2Store == nil {
+			if isProd {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
+				return
+			}
+			if err := billing.Default.Commit(reservationID); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
+				return
+			}
+			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			return
+		}
+
+		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
 		if err := billing.Default.Commit(reservationID); err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, targetURL, opts, reservation.ID, release)
+		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
+		if !accepted {
+			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
+		}
+	}(taskId, targetURL, opts, reservation.ID, ownerIdentity, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
 
 func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
+
+	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if ownerIdentity == "" {
+		ownerIdentity = c.IP()
+	}
 
 	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
@@ -387,13 +432,13 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing compilation text nodes...", "")
+	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity)
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))
 	if err := copyFile(upload.Path, inputPath); err != nil {
-		tasks.Registry.Set(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.")
+		_, _ = tasks.Registry.SetWithKey(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.", ownerIdentity)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Disk caching allocation error",
 		})
@@ -438,37 +483,55 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, srcPath string, printOpts PrintOptions, reservationID string, releaseToken func()) {
+	go func(id, srcPath string, printOpts PrintOptions, reservationID, owner string, releaseToken func()) {
+		var localOutPath string
 		defer func() {
 			releaseToken()
 			_ = os.Remove(srcPath)
+			if localOutPath != "" {
+				_ = os.Remove(localOutPath)
+			}
 
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
 
-				tasks.Registry.Set(
-					id,
-					"FAILED",
-					0,
-					"",
-					"Text compilation parser structural error.",
-				)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Text compilation parser structural error.", owner)
 			}
 		}()
 
-		tasks.Registry.Set(
-			id,
-			"PROCESSING",
-			40,
-			"Parsing tokens and injecting layout styling variables...",
-			"",
-		)
+		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 40, "", "Parsing tokens and injecting layout styling variables...", owner)
 
 		outPath, err := ctrl.service.MarkdownToPdf(srcPath, printOpts)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 
-			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			return
+		}
+		localOutPath = outPath
+
+		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
+		r2Store, r2Err := storage.Default()
+		isProd := os.Getenv("APP_ENV") == "production"
+
+		if r2Err != nil || r2Store == nil {
+			if isProd {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
+				return
+			}
+			if err := billing.Default.Commit(reservationID); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
+				return
+			}
+			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			return
+		}
+
+		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
@@ -476,19 +539,16 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 			_ = os.Remove(outPath)
 			_ = billing.Default.Release(reservationID)
 
-			tasks.Registry.Set(
-				id,
-				"FAILED",
-				0,
-				"",
-				"Billing finalization failed.",
-			)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
+		if !accepted {
+			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
+		}
 
-	}(taskId, inputPath, opts, reservation.ID, release)
+	}(taskId, inputPath, opts, reservation.ID, ownerIdentity, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"taskId": taskId,

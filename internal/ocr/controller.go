@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/idempotency"
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 
@@ -118,6 +120,11 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	lang := c.FormValue("lang", "eng")
 
+	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if ownerIdentity == "" {
+		ownerIdentity = c.IP()
+	}
+
 	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		idempotency.Release(c, nil)
@@ -133,7 +140,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	tasks.Registry.Set(taskId, "PENDING", 0, "Initializing Document Ingestion Matrix...", "")
+	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing Document Ingestion Matrix...", ownerIdentity)
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	inputPath := filepath.Join(os.TempDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
@@ -161,33 +168,66 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id, srcPath, reservationID, lang string, releaseToken func()) {
+	go func(id, srcPath, reservationID, lang, owner string, releaseToken func()) {
+		var localOutPath string
 		defer func() {
 			releaseToken()
 			_ = os.Remove(srcPath)
+			if localOutPath != "" {
+				_ = os.Remove(localOutPath)
+			}
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
-				tasks.Registry.Set(id, "FAILED", 0, "", "Subprocess thread failure occurred.")
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Subprocess thread failure occurred.", owner)
 			}
 		}()
 
-		tasks.Registry.Set(id, "PROCESSING", 35, "Running OCR and creating searchable PDF...", "")
+		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Running OCR and creating searchable text...", owner)
 
 		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			return
+		}
+		localOutPath = outPath
+
+		r2Key := fmt.Sprintf("outputs/tasks/%s/%s", id, filepath.Base(outPath))
+		r2Store, r2Err := storage.Default()
+		isProd := os.Getenv("APP_ENV") == "production"
+
+		if r2Err != nil || r2Store == nil {
+			if isProd {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
+				return
+			}
+			if err := billing.Default.Commit(reservationID); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
+				return
+			}
+			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			return
+		}
+
+		if err := r2Store.UploadFile(outPath, r2Key, "text/plain; charset=utf-8"); err != nil {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
 		if err := billing.Default.Commit(reservationID); err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, inputPath, reservation.ID, lang, release)
+		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
+		if !accepted {
+			log.Printf("[OCR TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
+		}
+	}(taskId, inputPath, reservation.ID, lang, ownerIdentity, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
@@ -195,6 +235,11 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	lang := c.FormValue("lang", "eng")
+
+	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if ownerIdentity == "" {
+		ownerIdentity = c.IP()
+	}
 
 	files, err := uploads.MustFiles(c, "images")
 	if err != nil {
@@ -214,7 +259,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	tasks.Registry.Set(taskId, "PENDING", 0, "Allocating compilation environment nodes...", "")
+	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating compilation environment nodes...", ownerIdentity)
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	tempPaths := make([]string, 0, len(files))
@@ -249,35 +294,68 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	go func(id string, imgPaths []string, reservationID, lang string, releaseToken func()) {
+	go func(id string, imgPaths []string, reservationID, lang, owner string, releaseToken func()) {
+		var localOutPath string
 		defer func() {
 			releaseToken()
 			for _, p := range imgPaths {
 				_ = os.Remove(p)
 			}
+			if localOutPath != "" {
+				_ = os.Remove(localOutPath)
+			}
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
-				tasks.Registry.Set(id, "FAILED", 0, "", "Subprocess matrix generation fault.")
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Subprocess matrix generation fault.", owner)
 			}
 		}()
 
-		tasks.Registry.Set(id, "PROCESSING", 35, "Scanning character grid topologies and building PDF layout layers...", "")
+		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Scanning character grid topologies and building PDF layout layers...", owner)
 
 		outPath, err := ctrl.service.ImageToTextPDF(imgPaths, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			return
+		}
+		localOutPath = outPath
+
+		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
+		r2Store, r2Err := storage.Default()
+		isProd := os.Getenv("APP_ENV") == "production"
+
+		if r2Err != nil || r2Store == nil {
+			if isProd {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
+				return
+			}
+			if err := billing.Default.Commit(reservationID); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
+				return
+			}
+			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			return
+		}
+
+		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
 		if err := billing.Default.Commit(reservationID); err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
-	}(taskId, tempPaths, reservation.ID, lang, release)
+		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
+		if !accepted {
+			log.Printf("[OCR TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
+		}
+	}(taskId, tempPaths, reservation.ID, lang, ownerIdentity, release)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
