@@ -1,7 +1,6 @@
 package structure
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,12 +8,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/worker"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
-
-var workerURL = os.Getenv("PDFNEST_WORKER_URL")
 
 type PageAnalysis struct {
 	Page              int     `json:"page"`
@@ -33,50 +31,31 @@ type PDFAnalysis struct {
 }
 
 func (s *structureService) AnalyzePDF(inputPath, filePassword string) (*PDFAnalysis, error) {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	fileWriter, err := writer.CreateFormFile("file", filepath.Base(inputPath))
+	body, contentType, err := worker.CreateMultipartRequest(
+		inputPath,
+		func(w *multipart.Writer) error {
+			if filePassword != "" {
+				return w.WriteField("file_password", filePassword)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		return nil, err
-	}
-
-	file, err := os.Open(inputPath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	if _, err := io.Copy(fileWriter, file); err != nil {
-		return nil, err
-	}
-
-	if filePassword != "" {
-		if err := writer.WriteField("file_password", filePassword); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-
-	if workerURL == "" {
-		workerURL = "http://0.0.0.0:8000"
 	}
 
 	req, err := http.NewRequest(
 		http.MethodPost,
-		workerURL+"/api/v1/analyzer/analyze",
+		worker.GetWorkerURL()+"/api/v1/analyzer/analyze",
 		body,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("worker request failed: %w", err)
 	}

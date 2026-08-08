@@ -24,7 +24,7 @@ func NewController(s Service) *Controller {
 }
 
 func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,

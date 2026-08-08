@@ -1,68 +1,71 @@
 package worker
 
 import (
-	"bytes"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
-
-var workerURL = os.Getenv("PDFNEST_WORKER_URL")
 
 var Client = &http.Client{
 	Timeout: 30 * time.Minute,
 }
 
 func GetWorkerURL() string {
-	if workerURL == "" {
-		workerURL = "http://0.0.0.0:8000"
+	workerURL := os.Getenv("PDFNEST_WORKER_URL")
+	if strings.TrimSpace(workerURL) == "" {
+		return "http://localhost:8000"
 	}
-	return workerURL
+	return strings.TrimRight(workerURL, "/")
 }
 
 func CreateMultipartRequest(
 	inputPath string,
 	build func(*multipart.Writer) error,
-) (*bytes.Buffer, string, error) {
-
+) (io.Reader, string, error) {
 	file, err := os.Open(inputPath)
 	if err != nil {
 		return nil, "", err
 	}
-	defer func(file *os.File) {
-		err := file.Close()
+
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := writer.FormDataContentType()
+
+	go func() {
+		defer file.Close()
+
+		part, err := writer.CreateFormFile(
+			"file",
+			filepath.Base(inputPath),
+		)
 		if err != nil {
+			_ = pw.CloseWithError(err)
 			return
 		}
-	}(file)
 
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
-	part, err := writer.CreateFormFile(
-		"file",
-		filepath.Base(inputPath),
-	)
-	if err != nil {
-		return nil, "", err
-	}
-
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, "", err
-	}
-
-	if build != nil {
-		if err := build(writer); err != nil {
-			return nil, "", err
+		if _, err := io.Copy(part, file); err != nil {
+			_ = pw.CloseWithError(err)
+			return
 		}
-	}
 
-	if err := writer.Close(); err != nil {
-		return nil, "", err
-	}
+		if build != nil {
+			if err := build(writer); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+		}
 
-	return body, writer.FormDataContentType(), nil
+		if err := writer.Close(); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+
+		_ = pw.Close()
+	}()
+
+	return pr, contentType, nil
 }

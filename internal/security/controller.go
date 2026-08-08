@@ -33,7 +33,7 @@ func (ctrl *Controller) Lock(c *fiber.Ctx) error {
 		})
 	}
 
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -69,7 +69,7 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 		})
 	}
 
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -97,7 +97,7 @@ func (ctrl *Controller) Unlock(c *fiber.Ctx) error {
 }
 
 func (h *Controller) HandleRedaction(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing target file stream"})
 	}

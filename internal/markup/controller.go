@@ -37,7 +37,7 @@ func (cr *Controller) HandleStrikeout(c *fiber.Ctx) error {
 }
 
 func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,

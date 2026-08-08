@@ -83,7 +83,7 @@ func (ctrl *Controller) ConvertImagesToPDF(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -112,7 +112,7 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 }
 
 func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{
 			"code":    "MISSING_FILE",
@@ -461,7 +461,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 func ConvertPdfToOfficeHandler(targetFormat string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		upload, err := uploads.MustFile(c, "file")
+		upload, err := uploads.MustPDFFile(c, "file")
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "PDF file is required"})
 		}

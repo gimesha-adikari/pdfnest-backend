@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/uploads"
 	"strconv"
 	"strings"
 
@@ -65,6 +66,12 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 				Message: "Failed to initialize staging area for file compilation.",
 			})
 		}
+		if err := uploads.ValidatePDFHeader(inputPath); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(APIError{
+				Code:    "INVALID_PDF_FILE",
+				Message: "Invalid PDF document header in uploaded file.",
+			})
+		}
 		inputPaths = append(inputPaths, inputPath)
 	}
 
@@ -113,6 +120,12 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "DISK_WRITE_FAILURE",
 			Message: "Failed to allocate scratch file parameters.",
+		})
+	}
+	if err := uploads.ValidatePDFHeader(inputPath); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "INVALID_PDF_FILE",
+			Message: "Invalid PDF document header in uploaded file.",
 		})
 	}
 	defer func() {

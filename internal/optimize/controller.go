@@ -24,7 +24,7 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Compress(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -55,7 +55,7 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",

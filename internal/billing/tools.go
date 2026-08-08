@@ -569,6 +569,10 @@ func CountUploadedPDFPagesFromFields(c *fiber.Ctx, fields ...string) int {
 				continue
 			}
 
+			if err := uploads.ValidatePDFHeader(f.Path); err != nil {
+				continue
+			}
+
 			pages, err := api.PageCountFile(f.Path)
 			if err != nil || pages <= 0 {
 				continue

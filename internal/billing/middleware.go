@@ -12,12 +12,6 @@ import (
 
 func Use(tool Tool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		path := c.Path()
-		if strings.HasSuffix(path, "/markup/highlight") ||
-			strings.HasSuffix(path, "/markup/strikeout") ||
-			strings.HasSuffix(path, "/markup/underline") {
-			return c.Next()
-		}
 
 		identityType, _ := c.Locals(identity.LocalIdentityType).(string)
 		identityID, _ := c.Locals(identity.LocalIdentityIDKey).(string)

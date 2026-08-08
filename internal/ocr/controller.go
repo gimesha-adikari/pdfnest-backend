@@ -27,7 +27,7 @@ type APIError struct {
 }
 
 func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -100,7 +100,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	lang := c.FormValue("lang", "eng")
 
-	upload, err := uploads.MustFile(c, "file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(400).JSON(APIError{Code: "MISSING_FILE", Message: "No file uploaded"})
 	}
