@@ -3,6 +3,8 @@ package tasks
 import (
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -12,51 +14,41 @@ func StartCleanupWorker(checkInterval time.Duration, fileTTL time.Duration) {
 	go func() {
 		log.Printf("[CLEANUP ENGINE] Automated background disk sweeping daemon initialized (TTL: %v)", fileTTL)
 		for range ticker.C {
-			sweepExpiredTasks(fileTTL)
+			sweepExpiredTempFiles(fileTTL)
 		}
 	}()
 }
 
-func sweepExpiredTasks(ttl time.Duration) {
-	Registry.mu.Lock()
-	defer Registry.mu.Unlock()
+func sweepExpiredTempFiles(ttl time.Duration) {
+	tempDir := os.TempDir()
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		return
+	}
 
 	now := time.Now()
 	evictionCount := 0
 
-	log.Printf("[CLEANUP ENGINE] Scanning workspace environment tasks maps for stale artifacts...")
-
-	for id, task := range Registry.tasks {
-		if task.Status == "COMPLETED" || task.Status == "FAILED" {
-
-			if task.ResultURL != "" {
-				fileInfo, err := os.Stat(task.ResultURL)
-				if err != nil {
-					if os.IsNotExist(err) {
-						delete(Registry.tasks, id)
-						evictionCount++
-					}
-					continue
-				}
-
-				if now.Sub(fileInfo.ModTime()) > ttl {
-					log.Printf("[CLEANUP ENGINE] Removing expired background task asset on node: %s", task.ResultURL)
-
-					if err := os.Remove(task.ResultURL); err != nil && !os.IsNotExist(err) {
-						log.Printf("[CLEANUP ENGINE ERROR] Failed to wipe expired file at %s: %v", task.ResultURL, err)
-					}
-
-					delete(Registry.tasks, id)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, "pdfnest-") || strings.HasPrefix(name, "compressed-") || strings.HasPrefix(name, "extracted-") || strings.HasPrefix(name, "web-compiled-") || strings.HasPrefix(name, "office-compiled-") {
+			fullPath := filepath.Join(tempDir, name)
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if now.Sub(info.ModTime()) > ttl {
+				if err := os.Remove(fullPath); err == nil {
 					evictionCount++
 				}
-			} else {
-				delete(Registry.tasks, id)
-				evictionCount++
 			}
 		}
 	}
 
 	if evictionCount > 0 {
-		log.Printf("[CLEANUP ENGINE] Successfully collected and reclaimed workspace capacity. Evicted keys count: %d", evictionCount)
+		log.Printf("[CLEANUP ENGINE] Successfully collected and reclaimed workspace capacity. Evicted temp files count: %d", evictionCount)
 	}
 }

@@ -9,7 +9,13 @@ import (
 
 func HandleTaskDownload(c *fiber.Ctx) error {
 	id := c.Params("id")
-	task := Registry.Get(id)
+	task, err := Registry.Get(id)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"code":    "TASK_STORAGE_UNAVAILABLE",
+			"message": "Task persistence service is temporarily unavailable.",
+		})
+	}
 
 	if task == nil || task.Status != "COMPLETED" {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
