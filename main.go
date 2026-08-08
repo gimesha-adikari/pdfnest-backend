@@ -75,6 +75,7 @@ func main() {
 	app.Use(recover.New())
 
 	tasks.StartCleanupWorker(5*time.Minute, 30*time.Minute)
+	billing.StartJanitorSweeper(15 * time.Minute)
 
 	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
 	if allowedOrigins == "" {

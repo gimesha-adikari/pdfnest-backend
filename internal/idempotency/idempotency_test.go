@@ -3,8 +3,10 @@ package idempotency
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"mime/multipart"
 	"net/http/httptest"
+	"pdfnest-backend/internal/identity"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +16,7 @@ import (
 )
 
 func setupTestRedis(t *testing.T) *redis.Client {
-	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 15})
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 14})
 	if err := client.Ping(context.Background()).Err(); err != nil {
 		t.Skip("Local Redis server not running on 127.0.0.1:6379, skipping test")
 	}
@@ -141,6 +143,10 @@ func TestIdempotency_Concurrent10Race(t *testing.T) {
 	defer client.FlushDB(context.Background())
 
 	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(identity.LocalIdentityIDKey, "test-user-race")
+		return c.Next()
+	})
 
 	var handlerExecutions int64
 
@@ -212,5 +218,124 @@ func TestIdempotency_MultipartStreamSafety(t *testing.T) {
 	}
 	if resp.StatusCode != fiber.StatusOK {
 		t.Errorf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+}
+
+func TestIdempotency_AtomicRelease_Processing(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(identity.LocalIdentityIDKey, "test-user-release")
+		return c.Next()
+	})
+
+	app.Post("/test-release", Use(client), func(c *fiber.Ctx) error {
+		// Simulate failure before admission: call Release
+		Release(c, client)
+		return c.Status(fiber.StatusBadRequest).SendString("releasing")
+	})
+
+	req := httptest.NewRequest("POST", "/test-release", bytes.NewBufferString("test body"))
+	req.Header.Set("Idempotency-Key", "release-test-key")
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := app.Test(req)
+	if err != nil || resp.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("Request failed: %v, status: %d", err, resp.StatusCode)
+	}
+
+	// Verify key was DELETED from Redis
+	val, err := client.Get(context.Background(), "pdfnest:idempotency:test-user-release:release-test-key").Result()
+	if err == nil && val != "" {
+		t.Errorf("Expected key to be deleted by Release, but found: %s", val)
+	}
+}
+
+func TestIdempotency_AtomicRelease_CreatedNoOp(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(identity.LocalIdentityIDKey, "test-user-created")
+		return c.Next()
+	})
+
+	app.Post("/test-created-release", Use(client), func(c *fiber.Ctx) error {
+		_ = SetTaskID(c, "task-999", client)
+		// Call Release after CREATED set -> must be NO-OP!
+		Release(c, client)
+		return c.Status(fiber.StatusAccepted).SendString("created")
+	})
+
+	req := httptest.NewRequest("POST", "/test-created-release", bytes.NewBufferString("test body"))
+	req.Header.Set("Idempotency-Key", "created-key-999")
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := app.Test(req)
+	if err != nil || resp.StatusCode != fiber.StatusAccepted {
+		t.Fatalf("Request failed: %v, status: %d", err, resp.StatusCode)
+	}
+
+	// Verify key still EXISTS in Redis with state CREATED!
+	val, err := client.Get(context.Background(), "pdfnest:idempotency:test-user-created:created-key-999").Result()
+	if err != nil || val == "" {
+		t.Fatalf("Expected key to remain intact after SetTaskID, got err: %v", err)
+	}
+
+	if !bytes.Contains([]byte(val), []byte("CREATED")) {
+		t.Errorf("Expected state CREATED in stored record, got: %s", val)
+	}
+}
+
+func TestIdempotency_ConcurrentSetTaskIDVsRelease(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	redisKey := "pdfnest:idempotency:0.0.0.0:race-key-777"
+	initialRecord := Record{
+		State:         "PROCESSING",
+		Fingerprint:   "fp123",
+		CreatedAt:     1000,
+		OwnerIdentity: "0.0.0.0",
+	}
+	data, _ := json.Marshal(initialRecord)
+	_ = client.Set(context.Background(), redisKey, string(data), ProcessingTTL).Err()
+
+	app := fiber.New()
+	app.Post("/test-race", func(c *fiber.Ctx) error {
+		c.Locals("idempotency_redis_key", redisKey)
+		c.Locals("idempotency_fingerprint", "fp123")
+		c.Locals("idempotency_owner", "0.0.0.0")
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			_ = SetTaskID(c, "task-race-111", client)
+		}()
+
+		go func() {
+			defer wg.Done()
+			Release(c, client)
+		}()
+
+		wg.Wait()
+		return c.SendStatus(200)
+	})
+
+	req := httptest.NewRequest("POST", "/test-race", nil)
+	_, _ = app.Test(req)
+
+	val, err := client.Get(context.Background(), redisKey).Result()
+	// Final state MUST be either deleted (Release won first) OR CREATED (SetTaskID won)
+	// It MUST NEVER be a deleted key IF state was already CREATED when Release executed!
+	if err == nil && val != "" {
+		if !bytes.Contains([]byte(val), []byte("CREATED")) {
+			t.Errorf("Expected remaining record to be CREATED, got: %s", val)
+		}
 	}
 }

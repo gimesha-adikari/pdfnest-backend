@@ -6,12 +6,10 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
+	"pdfnest-backend/internal/uploads"
 	"pdfnest-backend/internal/worker"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 )
 
 type PageAnalysis struct {
@@ -85,7 +83,7 @@ func (s *structureService) AnalyzePDF(inputPath, filePassword string) (*PDFAnaly
 func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 	filePassword := c.FormValue("file_password")
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "MISSING_UPLOAD_FILE",
@@ -93,22 +91,7 @@ func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-
-	inputPath := filepath.Join(
-		tempDir,
-		uuid.New().String()+"-"+filepath.Base(fileHeader.Filename),
-	)
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "DISK_WRITE_FAILURE",
-			"message": "Failed to store input PDF in temporary storage.",
-		})
-	}
-	defer os.Remove(inputPath)
-
-	analysis, err := ctrl.service.AnalyzePDF(inputPath, filePassword)
+	analysis, err := ctrl.service.AnalyzePDF(upload.Path, filePassword)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"code":    "ANALYZE_ENGINE_FAILED",

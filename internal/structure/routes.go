@@ -2,15 +2,16 @@ package structure
 
 import (
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	router.Post("/structure/analyze", ctrl.Analyze)
+	structureGroup := router.Group("/structure", uploads.Prepare(), limiter.Default.Middleware())
 
-	structureGroup := router.Group("/structure", uploads.Prepare())
+	structureGroup.Post("/analyze", ctrl.Analyze)
 
 	structureGroup.Post("/merge", billing.Use(billing.MergePDF), ctrl.Merge)
 	structureGroup.Post("/split", billing.Use(billing.SplitPDF), ctrl.Split)

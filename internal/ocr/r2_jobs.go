@@ -51,16 +51,17 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	tasks.Registry.Set(taskId, "PENDING", 0, "Preparing R2 OCR job...", "")
 
 	// Billing uses the image count directly.
-	reservation, err := billing.Default.Reserve(userID, billing.ImageToTextPDF, 0, len(req.Files), c.Path())
+	reservation, err := billing.Default.ReserveWithTaskID(userID, billing.ImageToTextPDF, 0, len(req.Files), c.Path(), taskId)
 	if err != nil {
 		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
 			Code:    "BILLING_BLOCKED",
 			Message: err.Error(),
 		})
 	}
+
+	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID)
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
 		defer func() {
@@ -101,7 +102,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 			return
 		}
 
-		tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
+		_ = tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 	}(taskId, req.Files, reservation.ID, lang)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{

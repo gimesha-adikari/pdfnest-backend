@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/limiter"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ type TaskStatus struct {
 	ResultKey     string `json:"resultKey,omitempty"`
 	ResultURL     string `json:"resultUrl,omitempty"`
 	OwnerIdentity string `json:"ownerIdentity,omitempty"`
+	ReservationID string `json:"reservationId,omitempty"`
 	Error         string `json:"error,omitempty"`
 	UpdatedAt     int64  `json:"updatedAt,omitempty"`
 }
@@ -99,13 +101,15 @@ local now = tonumber(ARGV[2])
 local ttlSeconds = tonumber(ARGV[3]) or 3600
 
 local val = redis.call('GET', key)
-if not val or val == '' then return nil end
+if not val or val == '' then
+    return cjson.encode({ result = "NOT_FOUND" })
+end
 
 local data = cjson.decode(val)
 local curStatus = data.status
 
 if curStatus == 'COMPLETED' or curStatus == 'FAILED' then
-    return val
+    return cjson.encode({ result = "TERMINAL_ALREADY", payload = val })
 end
 
 local updatedAt = tonumber(data.updatedAt) or 0
@@ -115,16 +119,28 @@ if (now - updatedAt) > maxStaleSeconds then
     data.updatedAt = now
     local newValStr = cjson.encode(data)
     redis.call('SET', key, newValStr, 'EX', ttlSeconds)
-    return newValStr
+    return cjson.encode({
+        result = "STALE_TRANSITION_PERFORMED",
+        reservationId = data.reservationId or "",
+        payload = newValStr
+    })
 end
 
-return val
+return cjson.encode({ result = "HEALTHY", payload = val })
 `
 
-func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
+type staleLuaResult struct {
+	Result        string `json:"result"`
+	ReservationID string `json:"reservationId"`
+	Payload       string `json:"payload"`
+}
+
+var StaleTaskBillingHandler func(reservationID string)
+
+func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, error) {
 	client := r.getClient()
 	if client == nil {
-		return nil, errors.New("redis client not configured")
+		return nil, false, "", errors.New("redis client not configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -137,29 +153,71 @@ func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
 	res, err := client.Eval(ctx, atomicGetCheckStaleLua, []string{key}, stuckTimeout, now, int(TaskTTL.Seconds())).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return nil, nil
+			return nil, false, "", nil
 		}
-		return nil, fmt.Errorf("failed to read task state from redis: %w", err)
+		return nil, false, "", fmt.Errorf("failed to read task state from redis: %w", err)
 	}
 
 	valStr, ok := res.(string)
 	if !ok || valStr == "" {
-		return nil, nil
+		return nil, false, "", nil
+	}
+
+	var luaRes staleLuaResult
+	if err := json.Unmarshal([]byte(valStr), &luaRes); err != nil {
+		// Fallback for legacy raw TaskStatus JSON payload
+		var status TaskStatus
+		if errLegacy := json.Unmarshal([]byte(valStr), &status); errLegacy == nil {
+			return &status, false, "", nil
+		}
+		return nil, false, "", fmt.Errorf("failed to unmarshal task status JSON: %w", err)
+	}
+
+	if luaRes.Result == "NOT_FOUND" || luaRes.Payload == "" {
+		return nil, false, "", nil
 	}
 
 	var status TaskStatus
-	if err := json.Unmarshal([]byte(valStr), &status); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal task status JSON: %w", err)
+	if err := json.Unmarshal([]byte(luaRes.Payload), &status); err != nil {
+		return nil, false, "", fmt.Errorf("failed to unmarshal task status payload JSON: %w", err)
 	}
 
-	return &status, nil
+	stalePerformed := (luaRes.Result == "STALE_TRANSITION_PERFORMED")
+	if stalePerformed {
+		if luaRes.ReservationID != "" && StaleTaskBillingHandler != nil {
+			StaleTaskBillingHandler(luaRes.ReservationID)
+		}
+		_ = limiter.Default.Release(ctx, status.ID, status.OwnerIdentity)
+	}
+
+	return &status, stalePerformed, luaRes.ReservationID, nil
 }
 
-func (r *TaskRegistry) SetWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string) (bool, error) {
+func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
+	task, _, _, err := r.GetWithTransition(id)
+	return task, err
+}
+
+func (r *TaskRegistry) SetWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID ...string) (bool, error) {
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
 		return false, errors.New("redis client not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+
+	var resID string
+	if len(reservationID) > 0 && reservationID[0] != "" {
+		resID = reservationID[0]
+	} else if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
+		var existingTask TaskStatus
+		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil && existingTask.ReservationID != "" {
+			resID = existingTask.ReservationID
+		}
 	}
 
 	task := &TaskStatus{
@@ -170,6 +228,7 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 		Error:         errStr,
 		UpdatedAt:     time.Now().Unix(),
 		OwnerIdentity: ownerIdentity,
+		ReservationID: resID,
 	}
 
 	if resultKey != "" {
@@ -182,10 +241,6 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 		return false, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	key := TaskKeyPrefix + strings.TrimSpace(id)
 	res, err := client.Eval(ctx, atomicSetTaskLua, []string{key}, string(data), int(TaskTTL.Seconds())).Result()
 	if err != nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis Set (atomic) failed for task %s: %v", id, err)
@@ -211,16 +266,18 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 		return errors.New("redis client not configured")
 	}
 
-	// Read existing task to preserve OwnerIdentity if available
+	// Read existing task to preserve OwnerIdentity and ReservationID if available
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 	var ownerIdentity string
+	var reservationID string
 	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
 		var existingTask TaskStatus
 		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
 			ownerIdentity = existingTask.OwnerIdentity
+			reservationID = existingTask.ReservationID
 			if resultKey == "" && existingTask.ResultKey != "" {
 				resultKey = existingTask.ResultKey
 			}
@@ -236,6 +293,7 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 		Error:         errStr,
 		UpdatedAt:     time.Now().Unix(),
 		OwnerIdentity: ownerIdentity,
+		ReservationID: reservationID,
 	}
 
 	if resultKey != "" && task.ResultURL == "" {

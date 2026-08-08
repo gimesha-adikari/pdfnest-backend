@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,5 +305,114 @@ func TestTaskRegistry_RedisOutageNoFallback(t *testing.T) {
 
 	if resp.StatusCode != fiber.StatusServiceUnavailable {
 		t.Errorf("Expected status 503 Service Unavailable, got %d", resp.StatusCode)
+	}
+}
+
+func TestTaskRegistry_GetWithTransition_Stale(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	reg := &TaskRegistry{client: client}
+	taskID := "stale-task-res-1"
+	resID := "res-uuid-999"
+
+	staleTime := time.Now().Unix() - 1000
+	task := &TaskStatus{
+		ID:            taskID,
+		Status:        "PROCESSING",
+		Progress:      30,
+		ReservationID: resID,
+		UpdatedAt:     staleTime,
+	}
+	data, _ := json.Marshal(task)
+	_ = client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
+
+	taskRead, stalePerformed, reservationID, err := reg.GetWithTransition(taskID)
+	if err != nil || taskRead == nil {
+		t.Fatalf("GetWithTransition failed: %v", err)
+	}
+
+	if !stalePerformed {
+		t.Errorf("Expected stalePerformed == true, got false")
+	}
+	if reservationID != resID {
+		t.Errorf("Expected reservationID '%s', got '%s'", resID, reservationID)
+	}
+	if taskRead.Status != "FAILED" {
+		t.Errorf("Expected status FAILED after stale transition, got: %s", taskRead.Status)
+	}
+}
+
+func TestTaskRegistry_GetWithTransition_PendingStale(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	reg := &TaskRegistry{client: client}
+	taskID := "pending-stale-task-1"
+	resID := "res-uuid-888"
+
+	staleTime := time.Now().Unix() - 1000
+	task := &TaskStatus{
+		ID:            taskID,
+		Status:        "PENDING",
+		Progress:      0,
+		ReservationID: resID,
+		UpdatedAt:     staleTime,
+	}
+	data, _ := json.Marshal(task)
+	_ = client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
+
+	taskRead, stalePerformed, reservationID, err := reg.GetWithTransition(taskID)
+	if err != nil || taskRead == nil {
+		t.Fatalf("GetWithTransition failed: %v", err)
+	}
+
+	if !stalePerformed {
+		t.Errorf("Expected PENDING stale task to trigger stalePerformed == true")
+	}
+	if reservationID != resID {
+		t.Errorf("Expected reservationID '%s', got '%s'", resID, reservationID)
+	}
+	if taskRead.Status != "FAILED" {
+		t.Errorf("Expected status FAILED for stale PENDING task, got: %s", taskRead.Status)
+	}
+}
+
+func TestTaskRegistry_GetWithTransition_MultiReplica(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	reg := &TaskRegistry{client: client}
+	taskID := "multi-replica-stale-task"
+	resID := "res-multi-123"
+
+	staleTime := time.Now().Unix() - 1000
+	task := &TaskStatus{
+		ID:            taskID,
+		Status:        "PROCESSING",
+		Progress:      20,
+		ReservationID: resID,
+		UpdatedAt:     staleTime,
+	}
+	data, _ := json.Marshal(task)
+	_ = client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
+
+	var wg sync.WaitGroup
+	var winnerCount int64
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, stalePerformed, returnedResID, err := reg.GetWithTransition(taskID)
+			if err == nil && stalePerformed && returnedResID == resID {
+				atomic.AddInt64(&winnerCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if atomic.LoadInt64(&winnerCount) != 1 {
+		t.Errorf("Expected EXACTLY ONE replica to receive staleTransitionPerformed == true, got %d", winnerCount)
 	}
 }

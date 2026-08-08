@@ -65,6 +65,7 @@ type BillingReservation struct {
 	PlanUnits   int       `gorm:"default:0;not null"`
 	CreditUnits int       `gorm:"default:0;not null"`
 	Status      string    `gorm:"type:varchar(20);default:'reserved';not null"`
+	TaskID      string    `gorm:"type:varchar(100);index"`
 	RequestPath string    `gorm:"type:text"`
 	ExpiresAt   time.Time `gorm:"index;not null"`
 	CreatedAt   time.Time `gorm:"index"`

@@ -37,6 +37,10 @@ type reservationTotals struct {
 }
 
 func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPath string) (*config.BillingReservation, error) {
+	return s.ReserveWithTaskID(userID, tool, pages, images, requestPath, "")
+}
+
+func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int, requestPath string, taskID string) (*config.BillingReservation, error) {
 	now := time.Now()
 	units := tool.Units(pages, images)
 
@@ -115,9 +119,15 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 			return CreditsExhaustedError(units)
 		}
 
+		expiresAt := now.Add(6 * time.Hour)
+		if taskID != "" {
+			expiresAt = now.Add(30 * time.Minute)
+		}
+
 		reservation = &config.BillingReservation{
 			ID:          uuid.New().String(),
 			UserID:      userID,
+			TaskID:      taskID,
 			ToolName:    tool.Name,
 			PagesCount:  pages,
 			ImagesCount: images,
@@ -126,7 +136,7 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 			CreditUnits: creditUnits,
 			Status:      "reserved",
 			RequestPath: requestPath,
-			ExpiresAt:   now.Add(6 * time.Hour),
+			ExpiresAt:   expiresAt,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
@@ -156,10 +166,18 @@ func (s *Service) Commit(reservationID string) error {
 			return nil
 		}
 
-		if !now.Before(res.ExpiresAt) {
-			res.Status = "expired"
-			res.UpdatedAt = now
-			return tx.Save(&res).Error
+		// Conditional SQL update: only update if status is still 'reserved'
+		result := tx.Model(&config.BillingReservation{}).
+			Where("id = ? AND status = ?", reservationID, "reserved").
+			Updates(map[string]interface{}{
+				"status":     "committed",
+				"updated_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
 		}
 
 		var sub config.Subscription
@@ -198,13 +216,7 @@ func (s *Service) Commit(reservationID string) error {
 			PagesCount: workCount,
 			CreatedAt:  now,
 		}
-		if err := tx.Create(&usage).Error; err != nil {
-			return err
-		}
-
-		res.Status = "committed"
-		res.UpdatedAt = now
-		return tx.Save(&res).Error
+		return tx.Create(&usage).Error
 	})
 }
 
@@ -215,27 +227,13 @@ func (s *Service) Release(reservationID string) error {
 
 	now := time.Now()
 
-	return config.DB.Transaction(func(tx *gorm.DB) error {
-		var res config.BillingReservation
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", reservationID).
-			First(&res).Error; err != nil {
-			return err
-		}
-
-		switch res.Status {
-		case "committed", "released", "expired":
-			return nil
-		}
-
-		if !now.Before(res.ExpiresAt) {
-			res.Status = "expired"
-		} else {
-			res.Status = "released"
-		}
-		res.UpdatedAt = now
-		return tx.Save(&res).Error
-	})
+	// Conditional SQL update: transition status to 'released' only if currently 'reserved'
+	return config.DB.Model(&config.BillingReservation{}).
+		Where("id = ? AND status = ?", reservationID, "reserved").
+		Updates(map[string]interface{}{
+			"status":     "released",
+			"updated_at": now,
+		}).Error
 }
 
 func activeReservationTotals(tx *gorm.DB, userID string, now time.Time) (reservationTotals, error) {

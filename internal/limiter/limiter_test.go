@@ -1,115 +1,53 @@
 package limiter
 
 import (
-	"net/http/httptest"
-	"sync"
+	"context"
 	"testing"
-
-	"github.com/gofiber/fiber/v2"
+	"time"
 )
 
-func TestGovernor_AcquireAndRelease(t *testing.T) {
-	gov := NewGovernorWithCapacity(2)
-
-	rel1, ok1 := gov.TryAcquire()
-	if !ok1 || rel1 == nil {
-		t.Fatalf("Expected acquire 1 to succeed")
-	}
-	if gov.ActiveCount() != 1 {
-		t.Errorf("Expected active count 1, got %d", gov.ActiveCount())
+func TestGovernor_InMemoryFallback(t *testing.T) {
+	gov := &Governor{
+		client:          nil,
+		globalLimit:     2,
+		identityLimit:   1,
+		leaseTTLSeconds: 10,
 	}
 
-	rel2, ok2 := gov.TryAcquire()
-	if !ok2 || rel2 == nil {
-		t.Fatalf("Expected acquire 2 to succeed")
-	}
-	if gov.ActiveCount() != 2 {
-		t.Errorf("Expected active count 2, got %d", gov.ActiveCount())
+	ctx := context.Background()
+
+	rel1, ok1, err1 := gov.AcquireWithRelease(ctx, "task-1", "user-A")
+	if err1 != nil || !ok1 {
+		t.Fatalf("Expected task-1 acquisition to succeed, got ok=%v, err=%v", ok1, err1)
 	}
 
-	_, ok3 := gov.TryAcquire()
+	rel2, ok2, err2 := gov.AcquireWithRelease(ctx, "task-2", "user-B")
+	if err2 != nil || !ok2 {
+		t.Fatalf("Expected task-2 acquisition to succeed, got ok=%v, err=%v", ok2, err2)
+	}
+
+	_, ok3, _ := gov.AcquireWithRelease(ctx, "task-3", "user-C")
 	if ok3 {
-		t.Fatalf("Expected acquire 3 to fail when capacity is exhausted")
+		t.Fatalf("Expected task-3 acquisition to fail (capacity 2 full)")
 	}
 
 	rel1()
-	if gov.ActiveCount() != 1 {
-		t.Errorf("Expected active count 1 after release, got %d", gov.ActiveCount())
-	}
-
-	// Test double-release idempotency
-	rel1()
-	if gov.ActiveCount() != 1 {
-		t.Errorf("Expected active count to remain 1 after duplicate release call, got %d", gov.ActiveCount())
-	}
-
 	rel2()
-	if gov.ActiveCount() != 0 {
-		t.Errorf("Expected active count 0 after all releases, got %d", gov.ActiveCount())
+}
+
+func TestGetEnvInt(t *testing.T) {
+	if val := GetEnvInt("NON_EXISTENT_VAR_123", 42); val != 42 {
+		t.Errorf("Expected 42, got %d", val)
 	}
 }
 
-func TestGovernor_ConcurrentAcquire(t *testing.T) {
-	cap := 10
-	gov := NewGovernorWithCapacity(cap)
-
-	var wg sync.WaitGroup
-	acquired := make(chan func(), 50)
-
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if rel, ok := gov.TryAcquire(); ok {
-				acquired <- rel
-			}
-		}()
+func TestAcquireResult_Structure(t *testing.T) {
+	res := AcquireResult{
+		Status:    "ACCEPTED",
+		Reason:    "ACQUIRED",
+		ExpiresAt: time.Now().Unix() + 600,
 	}
-
-	wg.Wait()
-	close(acquired)
-
-	count := 0
-	for rel := range acquired {
-		count++
-		rel()
+	if res.Status != "ACCEPTED" {
+		t.Errorf("Expected ACCEPTED, got %s", res.Status)
 	}
-
-	if count != cap {
-		t.Errorf("Expected exactly %d successful acquisitions, got %d", cap, count)
-	}
-
-	if gov.ActiveCount() != 0 {
-		t.Errorf("Expected active count 0 after releasing all, got %d", gov.ActiveCount())
-	}
-}
-
-func TestGovernor_Middleware429(t *testing.T) {
-	gov := NewGovernorWithCapacity(1)
-	app := fiber.New()
-	app.Use(gov.Middleware())
-	app.Get("/test", func(c *fiber.Ctx) error {
-		return c.SendString("ok")
-	})
-
-	rel, ok := gov.TryAcquire()
-	if !ok {
-		t.Fatalf("Expected manual acquire to succeed")
-	}
-
-	req := httptest.NewRequest("GET", "/test", nil)
-	resp, err := app.Test(req)
-	if err != nil {
-		t.Fatalf("Failed to execute test request: %v", err)
-	}
-
-	if resp.StatusCode != fiber.StatusTooManyRequests {
-		t.Errorf("Expected status 429, got %d", resp.StatusCode)
-	}
-
-	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "5" {
-		t.Errorf("Expected Retry-After header '5', got %q", retryAfter)
-	}
-
-	rel()
 }

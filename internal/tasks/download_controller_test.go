@@ -52,7 +52,10 @@ func TestDownloadController_AuthenticatedUserSuccess(t *testing.T) {
 		t.Fatalf("Failed to store task: %v", err)
 	}
 
-	task, _ := reg.Get(taskID)
+	task, err := reg.Get(taskID)
+	if err != nil || task == nil {
+		t.Fatalf("Get returned nil task for %s: %v", taskID, err)
+	}
 	task.ResultURL = tmpFile.Name()
 	data, _ := json.Marshal(task)
 	_ = reg.client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
@@ -124,7 +127,10 @@ func TestDownloadController_GuestUserSuccess(t *testing.T) {
 
 	_, _ = reg.SetWithKey(taskID, "COMPLETED", 100, "", "", guestID)
 
-	task, _ := reg.Get(taskID)
+	task, err := reg.Get(taskID)
+	if err != nil || task == nil {
+		t.Fatalf("Get returned nil task for %s: %v", taskID, err)
+	}
 	task.ResultURL = tmpFile.Name()
 	data, _ := json.Marshal(task)
 	_ = reg.client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
@@ -194,14 +200,19 @@ func TestDownloadController_CrossReplicaDownload(t *testing.T) {
 	// Simulated Replica A stores task in shared Redis
 	replicaA := &TaskRegistry{client: client}
 	_, _ = replicaA.SetWithKey(taskID, "COMPLETED", 100, "", "", ownerID)
-	task, _ := replicaA.Get(taskID)
+	task, err := replicaA.Get(taskID)
+	if err != nil || task == nil {
+		t.Fatalf("Get returned nil task for %s: %v", taskID, err)
+	}
 	task.ResultURL = tmpFile.Name()
 	data, _ := json.Marshal(task)
 	_ = client.Set(context.Background(), TaskKeyPrefix+taskID, string(data), TaskTTL).Err()
 
 	// Simulated Replica B receives download request
 	replicaB := &TaskRegistry{client: client}
+	oldReg := Registry
 	Registry = replicaB
+	defer func() { Registry = oldReg }()
 
 	app := fiber.New()
 	app.Get("/api/v1/download/:id", func(c *fiber.Ctx) error {

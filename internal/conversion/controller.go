@@ -1,6 +1,7 @@
 package conversion
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 	"strconv"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -307,8 +309,6 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity)
-	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	opts := PrintOptions{}
 	if paperSize := c.FormValue("paperSize"); paperSize != "" {
@@ -335,28 +335,31 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	release, ok := limiter.Default.TryAcquire()
-	if !ok {
-		c.Set("Retry-After", "5")
-		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-			"code":    "SERVER_BUSY",
-			"error":   "Server processing capacity reached. Please try again in a few seconds.",
-			"message": "Server processing capacity reached. Please try again in a few seconds.",
-		})
-	}
-
-	reservation, err := billing.Default.Reserve(userID, billing.HTMLToPDF, 0, 0, c.Path())
+	reservation, err := billing.Default.ReserveWithTaskID(userID, billing.HTMLToPDF, 0, 0, c.Path(), taskId)
 	if err != nil {
-		release()
+		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	go func(id, target string, printOpts PrintOptions, reservationID, owner string, releaseToken func()) {
+	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservation.ID)
+	if err != nil || !okCreated {
+		_ = billing.Default.Release(reservation.ID)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
+	}
+
+	_ = idempotency.SetTaskID(c, taskId, nil)
+
+	go func(id, target string, printOpts PrintOptions, reservationID, owner string) {
 		var localOutPath string
+		var releaseToken func()
+
 		defer func() {
-			releaseToken()
+			if releaseToken != nil {
+				releaseToken()
+			}
 			if localOutPath != "" {
 				_ = os.Remove(localOutPath)
 			}
@@ -365,6 +368,31 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r), owner)
 			}
 		}()
+
+		var acquired bool
+		for attempt := 0; attempt < 30; attempt++ {
+			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
+			cancel()
+
+			if acqErr != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Execution capacity service unavailable.", owner)
+				return
+			}
+			if ok {
+				acquired = true
+				releaseToken = rel
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+
+		if !acquired {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Server capacity reached. Task execution timed out waiting for capacity.", owner)
+			return
+		}
 
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Spawning layout canvas compilation layers...", owner)
 
@@ -403,15 +431,17 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		if err := billing.Default.Commit(reservationID); err != nil {
 			_ = billing.Default.Release(reservationID)
+			_ = r2Store.DeleteObject(context.Background(), r2Key)
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 			return
 		}
 
 		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
 		if !accepted {
+			_ = r2Store.DeleteObject(context.Background(), r2Key)
 			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
 		}
-	}(taskId, targetURL, opts, reservation.ID, ownerIdentity, release)
+	}(taskId, targetURL, opts, reservation.ID, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
 }
@@ -432,17 +462,6 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	}
 
 	taskId := uuid.New().String()
-	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity)
-	_ = idempotency.SetTaskID(c, taskId, nil)
-
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))
-	if err := copyFile(upload.Path, inputPath); err != nil {
-		_, _ = tasks.Registry.SetWithKey(taskId, "FAILED", 0, "", "Workspace scratch write failure occurred.", ownerIdentity)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Disk caching allocation error",
-		})
-	}
 
 	opts := PrintOptions{}
 	if marginStr := c.FormValue("marginTop"); marginStr != "" {
@@ -456,37 +475,49 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	release, ok := limiter.Default.TryAcquire()
-	if !ok {
-		_ = os.Remove(inputPath)
-		c.Set("Retry-After", "5")
-		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-			"code":    "SERVER_BUSY",
-			"error":   "Server processing capacity reached. Please try again in a few seconds.",
-			"message": "Server processing capacity reached. Please try again in a few seconds.",
-		})
-	}
-
-	reservation, err := billing.Default.Reserve(
+	reservation, err := billing.Default.ReserveWithTaskID(
 		userID,
 		billing.ConvertMarkdownToPDF,
 		0,
 		0,
 		c.Path(),
+		taskId,
 	)
 	if err != nil {
-		release()
-		_ = os.Remove(inputPath)
-
+		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
 			"error": err.Error(),
 		})
 	}
 
-	go func(id, srcPath string, printOpts PrintOptions, reservationID, owner string, releaseToken func()) {
+	tempDir := os.TempDir()
+	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))
+	if err := copyFile(upload.Path, inputPath); err != nil {
+		_ = billing.Default.Release(reservation.ID)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Disk caching allocation error",
+		})
+	}
+
+	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity, reservation.ID)
+	if err != nil || !okCreated {
+		_ = billing.Default.Release(reservation.ID)
+		_ = os.Remove(inputPath)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
+	}
+
+	_ = idempotency.SetTaskID(c, taskId, nil)
+
+	go func(id, srcPath string, printOpts PrintOptions, reservationID, owner string) {
 		var localOutPath string
+		var releaseToken func()
+
 		defer func() {
-			releaseToken()
+			if releaseToken != nil {
+				releaseToken()
+			}
 			_ = os.Remove(srcPath)
 			if localOutPath != "" {
 				_ = os.Remove(localOutPath)
@@ -498,6 +529,31 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Text compilation parser structural error.", owner)
 			}
 		}()
+
+		var acquired bool
+		for attempt := 0; attempt < 30; attempt++ {
+			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
+			cancel()
+
+			if acqErr != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Execution capacity service unavailable.", owner)
+				return
+			}
+			if ok {
+				acquired = true
+				releaseToken = rel
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+
+		if !acquired {
+			_ = billing.Default.Release(reservationID)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Server capacity reached. Task execution timed out waiting for capacity.", owner)
+			return
+		}
 
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 40, "", "Parsing tokens and injecting layout styling variables...", owner)
 
@@ -538,6 +594,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		if err := billing.Default.Commit(reservationID); err != nil {
 			_ = os.Remove(outPath)
 			_ = billing.Default.Release(reservationID)
+			_ = r2Store.DeleteObject(context.Background(), r2Key)
 
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
 			return
@@ -545,10 +602,11 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
 		if !accepted {
+			_ = r2Store.DeleteObject(context.Background(), r2Key)
 			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
 		}
 
-	}(taskId, inputPath, opts, reservation.ID, ownerIdentity, release)
+	}(taskId, inputPath, opts, reservation.ID, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"taskId": taskId,

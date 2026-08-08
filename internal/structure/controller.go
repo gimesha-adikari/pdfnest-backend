@@ -29,50 +29,33 @@ type APIError struct {
 }
 
 func (ctrl *Controller) Merge(c *fiber.Ctx) error {
+	ctx := uploads.FromCtx(c)
+	var inputPaths []string
 
-	form, err := c.MultipartForm()
-	if err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(APIError{
-			Code:    "INVALID_MULTIPART_FORM",
-			Message: "Invalid multipart form transmission.",
-		})
+	if ctx != nil {
+		for _, field := range []string{"files", "file", "pdfs", "documents", "inputs"} {
+			for _, f := range ctx.All(field) {
+				if f != nil && f.Path != "" {
+					inputPaths = append(inputPaths, f.Path)
+				}
+			}
+		}
 	}
 
-	files := form.File["files"]
-	if len(files) < 2 {
+	if len(inputPaths) < 2 {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "INSUFFICIENT_FILES",
 			Message: "At least two PDF files are required to execute a merge operation.",
 		})
 	}
 
-	tempDir := os.TempDir()
-	var inputPaths []string
-
-	defer func() {
-		for _, path := range inputPaths {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				log.Printf("[CLEANUP WARNING] Merge: Failed to delete temporary input file at %s: %v", path, err)
-			}
-		}
-	}()
-
-	for _, fileHeader := range files {
-		inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-		if err := c.SaveFile(fileHeader, inputPath); err != nil {
-			log.Printf("[SERVER ERROR] Merge: Failed to save multipart file to path %s: %v", inputPath, err)
-			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-				Code:    "DISK_WRITE_FAILURE",
-				Message: "Failed to initialize staging area for file compilation.",
-			})
-		}
-		if _, err := uploads.CheckPDFPageLimit(inputPath, "MAX_PAGES_GENERAL", 1000); err != nil {
+	for _, path := range inputPaths {
+		if _, err := uploads.CheckPDFPageLimit(path, "MAX_PAGES_GENERAL", 1000); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(APIError{
 				Code:    "PAGE_LIMIT_EXCEEDED",
 				Message: err.Error(),
 			})
 		}
-		inputPaths = append(inputPaths, inputPath)
 	}
 
 	outputPath, err := ctrl.service.MergePDFs(inputPaths)
@@ -95,7 +78,6 @@ func (ctrl *Controller) Merge(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Split(c *fiber.Ctx) error {
-
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -104,7 +86,7 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -112,34 +94,19 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Split: Failed to save uploaded file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to allocate scratch file parameters.",
-		})
-	}
-	if _, err := uploads.CheckPDFPageLimit(inputPath, "MAX_PAGES_GENERAL", 1000); err != nil {
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "PAGE_LIMIT_EXCEEDED",
 			Message: err.Error(),
 		})
 	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Split: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
 
 	pageSelection := strings.Split(pagesRaw, ",")
 	for i, v := range pageSelection {
 		pageSelection[i] = strings.TrimSpace(v)
 	}
 
-	outputPath, err := ctrl.service.SplitPDF(inputPath, pageSelection)
+	outputPath, err := ctrl.service.SplitPDF(upload.Path, pageSelection)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "EXTRACTION_ENGINE_FAILED",
@@ -159,7 +126,6 @@ func (ctrl *Controller) Split(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
-
 	rotationsRaw := c.FormValue("rotations")
 	if rotationsRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -176,7 +142,7 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -184,23 +150,14 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Rotate: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to commit operational asset to temporary block disk maps.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Rotate: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
 
-	outputPath, err := ctrl.service.RotatePDF(inputPath, rotations)
+	outputPath, err := ctrl.service.RotatePDF(upload.Path, rotations)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "ROTATION_ENGINE_FAILED",
@@ -220,7 +177,6 @@ func (ctrl *Controller) Rotate(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
-
 	pagesRaw := c.FormValue("pages")
 	if pagesRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -229,7 +185,7 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -237,28 +193,19 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] DeletePages: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to isolate document file structure allocation paths.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] DeletePages: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
 
 	pagesToDelete := strings.Split(pagesRaw, ",")
 	for i, v := range pagesToDelete {
 		pagesToDelete[i] = strings.TrimSpace(v)
 	}
 
-	outputPath, err := ctrl.service.DeletePDFPages(inputPath, pagesToDelete)
+	outputPath, err := ctrl.service.DeletePDFPages(upload.Path, pagesToDelete)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "DELETION_ENGINE_FAILED",
@@ -278,7 +225,6 @@ func (ctrl *Controller) DeletePages(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
-
 	sequenceRaw := c.FormValue("sequence")
 	if sequenceRaw == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
@@ -287,7 +233,7 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -295,28 +241,19 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] ReorderPages: Failed to save input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Could not write target asset structure down standard disk registers.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] ReorderPages: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
 
 	sequence := strings.Split(sequenceRaw, ",")
 	for i, v := range sequence {
 		sequence[i] = strings.TrimSpace(v)
 	}
 
-	outputPath, err := ctrl.service.ReorderPDFPages(inputPath, sequence)
+	outputPath, err := ctrl.service.ReorderPDFPages(upload.Path, sequence)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "REORDER_ENGINE_FAILED",
@@ -336,8 +273,7 @@ func (ctrl *Controller) ReorderPages(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -345,43 +281,23 @@ func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 		})
 	}
 
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
+		})
+	}
+
 	text := c.FormValue("text")
 	description := c.FormValue("description")
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Watermark: Failed to save source file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to isolate document frame maps.",
-		})
-	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Watermark: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
-
 	var imagePath string
-	imgHeader, err := c.FormFile("watermarkImage")
-	if err == nil && imgHeader != nil {
-		imagePath = filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(imgHeader.Filename))
-		if err := c.SaveFile(imgHeader, imagePath); err != nil {
-			log.Printf("[SERVER ERROR] Watermark: Failed to save graphic asset %s: %v", imagePath, err)
-			return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-				Code:    "GRAPHIC_WRITE_FAILURE",
-				Message: "Failed to process attached structural watermark graphic overlay component.",
-			})
-		}
-		defer func() {
-			if err := os.Remove(imagePath); err != nil && !os.IsNotExist(err) {
-				log.Printf("[CLEANUP WARNING] Watermark: Failed to delete watermark image asset at %s: %v", imagePath, err)
-			}
-		}()
+	imgFile, err := uploads.MustFile(c, "watermarkImage")
+	if err == nil && imgFile != nil && imgFile.Path != "" {
+		imagePath = imgFile.Path
 	}
 
-	outputPath, err := ctrl.service.WatermarkPDF(inputPath, text, imagePath, description)
+	outputPath, err := ctrl.service.WatermarkPDF(upload.Path, text, imagePath, description)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "WATERMARK_ENGINE_FAILED",
@@ -401,13 +317,12 @@ func (ctrl *Controller) Watermark(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
-
 	description := c.FormValue("description")
 	if description == "" {
 		description = "font:Helvetica, pos:bc, scale:12 abs"
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -415,22 +330,14 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] AddPageNumbers: Failed to save uploaded input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to parse underlying document file handle arrays.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] AddPageNumbers: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
 
-	outputPath, err := ctrl.service.AddPageNumbersPDF(inputPath, description)
+	outputPath, err := ctrl.service.AddPageNumbersPDF(upload.Path, description)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "PAGINATION_ENGINE_FAILED",
@@ -450,12 +357,18 @@ func (ctrl *Controller) AddPageNumbers(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
 			Message: "Core target configuration file container artifact is missing.",
+		})
+	}
+
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 
@@ -475,22 +388,7 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 		metadata["Keywords"] = keywords
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] UpdateMetadata: Failed to save uploaded file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to capture properties frame reference maps.",
-		})
-	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] UpdateMetadata: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
-
-	outputPath, err := ctrl.service.UpdateMetadataPDF(inputPath, metadata, password)
+	outputPath, err := ctrl.service.UpdateMetadataPDF(upload.Path, metadata, password)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "METADATA_ENGINE_FAILED",
@@ -510,8 +408,7 @@ func (ctrl *Controller) UpdateMetadata(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -521,25 +418,9 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 
 	password := c.FormValue("password")
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] FetchMetadata: Failed to save file: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to isolate document meta headers.",
-		})
-	}
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] FetchMetadata: Failed to delete input file: %v", err)
-		}
-	}()
-
-	properties, err := ctrl.service.GetMetadataPDF(inputPath, password)
+	properties, err := ctrl.service.GetMetadataPDF(upload.Path, password)
 	if err != nil {
 		log.Printf("[METADATA ERROR] %v", err)
-
 		return c.Status(fiber.StatusUnauthorized).JSON(APIError{
 			Code:    "DECRYPTION_METADATA_FAILED",
 			Message: err.Error(),
@@ -550,82 +431,72 @@ func (ctrl *Controller) FetchMetadata(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Repair(c *fiber.Ctx) error {
-
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Missing target PDF document file parameter.",
 		})
 	}
 
-	tempDir := os.TempDir()
-	sessionID := uuid.New().String()
-	inputPath := filepath.Join(tempDir, sessionID+"-corrupt-"+filepath.Base(fileHeader.Filename))
-	outputPath := filepath.Join(tempDir, sessionID+"-repaired-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to allocate local scratch workspace.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
 		})
 	}
 
+	tempDir := os.TempDir()
+	sessionID := uuid.New().String()
+	outputPath := filepath.Join(tempDir, sessionID+"-repaired-"+filepath.Base(upload.Header.Filename))
+
 	defer func() {
-		os.Remove(inputPath)
 		os.Remove(outputPath)
 	}()
 
-	if err := RepairPdf(inputPath, outputPath); err != nil {
+	if err := RepairPdf(upload.Path, outputPath); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
 			"error": "File is too severely corrupted to repair dynamically.",
 		})
 	}
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment("repaired_" + filepath.Base(fileHeader.Filename))
+	c.Attachment("repaired_" + filepath.Base(upload.Header.Filename))
 
 	return c.SendFile(outputPath)
 }
 
 func (ctrl *Controller) Sign(c *fiber.Ctx) error {
-
-	pdfHeader, err := c.FormFile("file")
+	pdfFile, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing target PDF document."})
 	}
 
-	sigHeader, err := c.FormFile("signature")
+	sigFile, err := uploads.MustFile(c, "signature")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing signature image data."})
+	}
+
+	if _, err := uploads.CheckPDFPageLimit(pdfFile.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": err.Error(),
+		})
 	}
 
 	stampsJson := c.FormValue("stamps", "[]")
 
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
-
-	pdfInputPath := filepath.Join(tempDir, sessionID+"-doc-"+filepath.Base(pdfHeader.Filename))
-	sigInputPath := filepath.Join(tempDir, sessionID+"-sig-"+filepath.Base(sigHeader.Filename))
-	outputPath := filepath.Join(tempDir, sessionID+"-signed-"+filepath.Base(pdfHeader.Filename))
-
-	if err := c.SaveFile(pdfHeader, pdfInputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save PDF workspace."})
-	}
-	if err := c.SaveFile(sigHeader, sigInputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to save signature workspace."})
-	}
+	outputPath := filepath.Join(tempDir, sessionID+"-signed-"+filepath.Base(pdfFile.Header.Filename))
 
 	defer func() {
-		os.Remove(pdfInputPath)
-		os.Remove(sigInputPath)
 		os.Remove(outputPath)
 	}()
 
-	if err := SignPdfMulti(pdfInputPath, sigInputPath, outputPath, stampsJson); err != nil {
+	if err := SignPdfMulti(pdfFile.Path, sigFile.Path, outputPath, stampsJson); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Signature stamping failed: " + err.Error()})
 	}
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment("signed_" + filepath.Base(pdfHeader.Filename))
+	c.Attachment("signed_" + filepath.Base(pdfFile.Header.Filename))
 
 	return c.SendFile(outputPath)
 }
@@ -658,7 +529,7 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 
 	selectedPages := parseSelectedPages(c.FormValue("pages"))
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    "MISSING_UPLOAD_FILE",
@@ -666,24 +537,14 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		log.Printf("[SERVER ERROR] Crop: Failed to save uploaded input file %s: %v", inputPath, err)
-		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
-			Code:    "DISK_WRITE_FAILURE",
-			Message: "Failed to isolate document file parameters into scratch space.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code:    "PAGE_LIMIT_EXCEEDED",
+			Message: err.Error(),
 		})
 	}
 
-	defer func() {
-		if err := os.Remove(inputPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("[CLEANUP WARNING] Crop: Failed to delete input file at %s: %v", inputPath, err)
-		}
-	}()
-
-	outputPath, err := ctrl.service.CropPDF(inputPath, cropBoxDesc, selectedPages)
+	outputPath, err := ctrl.service.CropPDF(upload.Path, cropBoxDesc, selectedPages)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "CROPPING_ENGINE_FAILED",
@@ -782,7 +643,7 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "MISSING_UPLOAD_FILE",
@@ -790,32 +651,23 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "DISK_WRITE_FAILURE",
-			"message": "Failed to store asset into intermediate local temporary storage bounds.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "PAGE_LIMIT_EXCEEDED",
+			"message": err.Error(),
 		})
 	}
-	defer func() {
-		_ = os.Remove(inputPath)
-	}()
 
-	if password := c.FormValue("file_password"); password != "" {
-	}
-
-	outputPath, err := ctrl.service.DuplicatePDFPages(inputPath, pageSelection, copies)
+	outputPath, err := ctrl.service.DuplicatePDFPages(upload.Path, pageSelection, copies)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "DUPLICATION_ENGINE_FAILED",
-			"message": "Page matrix layout rendering transaction failed: " + err.Error(),
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "DUPLICATION_ENGINE_FAILED",
+			Message: "Page matrix layout rendering transaction failed: " + err.Error(),
 		})
 	}
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment(fmt.Sprintf("%s-duplicated.pdf", strings.TrimSuffix(fileHeader.Filename, filepath.Ext(fileHeader.Filename))))
+	c.Attachment(fmt.Sprintf("%s-duplicated.pdf", strings.TrimSuffix(upload.Header.Filename, filepath.Ext(upload.Header.Filename))))
 
 	sendErr := c.SendFile(outputPath)
 
@@ -827,7 +679,6 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
-
 	insertAt := c.FormValue("insertAt")
 
 	targetPage := 1
@@ -851,7 +702,7 @@ func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
 		})
 	}
 
-	fileHeader, err := c.FormFile("file")
+	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "MISSING_UPLOAD_FILE",
@@ -859,29 +710,23 @@ func (ctrl *Controller) InsertBlank(c *fiber.Ctx) error {
 		})
 	}
 
-	tempDir := os.TempDir()
-	inputPath := filepath.Join(tempDir, uuid.New().String()+"-"+filepath.Base(fileHeader.Filename))
-
-	if err := c.SaveFile(fileHeader, inputPath); err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "DISK_WRITE_FAILURE",
-			"message": "Failed to store asset into temporary scratch bounds.",
+	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_GENERAL", 1000); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"code":    "PAGE_LIMIT_EXCEEDED",
+			"message": err.Error(),
 		})
 	}
-	defer func() {
-		_ = os.Remove(inputPath)
-	}()
 
-	outputPath, err := ctrl.service.InsertBlankPages(inputPath, insertAt, targetPage, count)
+	outputPath, err := ctrl.service.InsertBlankPages(upload.Path, insertAt, targetPage, count)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "INSERTION_ENGINE_FAILED",
-			"message": "Blank page insert rendering transaction failed: " + err.Error(),
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "INSERTION_ENGINE_FAILED",
+			Message: "Blank page insert rendering transaction failed: " + err.Error(),
 		})
 	}
 
 	c.Set("Content-Type", "application/pdf")
-	c.Attachment(fmt.Sprintf("%s-with-blank.pdf", filepath.Base(fileHeader.Filename)))
+	c.Attachment(fmt.Sprintf("%s-with-blank.pdf", strings.TrimSuffix(upload.Header.Filename, filepath.Ext(upload.Header.Filename))))
 
 	sendErr := c.SendFile(outputPath)
 

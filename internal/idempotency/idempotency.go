@@ -206,6 +206,21 @@ func SetTaskID(c *fiber.Ctx, taskID string, redisClient *redis.Client) error {
 	return client.Set(ctx, redisKey, string(data), CreatedTTL).Err()
 }
 
+const atomicReleaseIdempotencyLua = `
+local key = KEYS[1]
+local val = redis.call('GET', key)
+
+if val and val ~= '' then
+    local rec = cjson.decode(val)
+    if rec.state == 'PROCESSING' then
+        redis.call('DEL', key)
+        return 1
+    end
+end
+
+return 0
+`
+
 func Release(c *fiber.Ctx, redisClient *redis.Client) {
 	redisKey, _ := c.Locals("idempotency_redis_key").(string)
 	if redisKey == "" {
@@ -217,18 +232,12 @@ func Release(c *fiber.Ctx, redisClient *redis.Client) {
 		client = config.Redis
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
 	if client == nil {
 		return
 	}
 
-	val, err := client.Get(ctx, redisKey).Result()
-	if err == nil {
-		var rec Record
-		if err := json.Unmarshal([]byte(val), &rec); err == nil && rec.State == "PROCESSING" {
-			_ = client.Del(ctx, redisKey).Err()
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, _ = client.Eval(ctx, atomicReleaseIdempotencyLua, []string{redisKey}).Result()
 }
