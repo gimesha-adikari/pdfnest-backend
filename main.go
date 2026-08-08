@@ -92,7 +92,6 @@ func main() {
 		Format: "[${time}] ${status} - ${method} ${path} (${latency})\n",
 	}))
 
-	tasks.RegisterRoutes(app)
 	landing.RegisterRoutes(app)
 
 	apiGroup := app.Group("/api")
@@ -108,6 +107,8 @@ func main() {
 	billing.RegisterRoutes(apiGroup, billingController)
 
 	toolGroup := apiGroup.Group("", identity.Resolve(identityStore))
+
+	tasks.RegisterRoutes(toolGroup)
 
 	securityService := security.NewService()
 	securityController := security.NewController(securityService)

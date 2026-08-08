@@ -7,18 +7,18 @@ import (
 	"github.com/gofiber/websocket/v2"
 )
 
-func RegisterRoutes(app *fiber.App) {
-	app.Get("/api/v1/tasks/:id", handleGetTaskStatus)
-	app.Get("/api/v1/download/:id", HandleTaskDownload)
+func RegisterRoutes(router fiber.Router) {
+	router.Get("/v1/tasks/:id", handleGetTaskStatus)
+	router.Get("/v1/download/:id", HandleTaskDownload)
 
-	app.Use("/api/v1/tasks/:id/progress", func(c *fiber.Ctx) error {
+	router.Use("/v1/tasks/:id/progress", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
 	})
 
-	app.Get("/api/v1/tasks/:id/progress", websocket.New(func(c *websocket.Conn) {
+	router.Get("/v1/tasks/:id/progress", websocket.New(func(c *websocket.Conn) {
 		taskId := c.Params("id")
 		for {
 			progressData := getTaskProgress(taskId)

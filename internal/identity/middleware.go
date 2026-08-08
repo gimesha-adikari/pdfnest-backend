@@ -119,6 +119,12 @@ func resolveAuthenticatedUser(c *fiber.Ctx) (userID, role string, ok bool) {
 
 	tokenString := strings.TrimSpace(c.Cookies("auth_token"))
 	if tokenString == "" {
+		authHeader := strings.TrimSpace(c.Get("Authorization"))
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+	}
+	if tokenString == "" {
 		return "", "", false
 	}
 
