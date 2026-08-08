@@ -1,4 +1,3 @@
-// file: /home/gimesha/My_Projects/go/pdfnest-backend/internal/conversion/pdfToImg.go
 package conversion
 
 import (
@@ -7,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"pdfnest-backend/internal/process"
 	"sort"
 	"strings"
 	"time"
@@ -49,7 +48,6 @@ func resolveImageOutputFormat(input string) ImageOutputFormat {
 			DisplayName: "Monochrome PNG",
 		}
 	default:
-		// Safe fallback
 		return ImageOutputFormat{
 			Device:      "jpeg",
 			FileExt:     "jpg",
@@ -58,7 +56,7 @@ func resolveImageOutputFormat(input string) ImageOutputFormat {
 	}
 }
 
-func (s *ConversionService) PdfToImagesBackend(inputPath string, imageType string) (string, error) {
+func (s *ConversionService) PdfToImagesBackend(ctx context.Context, inputPath string, imageType string) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 
@@ -72,28 +70,30 @@ func (s *ConversionService) PdfToImagesBackend(inputPath string, imageType strin
 	defer os.RemoveAll(workDir)
 
 	outputZipPath := filepath.Join(tempDir, "extracted-"+sessionID+".zip")
-
 	outputPattern := filepath.Join(workDir, fmt.Sprintf("page-%%03d.%s", format.FileExt))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	cmd := exec.CommandContext(ctx, "gs",
+	args := []string{
 		"-dNOPAUSE",
 		"-dBATCH",
 		"-dSAFER",
-		"-sDEVICE="+format.Device,
+		"-sDEVICE=" + format.Device,
 		"-r200",
-		"-sOutputFile="+outputPattern,
-		inputPath,
-	)
-
-	// Better JPEG quality without affecting PNG modes.
-	if format.Device == "jpeg" {
-		cmd.Args = append(cmd.Args, "-dJPEGQ=95")
+		"-sOutputFile=" + outputPattern,
 	}
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if format.Device == "jpeg" {
+		args = append(args, "-dJPEGQ=95")
+	}
+	args = append(args, inputPath)
+
+	runner := process.Runner{GracePeriod: 500 * time.Millisecond}
+	output, err := runner.Run(ctx, 10*time.Minute, "gs", args...)
+
+	if err != nil {
 		return "", fmt.Errorf("ghostscript rendering engine failed: %v, trace: %s", err, string(output))
 	}
 

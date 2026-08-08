@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/disk"
 	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/temp"
 	"pdfnest-backend/internal/uploads"
 	"strconv"
 	"time"
@@ -106,7 +108,7 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 
 	imageType := c.FormValue("image_type", "jpg")
 
-	zipOutputPath, err := ctrl.service.PdfToImagesBackend(upload.Path, imageType)
+	zipOutputPath, err := ctrl.service.PdfToImagesBackend(c.UserContext(), upload.Path, imageType)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "RASTERIZATION_FAILED",
@@ -145,7 +147,7 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 		scale = 2.0
 	}
 
-	imgBytes, err := cc.service.ConvertPageToImageStream(upload.Header, pageNum, scale)
+	imgBytes, err := cc.service.ConvertPageToImageStream(c.UserContext(), upload.Header, pageNum, scale)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"code":    "RASTER_ENGINE_CRASH",
@@ -173,7 +175,7 @@ func (ctrl *Controller) ConvertOfficeToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	outputPath, err := ctrl.service.OfficeToPdf(upload.Path)
+	outputPath, err := ctrl.service.OfficeToPdf(c.UserContext(), upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OFFICE_CONVERSION_FAILED",
@@ -207,7 +209,7 @@ func (ctrl *Controller) ConvertUrlToPDF(c *fiber.Ctx) error {
 	opts.MarginLeft, _ = strconv.ParseFloat(c.FormValue("marginLeft"), 64)
 	opts.MarginRight, _ = strconv.ParseFloat(c.FormValue("marginRight"), 64)
 
-	outputPath, err := ctrl.service.HtmlToPdf(targetURL, opts)
+	outputPath, err := ctrl.service.HtmlToPdf(c.UserContext(), targetURL, opts)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "WEB_EXTRACTION_FAILED",
@@ -245,7 +247,7 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 		opts.PaperSize = "A4"
 	}
 
-	outputPath, err := ctrl.service.MarkdownToPdf(upload.Path, opts)
+	outputPath, err := ctrl.service.MarkdownToPdf(c.UserContext(), upload.Path, opts)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "MARKDOWN_CONVERSION_FAILED",
@@ -279,7 +281,7 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 	opts.MarginLeft, _ = strconv.ParseFloat(c.FormValue("marginLeft"), 64)
 	opts.MarginRight, _ = strconv.ParseFloat(c.FormValue("marginRight"), 64)
 
-	outputPath, err := ctrl.service.CodeToPdf(upload.Path, upload.Header.Filename, opts)
+	outputPath, err := ctrl.service.CodeToPdf(c.UserContext(), upload.Path, upload.Header.Filename, opts)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "CODE_CONVERSION_FAILED",
@@ -343,6 +345,15 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	if diskErr := disk.CheckAvailableSpace(temp.GetDir(), 100*1024*1024); diskErr != nil {
+		_ = billing.Default.Release(reservation.ID)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInsufficientStorage).JSON(fiber.Map{
+			"code":    "INSUFFICIENT_STORAGE",
+			"message": "Insufficient server disk space available to start rendering operation.",
+		})
+	}
+
 	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservation.ID)
 	if err != nil || !okCreated {
 		_ = billing.Default.Release(reservation.ID)
@@ -353,10 +364,34 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id, target string, printOpts PrintOptions, reservationID, owner string) {
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		defer taskCancel()
+
+		stopPoller := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPoller:
+					return
+				case <-taskCtx.Done():
+					return
+				case <-ticker.C:
+					task, _ := tasks.Registry.Get(id)
+					if task != nil && task.Status == "CANCELLED" {
+						taskCancel()
+						return
+					}
+				}
+			}
+		}()
+
 		var localOutPath string
 		var releaseToken func()
 
 		defer func() {
+			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
@@ -371,7 +406,11 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
-			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if taskCtx.Err() != nil {
+				_ = billing.Default.Release(reservationID)
+				return
+			}
+			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
 			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
 			cancel()
 
@@ -394,15 +433,27 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 			return
 		}
 
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
+
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Spawning layout canvas compilation layers...", owner)
 
-		outPath, err := ctrl.service.HtmlToPdf(target, printOpts)
+		outPath, err := ctrl.service.HtmlToPdf(taskCtx, target, printOpts)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			if taskCtx.Err() == nil {
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			}
 			return
 		}
 		localOutPath = outPath
+
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
 		r2Store, r2Err := storage.Default()
@@ -511,10 +562,34 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id, srcPath string, printOpts PrintOptions, reservationID, owner string) {
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		defer taskCancel()
+
+		stopPoller := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPoller:
+					return
+				case <-taskCtx.Done():
+					return
+				case <-ticker.C:
+					task, _ := tasks.Registry.Get(id)
+					if task != nil && task.Status == "CANCELLED" {
+						taskCancel()
+						return
+					}
+				}
+			}
+		}()
+
 		var localOutPath string
 		var releaseToken func()
 
 		defer func() {
+			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
@@ -532,7 +607,11 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
-			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if taskCtx.Err() != nil {
+				_ = billing.Default.Release(reservationID)
+				return
+			}
+			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
 			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
 			cancel()
 
@@ -555,16 +634,28 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 			return
 		}
 
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
+
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 40, "", "Parsing tokens and injecting layout styling variables...", owner)
 
-		outPath, err := ctrl.service.MarkdownToPdf(srcPath, printOpts)
+		outPath, err := ctrl.service.MarkdownToPdf(taskCtx, srcPath, printOpts)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			if taskCtx.Err() == nil {
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			}
 			return
 		}
 		localOutPath = outPath
+
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
 		r2Store, r2Err := storage.Default()

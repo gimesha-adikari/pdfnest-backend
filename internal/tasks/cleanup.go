@@ -4,9 +4,47 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/temp"
 	"strings"
 	"time"
 )
+
+var allowedTempPrefixes = []string{
+	"pdfnest-",
+	"split-",
+	"merged-",
+	"inserted-",
+	"deleted-",
+	"numbered-",
+	"texted-",
+	"reorder-",
+	"cropped-",
+	"rotated-",
+	"duplicated-",
+	"metadata-",
+	"watermarked-",
+	"pdf-page-",
+	"html-compiled-",
+	"md-compiled-",
+	"img-compiled-",
+	"code-compiled-",
+	"office-compiled-",
+	"ocr-compiled-",
+	"r2-img-",
+	"compressed-",
+	"extracted-",
+	"tmp-",
+	"chromedp-runner-",
+}
+
+func isPDFNestTempName(name string) bool {
+	for _, prefix := range allowedTempPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 func StartCleanupWorker(checkInterval time.Duration, fileTTL time.Duration) {
 	ticker := time.NewTicker(checkInterval)
@@ -19,34 +57,62 @@ func StartCleanupWorker(checkInterval time.Duration, fileTTL time.Duration) {
 	}()
 }
 
-func sweepExpiredTempFiles(ttl time.Duration) {
-	tempDir := os.TempDir()
-	entries, err := os.ReadDir(tempDir)
+func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
+	entries, err := os.ReadDir(dirPath)
 	if err != nil {
-		return
+		return 0
 	}
 
 	now := time.Now()
 	evictionCount := 0
 
 	for _, entry := range entries {
-		if entry.IsDir() {
+		name := entry.Name()
+		if checkPrefix && !isPDFNestTempName(name) {
 			continue
 		}
-		name := entry.Name()
-		if strings.HasPrefix(name, "pdfnest-") || strings.HasPrefix(name, "compressed-") || strings.HasPrefix(name, "extracted-") || strings.HasPrefix(name, "web-compiled-") || strings.HasPrefix(name, "office-compiled-") {
-			fullPath := filepath.Join(tempDir, name)
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if now.Sub(info.ModTime()) > ttl {
+
+		fullPath := filepath.Join(dirPath, name)
+
+		lstatInfo, err := os.Lstat(fullPath)
+		if err != nil {
+			continue
+		}
+
+		// Symlink safety: do not follow symlinks outside target directory
+		if lstatInfo.Mode()&os.ModeSymlink != 0 {
+			_ = os.Remove(fullPath)
+			evictionCount++
+			continue
+		}
+
+		if now.Sub(lstatInfo.ModTime()) > ttl {
+			if lstatInfo.IsDir() {
+				if err := os.RemoveAll(fullPath); err == nil {
+					evictionCount++
+				}
+			} else {
 				if err := os.Remove(fullPath); err == nil {
 					evictionCount++
 				}
 			}
 		}
 	}
+
+	return evictionCount
+}
+
+func sweepExpiredTempFiles(ttl time.Duration) {
+	evictionCount := 0
+
+	// 1. Sweep dedicated PDFNest temporary directory (/tmp/pdfnest-temp)
+	dedicatedDir := temp.GetDir()
+	if dedicatedDir != os.TempDir() {
+		evictionCount += sweepDir(dedicatedDir, ttl, false)
+	}
+
+	// 2. Sweep system temporary directory (/tmp) with prefix allowlist
+	evictionCount += sweepDir(os.TempDir(), ttl, true)
 
 	if evictionCount > 0 {
 		log.Printf("[CLEANUP ENGINE] Successfully collected and reclaimed workspace capacity. Evicted temp files count: %d", evictionCount)

@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
+	"pdfnest-backend/internal/disk"
 	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/temp"
 	"pdfnest-backend/internal/uploads"
 	"time"
 
@@ -156,6 +158,16 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		})
 	}
 
+	requiredBytes := disk.EstimateRequiredSpace(upload.Header.Size, 3.0, 100*1024*1024)
+	if diskErr := disk.CheckAvailableSpace(temp.GetDir(), requiredBytes); diskErr != nil {
+		_ = billing.Default.Release(reservation.ID)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInsufficientStorage).JSON(APIError{
+			Code:    "INSUFFICIENT_STORAGE",
+			Message: "Insufficient server disk space available to start OCR extraction operation.",
+		})
+	}
+
 	inputPath := filepath.Join(os.TempDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
 	if err := copyFile(upload.Path, inputPath); err != nil {
 		_ = billing.Default.Release(reservation.ID)
@@ -174,10 +186,34 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id, srcPath, reservationID, lang, owner string) {
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		defer taskCancel()
+
+		stopPoller := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPoller:
+					return
+				case <-taskCtx.Done():
+					return
+				case <-ticker.C:
+					task, _ := tasks.Registry.Get(id)
+					if task != nil && task.Status == "CANCELLED" {
+						taskCancel()
+						return
+					}
+				}
+			}
+		}()
+
 		var localOutPath string
 		var releaseToken func()
 
 		defer func() {
+			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
@@ -193,7 +229,11 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
-			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if taskCtx.Err() != nil {
+				_ = billing.Default.Release(reservationID)
+				return
+			}
+			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
 			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
 			cancel()
 
@@ -216,15 +256,27 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 			return
 		}
 
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
+
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Running OCR and creating searchable text...", owner)
 
 		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			if taskCtx.Err() == nil {
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			}
 			return
 		}
 		localOutPath = outPath
+
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/%s", id, filepath.Base(outPath))
 		r2Store, r2Err := storage.Default()
@@ -325,6 +377,23 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	var totalInputSize int64
+	for _, f := range files {
+		totalInputSize += f.Header.Size
+	}
+	requiredBytes := disk.EstimateRequiredSpace(totalInputSize, 3.0, 100*1024*1024)
+	if diskErr := disk.CheckAvailableSpace(temp.GetDir(), requiredBytes); diskErr != nil {
+		_ = billing.Default.Release(reservation.ID)
+		for _, p := range tempPaths {
+			_ = os.Remove(p)
+		}
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusInsufficientStorage).JSON(APIError{
+			Code:    "INSUFFICIENT_STORAGE",
+			Message: "Insufficient server disk space available to start OCR rendering operation.",
+		})
+	}
+
 	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating compilation environment nodes...", ownerIdentity, reservation.ID)
 	if err != nil || !okCreated {
 		_ = billing.Default.Release(reservation.ID)
@@ -338,10 +407,34 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id string, imgPaths []string, reservationID, lang, owner string) {
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		defer taskCancel()
+
+		stopPoller := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPoller:
+					return
+				case <-taskCtx.Done():
+					return
+				case <-ticker.C:
+					task, _ := tasks.Registry.Get(id)
+					if task != nil && task.Status == "CANCELLED" {
+						taskCancel()
+						return
+					}
+				}
+			}
+		}()
+
 		var localOutPath string
 		var releaseToken func()
 
 		defer func() {
+			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
@@ -359,7 +452,11 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
-			acqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if taskCtx.Err() != nil {
+				_ = billing.Default.Release(reservationID)
+				return
+			}
+			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
 			rel, ok, acqErr := limiter.Default.AcquireWithRelease(acqCtx, id, owner)
 			cancel()
 
@@ -382,15 +479,27 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 			return
 		}
 
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
+
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Scanning character grid topologies and building PDF layout layers...", owner)
 
 		outPath, err := ctrl.service.ImageToTextPDF(imgPaths, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			if taskCtx.Err() == nil {
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
+			}
 			return
 		}
 		localOutPath = outPath
+
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
 		r2Store, r2Err := storage.Default()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/process"
 	"time"
 
 	"github.com/chromedp/cdproto/emulation"
@@ -51,7 +52,10 @@ func saveDebugPDF(debugDir string, data []byte) {
 	)
 }
 
-func (s *ConversionService) HtmlToPdf(targetURL string, opts PrintOptions) (string, error) {
+func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opts PrintOptions) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
@@ -86,17 +90,17 @@ func (s *ConversionService) HtmlToPdf(targetURL string, opts PrintOptions) (stri
 		),
 	)
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(
-		context.Background(),
+	allocCtx, allocCancel := process.NewHardenedExecAllocator(
+		ctx,
 		chromeOpts...,
 	)
 	defer allocCancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	chromeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, cancelTimeout := context.WithTimeout(
-		ctx,
+	chromeCtx, cancelTimeout := context.WithTimeout(
+		chromeCtx,
 		90*time.Second,
 	)
 	defer cancelTimeout()
@@ -108,7 +112,7 @@ func (s *ConversionService) HtmlToPdf(targetURL string, opts PrintOptions) (stri
 	)
 
 	err := chromedp.Run(
-		ctx,
+		chromeCtx,
 
 		emulation.SetDeviceMetricsOverride(
 			1920,

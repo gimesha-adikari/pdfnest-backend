@@ -6,6 +6,7 @@ import (
 	"html" // Standard library to safely sanitize source code syntax characters
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/process"
 	"strings"
 	"time"
 
@@ -15,7 +16,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *ConversionService) CodeToPdf(inputCodePath string, fileName string, opts PrintOptions) (string, error) {
+func (s *ConversionService) CodeToPdf(ctx context.Context, inputCodePath string, fileName string, opts PrintOptions) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 	finalPdfPath := filepath.Join(tempDir, "code-compiled-"+sessionID+".pdf")
@@ -128,19 +133,19 @@ func (s *ConversionService) CodeToPdf(inputCodePath string, fileName string, opt
 		chromedp.NoSandbox,
 		chromedp.DisableGPU,
 	)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), chromeOpts...)
+	allocCtx, allocCancel := process.NewHardenedExecAllocator(ctx, chromeOpts...)
 	defer allocCancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	chromeCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
 
-	ctx, cancelTimeout := context.WithTimeout(ctx, 35*time.Second)
+	chromeCtx, cancelTimeout := context.WithTimeout(chromeCtx, 35*time.Second)
 	defer cancelTimeout()
 
 	var buf []byte
 	fileURL := "file://" + tempHtmlPath
 
-	err = chromedp.Run(ctx,
+	err = chromedp.Run(chromeCtx,
 		emulation.SetDeviceMetricsOverride(1200, 1000, 1.0, false),
 		chromedp.Navigate(fileURL),
 		chromedp.WaitVisible("body", chromedp.ByQuery),

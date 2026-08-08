@@ -2,6 +2,7 @@ package conversion
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image/jpeg"
 	"io"
@@ -15,7 +16,11 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileHeader, pageNum int, scale float64) ([]byte, error) {
+func (s *ConversionService) ConvertPageToImageStream(ctx context.Context, fileHeader *multipart.FileHeader, pageNum int, scale float64) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	src, err := fileHeader.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read uploaded file payload stream: %w", err)
@@ -51,7 +56,7 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 	targetPdfPath := tempFilePath
 
 	if ext != ".pdf" {
-		compiledPdfPath, err := s.OfficeToPdf(tempFilePath)
+		compiledPdfPath, err := s.OfficeToPdf(ctx, tempFilePath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile office document for preview generation: %w", err)
 		}
@@ -94,7 +99,7 @@ func (s *ConversionService) ConvertPageToImageStream(fileHeader *multipart.FileH
 		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(workerBaseURL, "/")+"/api/v1/render/page", &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(workerBaseURL, "/")+"/api/v1/render/page", &body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build worker request: %w", err)
 	}

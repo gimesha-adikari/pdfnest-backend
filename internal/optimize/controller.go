@@ -42,7 +42,7 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 	log.Printf("Filename: %s", upload.Header.Filename)
 	log.Printf("Size: %d", upload.Header.Size)
 
-	outputPath, err := ctrl.service.OptimizePDF(upload.Path)
+	outputPath, err := ctrl.service.OptimizePDF(c.UserContext(), upload.Path)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "COMPRESSION_ENGINE_FAILED",
@@ -80,7 +80,7 @@ func (ctrl *Controller) Grayscale(c *fiber.Ctx) error {
 	sessionID := uuid.New().String()
 	outputPath := filepath.Join(os.TempDir(), sessionID+"-output-"+filepath.Base(upload.Header.Filename))
 
-	if err := ConvertToGrayscale(upload.Path, outputPath); err != nil {
+	if err := ConvertToGrayscale(c.UserContext(), upload.Path, outputPath); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "GRAYSCALE_ENGINE_FAILED",
 			Message: "Color conversion failure: " + err.Error(),

@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"pdfnest-backend/internal/process"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-func (s *ConversionService) OfficeToPdf(inputPath string) (string, error) {
+func (s *ConversionService) OfficeToPdf(ctx context.Context, inputPath string) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 	workDir := filepath.Join(tempDir, "office-conv-"+sessionID)
@@ -23,10 +23,15 @@ func (s *ConversionService) OfficeToPdf(inputPath string) (string, error) {
 	}
 	defer os.RemoveAll(workDir) // cleanup our work folder sandbox
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	cmd := exec.CommandContext(ctx, "libreoffice",
+	runner := process.Runner{GracePeriod: 500 * time.Millisecond}
+	output, err := runner.Run(
+		ctx,
+		5*time.Minute,
+		"libreoffice",
 		"-env:UserInstallation=file://"+filepath.ToSlash(filepath.Join(workDir, "profile")),
 		"--headless",
 		"--convert-to", "pdf:writer_pdf_Export",
@@ -34,7 +39,7 @@ func (s *ConversionService) OfficeToPdf(inputPath string) (string, error) {
 		inputPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if err != nil {
 		return "", fmt.Errorf("libreoffice conversion engine failed: %v, trace: %s", err, string(output))
 	}
 

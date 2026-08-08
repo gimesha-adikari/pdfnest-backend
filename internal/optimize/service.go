@@ -4,15 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"pdfnest-backend/internal/process"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 type Service interface {
-	OptimizePDF(inputPath string) (string, error)
+	OptimizePDF(ctx context.Context, inputPath string) (string, error)
 }
 
 type optimizeService struct{}
@@ -21,15 +21,20 @@ func NewService() Service {
 	return &optimizeService{}
 }
 
-func (s *optimizeService) OptimizePDF(inputPath string) (string, error) {
+func (s *optimizeService) OptimizePDF(ctx context.Context, inputPath string) (string, error) {
 	tempDir := os.TempDir()
 	outputFile := "compressed-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	cmd := exec.CommandContext(ctx, "gs",
+	runner := process.Runner{GracePeriod: 500 * time.Millisecond}
+	output, err := runner.Run(
+		ctx,
+		10*time.Minute,
+		"gs",
 		"-dNOPAUSE",
 		"-dBATCH",
 		"-dSAFER",
@@ -46,7 +51,7 @@ func (s *optimizeService) OptimizePDF(inputPath string) (string, error) {
 		inputPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if err != nil {
 		_ = os.Remove(outputPath)
 		return "", fmt.Errorf("ghostscript compression failure: %v, trace: %s", err, string(output))
 	}

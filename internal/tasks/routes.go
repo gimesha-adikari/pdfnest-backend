@@ -9,6 +9,7 @@ import (
 
 func RegisterRoutes(router fiber.Router) {
 	router.Get("/v1/tasks/:id", handleGetTaskStatus)
+	router.Delete("/v1/tasks/:id", handleCancelTask)
 	router.Get("/v1/download/:id", HandleTaskDownload)
 
 	router.Use("/v1/tasks/:id/progress", func(c *fiber.Ctx) error {
@@ -26,7 +27,7 @@ func RegisterRoutes(router fiber.Router) {
 			if err != nil {
 				break
 			}
-			if progressData.Status == "COMPLETED" || progressData.Status == "FAILED" {
+			if progressData.Status == "COMPLETED" || progressData.Status == "FAILED" || progressData.Status == "CANCELLED" {
 				break
 			}
 			time.Sleep(500 * time.Millisecond)

@@ -416,3 +416,51 @@ func TestTaskRegistry_GetWithTransition_MultiReplica(t *testing.T) {
 		t.Errorf("Expected EXACTLY ONE replica to receive staleTransitionPerformed == true, got %d", winnerCount)
 	}
 }
+
+func TestTaskRegistry_CancelTask(t *testing.T) {
+	client := setupTestRedis(t)
+	defer client.FlushDB(context.Background())
+
+	reg := &TaskRegistry{client: client}
+	taskID := "cancel-test-task"
+	ownerID := "user:alice"
+
+	// 1. Cancel non-existent task
+	res, tStatus, err := reg.CancelTask(taskID, ownerID)
+	if err != nil || res != "NOT_FOUND" || tStatus != nil {
+		t.Fatalf("Expected NOT_FOUND for missing task, got res=%s, status=%v, err=%v", res, tStatus, err)
+	}
+
+	// 2. Set task to PROCESSING with ownerID
+	okCreated, err := reg.SetWithKey(taskID, "PROCESSING", 30, "", "", ownerID, "res-123")
+	if err != nil || !okCreated {
+		t.Fatalf("SetWithKey failed: %v", err)
+	}
+
+	// 3. Unauthorized cancel attempt by Bob
+	resAuth, _, errAuth := reg.CancelTask(taskID, "user:bob")
+	if errAuth != nil || resAuth != "UNAUTHORIZED" {
+		t.Fatalf("Expected UNAUTHORIZED for Bob's attempt, got res=%s, err=%v", resAuth, errAuth)
+	}
+
+	// 4. Authorized cancel attempt by Alice
+	resCancel, statusCancel, errCancel := reg.CancelTask(taskID, ownerID)
+	if errCancel != nil || resCancel != "CANCELLED_SUCCESS" || statusCancel == nil {
+		t.Fatalf("Expected CANCELLED_SUCCESS for Alice, got res=%s, status=%v, err=%v", resCancel, statusCancel, errCancel)
+	}
+	if statusCancel.Status != "CANCELLED" {
+		t.Errorf("Expected status CANCELLED, got %s", statusCancel.Status)
+	}
+
+	// 5. Subsequent SetWithKey COMPLETED rejected
+	accepted, err := reg.SetWithKey(taskID, "COMPLETED", 100, "key.pdf", "", ownerID)
+	if err != nil || accepted {
+		t.Errorf("Expected SetWithKey COMPLETED to be rejected on CANCELLED task, got accepted=%v", accepted)
+	}
+
+	// 6. Repeated cancel is idempotent (TERMINAL_ALREADY)
+	resRepeat, _, errRepeat := reg.CancelTask(taskID, ownerID)
+	if errRepeat != nil || resRepeat != "TERMINAL_ALREADY" {
+		t.Errorf("Expected TERMINAL_ALREADY on repeated cancel, got res=%s, err=%v", resRepeat, errRepeat)
+	}
+}

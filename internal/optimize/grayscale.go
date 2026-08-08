@@ -3,15 +3,20 @@ package optimize
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	"pdfnest-backend/internal/process"
 	"time"
 )
 
-func ConvertToGrayscale(inputPath, outputPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+func ConvertToGrayscale(ctx context.Context, inputPath, outputPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	cmd := exec.CommandContext(ctx, "gs",
+	runner := process.Runner{GracePeriod: 500 * time.Millisecond}
+	output, err := runner.Run(
+		ctx,
+		10*time.Minute,
+		"gs",
 		"-sDEVICE=pdfwrite",
 		"-sColorConversionStrategy=Gray",
 		"-dProcessColorModel=/DeviceGray",
@@ -22,7 +27,7 @@ func ConvertToGrayscale(inputPath, outputPath string) error {
 		inputPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if err != nil {
 		return fmt.Errorf("ghostscript failed: %v, trace: %s", err, string(output))
 	}
 	return nil

@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
 	"strconv"
 	"strings"
@@ -73,7 +74,7 @@ if val and val ~= '' then
     local curStatus = current.status
     local newStatus = newRecord.status
 
-    if curStatus == 'COMPLETED' or curStatus == 'FAILED' then
+    if curStatus == 'COMPLETED' or curStatus == 'FAILED' or curStatus == 'CANCELLED' then
         if curStatus == newStatus then
             return 'REJECTED'
         end
@@ -108,7 +109,7 @@ end
 local data = cjson.decode(val)
 local curStatus = data.status
 
-if curStatus == 'COMPLETED' or curStatus == 'FAILED' then
+if curStatus == 'COMPLETED' or curStatus == 'FAILED' or curStatus == 'CANCELLED' then
     return cjson.encode({ result = "TERMINAL_ALREADY", payload = val })
 end
 
@@ -127,6 +128,37 @@ if (now - updatedAt) > maxStaleSeconds then
 end
 
 return cjson.encode({ result = "HEALTHY", payload = val })
+`
+
+const atomicCancelTaskLua = `
+local key = KEYS[1]
+local owner = ARGV[1]
+local now = tonumber(ARGV[2])
+local ttlSeconds = tonumber(ARGV[3]) or 3600
+
+local val = redis.call('GET', key)
+if not val or val == '' then
+    return cjson.encode({ result = "NOT_FOUND" })
+end
+
+local data = cjson.decode(val)
+local curStatus = data.status
+
+if data.ownerIdentity and data.ownerIdentity ~= '' and owner and owner ~= '' and data.ownerIdentity ~= owner then
+    return cjson.encode({ result = "UNAUTHORIZED", payload = val })
+end
+
+if curStatus == 'COMPLETED' or curStatus == 'FAILED' or curStatus == 'CANCELLED' then
+    return cjson.encode({ result = "TERMINAL_ALREADY", payload = val })
+end
+
+data.status = 'CANCELLED'
+data.error = 'Task processing cancelled by user.'
+data.updatedAt = now
+local newValStr = cjson.encode(data)
+redis.call('SET', key, newValStr, 'EX', ttlSeconds)
+
+return cjson.encode({ result = "CANCELLED_SUCCESS", payload = newValStr })
 `
 
 type staleLuaResult struct {
@@ -316,6 +348,52 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 	return nil
 }
 
+type cancelLuaResult struct {
+	Result  string `json:"result"`
+	Payload string `json:"payload"`
+}
+
+func (r *TaskRegistry) CancelTask(id string, ownerIdentity string) (string, *TaskStatus, error) {
+	client := r.getClient()
+	if client == nil {
+		return "ERROR", nil, errors.New("redis client not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+	now := time.Now().Unix()
+
+	res, err := client.Eval(ctx, atomicCancelTaskLua, []string{key}, ownerIdentity, now, int(TaskTTL.Seconds())).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "NOT_FOUND", nil, nil
+		}
+		return "ERROR", nil, fmt.Errorf("failed to cancel task in redis: %w", err)
+	}
+
+	valStr, ok := res.(string)
+	if !ok || valStr == "" {
+		return "NOT_FOUND", nil, nil
+	}
+
+	var luaRes cancelLuaResult
+	if err := json.Unmarshal([]byte(valStr), &luaRes); err != nil {
+		return "ERROR", nil, fmt.Errorf("failed to unmarshal cancel response: %w", err)
+	}
+
+	var status *TaskStatus
+	if luaRes.Payload != "" {
+		var s TaskStatus
+		if err := json.Unmarshal([]byte(luaRes.Payload), &s); err == nil && s.ID != "" {
+			status = &s
+		}
+	}
+
+	return luaRes.Result, status, nil
+}
+
 func getTaskProgress(id string) *TaskStatus {
 	task, err := Registry.Get(id)
 	if err != nil {
@@ -339,5 +417,34 @@ func handleGetTaskStatus(c *fiber.Ctx) error {
 	if task == nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Task not found"})
 	}
+	return c.JSON(task)
+}
+
+func handleCancelTask(c *fiber.Ctx) error {
+	id := c.Params("id")
+	requesterID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if requesterID == "" {
+		requesterID = c.IP()
+	}
+
+	result, task, err := Registry.CancelTask(id, requesterID)
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"code":    "TASK_STORAGE_UNAVAILABLE",
+			"message": "Task persistence service is temporarily unavailable.",
+		})
+	}
+
+	if result == "NOT_FOUND" {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Task not found"})
+	}
+
+	if result == "UNAUTHORIZED" {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"code":    "FORBIDDEN",
+			"message": "You are not authorized to cancel this task.",
+		})
+	}
+
 	return c.JSON(task)
 }

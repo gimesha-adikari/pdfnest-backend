@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/storage"
@@ -64,7 +65,31 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID)
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
+		taskCtx, taskCancel := context.WithCancel(context.Background())
+		defer taskCancel()
+
+		stopPoller := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopPoller:
+					return
+				case <-taskCtx.Done():
+					return
+				case <-ticker.C:
+					task, _ := tasks.Registry.Get(id)
+					if task != nil && task.Status == "CANCELLED" {
+						taskCancel()
+						return
+					}
+				}
+			}
+		}()
+
 		defer func() {
+			close(stopPoller)
 			// 1. CLEANUP R2 IMAGES
 			store, err := storage.Default()
 			if err == nil {
@@ -86,12 +111,25 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 			}
 		}()
 
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			return
+		}
+
 		tasks.Registry.Set(id, "PROCESSING", 30, "Downloading images from R2 and generating searchable PDF...", "")
 
 		outPath, err := ctrl.service.ImageToTextPDFFromR2(refs, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
-			tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			if taskCtx.Err() == nil {
+				tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
+			}
+			return
+		}
+
+		if taskCtx.Err() != nil {
+			_ = billing.Default.Release(reservationID)
+			_ = os.Remove(outPath)
 			return
 		}
 
