@@ -2,6 +2,7 @@ package uploads
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"mime/multipart"
 	"os"
@@ -12,6 +13,34 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+func saveHeader(c *fiber.Ctx, fh *multipart.FileHeader) (string, error) {
+	// Determine safe destination path inside the dedicated temp directory.
+	dir := temp.GetDir()
+	base := filepath.Base(fh.Filename)
+	filename := fmt.Sprintf("pdfnest-upload-%s-%s", uuid.New().String(), base)
+	destPath := filepath.Join(dir, filename)
+
+	src, err := fh.Open()
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(destPath)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return "", err
+	}
+	if err := dst.Sync(); err != nil {
+		return "", err
+	}
+	return destPath, nil
+}
 
 func Prepare() fiber.Handler {
 	return func(c *fiber.Ctx) error {
@@ -63,14 +92,4 @@ func Prepare() fiber.Handler {
 
 		return c.Next()
 	}
-}
-
-func saveHeader(c *fiber.Ctx, fh *multipart.FileHeader) (string, error) {
-	tempDir := temp.GetDir()
-	safeBasename := filepath.Base(fh.Filename)
-	target := filepath.Join(tempDir, fmt.Sprintf("pdfnest-upload-%s-%s", uuid.New().String(), safeBasename))
-	if err := c.SaveFile(fh, target); err != nil {
-		return "", err
-	}
-	return target, nil
 }

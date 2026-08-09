@@ -121,7 +121,15 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
+	// Determine user ID: prefer authenticated user ID, fallback to identity ID for guests.
+	var userID string
+	if uid, ok := c.Locals(identity.LocalUserIDKey).(string); ok && uid != "" {
+		userID = uid
+	} else if iid, ok := c.Locals(identity.LocalIdentityIDKey).(string); ok && iid != "" {
+		userID = iid
+	} else {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{Code: "IDENTITY_MISSING", Message: "Unable to determine user identity"})
+	}
 	lang := c.FormValue("lang", "eng")
 
 	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
@@ -168,7 +176,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		})
 	}
 
-	inputPath := filepath.Join(os.TempDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
+	inputPath := filepath.Join(temp.GetDir(), taskId+"-"+filepath.Base(upload.Header.Filename))
 	if err := copyFile(upload.Path, inputPath); err != nil {
 		_ = billing.Default.Release(reservation.ID)
 		idempotency.Release(c, nil)
@@ -321,7 +329,15 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
+	// Determine user ID: prefer authenticated user ID, fallback to identity ID for guests.
+	var userID string
+	if uid, ok := c.Locals(identity.LocalUserIDKey).(string); ok && uid != "" {
+		userID = uid
+	} else if iid, ok := c.Locals(identity.LocalIdentityIDKey).(string); ok && iid != "" {
+		userID = iid
+	} else {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{Code: "IDENTITY_MISSING", Message: "Unable to determine user identity"})
+	}
 	lang := c.FormValue("lang", "eng")
 
 	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
@@ -350,7 +366,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 	tempPaths := make([]string, 0, len(files))
 	for _, f := range files {
-		path := filepath.Join(os.TempDir(), uuid.New().String()+"-"+filepath.Base(f.Header.Filename))
+		path := filepath.Join(temp.GetDir(), uuid.New().String()+"-"+filepath.Base(f.Header.Filename))
 		if err := copyFile(f.Path, path); err == nil {
 			tempPaths = append(tempPaths, path)
 		}
