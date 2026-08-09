@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *ocrService) ExtractTextFromPDF(inputPath string, lang string) (string, error) {
+func (s *ocrService) ExtractTextFromPDF(ctx context.Context, inputPath string, lang string) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 	outputTextPath := filepath.Join(tempDir, "extracted-text-"+sessionID+".txt")
@@ -19,6 +20,7 @@ func (s *ocrService) ExtractTextFromPDF(inputPath string, lang string) (string, 
 	}
 
 	resp, err := postSingleFileToWorker(
+		ctx,
 		inputPath,
 		"file",
 		"/api/v1/ocr/extract-text",

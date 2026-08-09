@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -13,11 +14,15 @@ import (
 )
 
 func postSingleFileToWorker(
+	ctx context.Context,
 	inputPath string,
 	fieldName string,
 	route string,
 	fields map[string]string,
 ) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -46,7 +51,7 @@ func postSingleFileToWorker(
 		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, worker.GetWorkerURL()+route, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, &body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker request: %w", err)
 	}
@@ -62,11 +67,15 @@ func postSingleFileToWorker(
 }
 
 func postMultipleFilesToWorker(
+	ctx context.Context,
 	inputPaths []string,
 	fieldName string,
 	route string,
 	fields map[string]string,
 ) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
@@ -100,7 +109,7 @@ func postMultipleFilesToWorker(
 		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, worker.GetWorkerURL()+route, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, &body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker request: %w", err)
 	}

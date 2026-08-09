@@ -53,7 +53,7 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 
 	lang := c.FormValue("lang", "eng")
 
-	outputPath, err := ctrl.service.ExtractTextFromPDF(upload.Path, lang)
+	outputPath, err := ctrl.service.ExtractTextFromPDF(c.UserContext(), upload.Path, lang)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OCR_PROCESSING_FAILED",
@@ -102,7 +102,7 @@ func (ctrl *Controller) ProcessImageToTextPDF(c *fiber.Ctx) error {
 		temporaryImagePaths = append(temporaryImagePaths, f.Path)
 	}
 
-	outputPath, err := ctrl.service.ImageToTextPDF(temporaryImagePaths, lang)
+	outputPath, err := ctrl.service.ImageToTextPDF(c.UserContext(), temporaryImagePaths, lang)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "SEARCHABLE_PDF_COMPILATION_FAILED",
@@ -271,7 +271,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Running OCR and creating searchable text...", owner)
 
-		outPath, err := ctrl.service.ExtractTextFromPDF(srcPath, lang)
+		outPath, err := ctrl.service.ExtractTextFromPDF(taskCtx, srcPath, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 			if taskCtx.Err() == nil {
@@ -502,7 +502,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 
 		_, _ = tasks.Registry.SetWithKey(id, "PROCESSING", 35, "", "Scanning character grid topologies and building PDF layout layers...", owner)
 
-		outPath, err := ctrl.service.ImageToTextPDF(imgPaths, lang)
+		outPath, err := ctrl.service.ImageToTextPDF(taskCtx, imgPaths, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 			if taskCtx.Err() == nil {

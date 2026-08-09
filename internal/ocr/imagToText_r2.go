@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *ocrService) ImageToTextPDFFromR2(files []R2ImageRef, lang string) (string, error) {
+func (s *ocrService) ImageToTextPDFFromR2(ctx context.Context, files []R2ImageRef, lang string) (string, error) {
 	if len(files) == 0 {
 		return "", fmt.Errorf("no images provided")
 	}
@@ -23,7 +24,7 @@ func (s *ocrService) ImageToTextPDFFromR2(files []R2ImageRef, lang string) (stri
 	tempDir := os.TempDir()
 	outputPDFPath := filepath.Join(tempDir, "ocr-searchable-"+uuid.New().String()+".pdf")
 
-	resp, err := postJSONToWorker("/api/v1/ocr/to-text-pdf-r2", map[string]any{
+	resp, err := postJSONToWorker(ctx, "/api/v1/ocr/to-text-pdf-r2", map[string]any{
 		"lang":  lang,
 		"files": files,
 	})

@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *ocrService) ImageToTextPDF(imagePaths []string, lang string) (string, error) {
+func (s *ocrService) ImageToTextPDF(ctx context.Context, imagePaths []string, lang string) (string, error) {
 	if len(imagePaths) == 0 {
 		return "", fmt.Errorf("no images provided")
 	}
@@ -22,6 +23,7 @@ func (s *ocrService) ImageToTextPDF(imagePaths []string, lang string) (string, e
 	}
 
 	resp, err := postMultipleFilesToWorker(
+		ctx,
 		imagePaths,
 		"images",
 		"/api/v1/ocr/to-text-pdf",

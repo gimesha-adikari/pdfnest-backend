@@ -118,7 +118,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 
 		tasks.Registry.Set(id, "PROCESSING", 30, "Downloading images from R2 and generating searchable PDF...", "")
 
-		outPath, err := ctrl.service.ImageToTextPDFFromR2(refs, lang)
+		outPath, err := ctrl.service.ImageToTextPDFFromR2(taskCtx, refs, lang)
 		if err != nil {
 			_ = billing.Default.Release(reservationID)
 			if taskCtx.Err() == nil {
