@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -32,6 +33,7 @@ type TaskStatus struct {
 	ResultURL     string `json:"resultUrl,omitempty"`
 	OwnerIdentity string `json:"ownerIdentity,omitempty"`
 	ReservationID string `json:"reservationId,omitempty"`
+	DownloadToken string `json:"downloadToken,omitempty"`
 	Error         string `json:"error,omitempty"`
 	UpdatedAt     int64  `json:"updatedAt,omitempty"`
 }
@@ -243,13 +245,21 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 
 	var resID string
+	var dlToken string
 	if len(reservationID) > 0 && reservationID[0] != "" {
 		resID = reservationID[0]
-	} else if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
+	}
+	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
 		var existingTask TaskStatus
-		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil && existingTask.ReservationID != "" {
-			resID = existingTask.ReservationID
+		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
+			if resID == "" {
+				resID = existingTask.ReservationID
+			}
+			dlToken = existingTask.DownloadToken
 		}
+	}
+	if dlToken == "" {
+		dlToken = uuid.New().String()
 	}
 
 	task := &TaskStatus{
@@ -261,6 +271,7 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 		UpdatedAt:     time.Now().Unix(),
 		OwnerIdentity: ownerIdentity,
 		ReservationID: resID,
+		DownloadToken: dlToken,
 	}
 
 	if resultKey != "" {
@@ -305,15 +316,20 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 	var ownerIdentity string
 	var reservationID string
+	var dlToken string
 	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
 		var existingTask TaskStatus
 		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
 			ownerIdentity = existingTask.OwnerIdentity
 			reservationID = existingTask.ReservationID
+			dlToken = existingTask.DownloadToken
 			if resultKey == "" && existingTask.ResultKey != "" {
 				resultKey = existingTask.ResultKey
 			}
 		}
+	}
+	if dlToken == "" {
+		dlToken = uuid.New().String()
 	}
 
 	task := &TaskStatus{
@@ -326,6 +342,7 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 		UpdatedAt:     time.Now().Unix(),
 		OwnerIdentity: ownerIdentity,
 		ReservationID: reservationID,
+		DownloadToken: dlToken,
 	}
 
 	if resultKey != "" && task.ResultURL == "" {

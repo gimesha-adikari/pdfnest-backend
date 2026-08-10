@@ -18,16 +18,24 @@ type Store struct {
 	prefix string
 }
 
+var DefaultStore *Store
+
 func NewStore(rdb *redis.Client, ttl time.Duration) *Store {
 	if ttl <= 0 {
 		ttl = 90 * 24 * time.Hour
 	}
 
-	return &Store{
+	s := &Store{
 		rdb:    rdb,
 		ttl:    ttl,
 		prefix: "platen:guest:",
 	}
+	DefaultStore = s
+	return s
+}
+
+func GetStore() *Store {
+	return DefaultStore
 }
 
 func (s *Store) guestKey(id string) string {
@@ -62,6 +70,9 @@ func (s *Store) Save(ctx context.Context, g *GuestRecord) error {
 }
 
 func (s *Store) LoadByID(ctx context.Context, id string) (*GuestRecord, error) {
+	if s == nil || s.rdb == nil {
+		return nil, errors.New("redis client not configured")
+	}
 	raw, err := s.rdb.Get(ctx, s.guestKey(id)).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -81,6 +92,9 @@ func (s *Store) LoadByID(ctx context.Context, id string) (*GuestRecord, error) {
 func (s *Store) LoadByFingerprint(ctx context.Context, fpHash string) (*GuestRecord, error) {
 	if fpHash == "" {
 		return nil, ErrNotFound
+	}
+	if s == nil || s.rdb == nil {
+		return nil, errors.New("redis client not configured")
 	}
 
 	id, err := s.rdb.Get(ctx, s.fpKey(fpHash)).Result()

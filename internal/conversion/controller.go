@@ -303,13 +303,69 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 	return c.SendFile(outputPath)
 }
 
-func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
+type asyncBillingLease struct {
+	reservationID string
+	settle        func()
+	commit        func() error
+}
 
-	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
-	if ownerIdentity == "" {
-		ownerIdentity = c.IP()
+func reserveAsyncBilling(
+	c *fiber.Ctx,
+	identityType string,
+	identityID string,
+	tool billing.Tool,
+	pages int,
+	images int,
+	path string,
+	taskID string,
+) (*asyncBillingLease, error) {
+	if identityType == string(identity.TypeGuest) {
+		if billing.GuestQuota == nil {
+			return nil, fmt.Errorf("guest quota store not configured")
+		}
+
+		reserveCtx := identity.RequestContext(c)
+		reservation, err := billing.GuestQuota.Reserve(reserveCtx, identityID, tool, pages, images, path)
+		if err != nil {
+			return nil, err
+		}
+
+		lease := &asyncBillingLease{reservationID: reservation.ID}
+		lease.settle = func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = billing.GuestQuota.Release(ctx, lease.reservationID)
+		}
+		lease.commit = func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			return billing.GuestQuota.Commit(ctx, lease.reservationID)
+		}
+		return lease, nil
 	}
+
+	reservation, err := billing.Default.ReserveWithTaskID(identityID, tool, pages, images, path, taskID)
+	if err != nil {
+		return nil, err
+	}
+
+	lease := &asyncBillingLease{reservationID: reservation.ID}
+	lease.settle = func() {
+		_ = billing.Default.Release(lease.reservationID)
+	}
+	lease.commit = func() error {
+		return billing.Default.Commit(lease.reservationID)
+	}
+	return lease, nil
+}
+
+func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
+	identityType, _ := c.Locals(identity.LocalIdentityType).(string)
+	identityID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if identityID == "" {
+		identityID = c.IP()
+	}
+	ownerIdentity := identityID
 
 	targetURL := c.FormValue("url")
 	if targetURL == "" {
@@ -345,7 +401,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	reservation, err := billing.Default.ReserveWithTaskID(userID, billing.HTMLToPDF, 0, 0, c.Path(), taskId)
+	lease, err := reserveAsyncBilling(c, identityType, identityID, billing.HTMLToPDF, 0, 0, c.Path(), taskId)
 	if err != nil {
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
@@ -353,8 +409,10 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	reservationID := lease.reservationID
+
 	if diskErr := disk.CheckAvailableSpace(temp.GetDir(), 100*1024*1024); diskErr != nil {
-		_ = billing.Default.Release(reservation.ID)
+		lease.settle()
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusInsufficientStorage).JSON(fiber.Map{
 			"code":    "INSUFFICIENT_STORAGE",
@@ -362,9 +420,9 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservation.ID)
+	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservationID)
 	if err != nil || !okCreated {
-		_ = billing.Default.Release(reservation.ID)
+		lease.settle()
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
 	}
@@ -397,17 +455,29 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		var localOutPath string
 		var releaseToken func()
+		billingSettled := false
+
+		releaseBilling := func() {
+			if billingSettled {
+				return
+			}
+			billingSettled = true
+			lease.settle()
+		}
 
 		defer func() {
 			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
+			if !billingSettled {
+				releaseBilling()
+			}
 			if localOutPath != "" {
 				_ = os.Remove(localOutPath)
 			}
 			if r := recover(); r != nil {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", fmt.Sprintf("Headless engine pipeline fault encountered: %v", r), owner)
 			}
 		}()
@@ -415,7 +485,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
 			if taskCtx.Err() != nil {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				return
 			}
 			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
@@ -423,7 +493,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 			cancel()
 
 			if acqErr != nil {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Execution capacity service unavailable.", owner)
 				return
 			}
@@ -436,13 +506,13 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		}
 
 		if !acquired {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Server capacity reached. Task execution timed out waiting for capacity.", owner)
 			return
 		}
 
 		if taskCtx.Err() != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			return
 		}
 
@@ -450,7 +520,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		outPath, err := ctrl.service.HtmlToPdf(taskCtx, target, printOpts)
 		if err != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			if taskCtx.Err() == nil {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
 			}
@@ -459,7 +529,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		localOutPath = outPath
 
 		if taskCtx.Err() != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			return
 		}
 
@@ -469,49 +539,54 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 
 		if r2Err != nil || r2Store == nil {
 			if isProd {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
 				return
 			}
-			if err := billing.Default.Commit(reservationID); err != nil {
-				_ = billing.Default.Release(reservationID)
+			if err := lease.commit(); err != nil {
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 				return
 			}
+			billingSettled = true
 			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
 			return
 		}
 
 		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
-		if err := billing.Default.Commit(reservationID); err != nil {
-			_ = billing.Default.Release(reservationID)
+		if err := lease.commit(); err != nil {
+			_ = os.Remove(outPath)
+			releaseBilling()
 			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
 			return
 		}
 
+		billingSettled = true
 		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
 		if !accepted {
 			_ = r2Store.DeleteObject(context.Background(), r2Key)
 			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
 		}
-	}(taskId, targetURL, opts, reservation.ID, ownerIdentity)
+	}(taskId, targetURL, opts, reservationID, ownerIdentity)
 
-	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"taskId": taskId,
+	})
 }
 
 func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
-	userID := c.Locals("user_id").(string)
-
-	ownerIdentity, _ := c.Locals(identity.LocalIdentityIDKey).(string)
-	if ownerIdentity == "" {
-		ownerIdentity = c.IP()
+	identityType, _ := c.Locals(identity.LocalIdentityType).(string)
+	identityID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if identityID == "" {
+		identityID = c.IP()
 	}
+	ownerIdentity := identityID
 
 	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
@@ -534,14 +609,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 	}
 
-	reservation, err := billing.Default.ReserveWithTaskID(
-		userID,
-		billing.ConvertMarkdownToPDF,
-		0,
-		0,
-		c.Path(),
-		taskId,
-	)
+	lease, err := reserveAsyncBilling(c, identityType, identityID, billing.ConvertMarkdownToPDF, 0, 0, c.Path(), taskId)
 	if err != nil {
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
@@ -549,19 +617,21 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		})
 	}
 
+	reservationID := lease.reservationID
+
 	tempDir := os.TempDir()
 	inputPath := filepath.Join(tempDir, taskId+"-"+filepath.Base(upload.Header.Filename))
 	if err := copyFile(upload.Path, inputPath); err != nil {
-		_ = billing.Default.Release(reservation.ID)
+		lease.settle()
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Disk caching allocation error",
 		})
 	}
 
-	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity, reservation.ID)
+	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity, reservationID)
 	if err != nil || !okCreated {
-		_ = billing.Default.Release(reservation.ID)
+		lease.settle()
 		_ = os.Remove(inputPath)
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
@@ -595,20 +665,30 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		var localOutPath string
 		var releaseToken func()
+		billingSettled := false
+
+		releaseBilling := func() {
+			if billingSettled {
+				return
+			}
+			billingSettled = true
+			lease.settle()
+		}
 
 		defer func() {
 			close(stopPoller)
 			if releaseToken != nil {
 				releaseToken()
 			}
+			if !billingSettled {
+				releaseBilling()
+			}
 			_ = os.Remove(srcPath)
 			if localOutPath != "" {
 				_ = os.Remove(localOutPath)
 			}
-
 			if r := recover(); r != nil {
-				_ = billing.Default.Release(reservationID)
-
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Text compilation parser structural error.", owner)
 			}
 		}()
@@ -616,7 +696,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		var acquired bool
 		for attempt := 0; attempt < 30; attempt++ {
 			if taskCtx.Err() != nil {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				return
 			}
 			acqCtx, cancel := context.WithTimeout(taskCtx, 5*time.Second)
@@ -624,7 +704,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 			cancel()
 
 			if acqErr != nil {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Execution capacity service unavailable.", owner)
 				return
 			}
@@ -637,13 +717,13 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		}
 
 		if !acquired {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Server capacity reached. Task execution timed out waiting for capacity.", owner)
 			return
 		}
 
 		if taskCtx.Err() != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			return
 		}
 
@@ -651,8 +731,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		outPath, err := ctrl.service.MarkdownToPdf(taskCtx, srcPath, printOpts)
 		if err != nil {
-			_ = billing.Default.Release(reservationID)
-
+			releaseBilling()
 			if taskCtx.Err() == nil {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", err.Error(), owner)
 			}
@@ -661,7 +740,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		localOutPath = outPath
 
 		if taskCtx.Err() != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			return
 		}
 
@@ -671,41 +750,41 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		if r2Err != nil || r2Store == nil {
 			if isProd {
-				_ = billing.Default.Release(reservationID)
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
 				return
 			}
-			if err := billing.Default.Commit(reservationID); err != nil {
-				_ = billing.Default.Release(reservationID)
+			if err := lease.commit(); err != nil {
+				releaseBilling()
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 				return
 			}
+			billingSettled = true
 			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
 			return
 		}
 
 		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
 			return
 		}
 
-		if err := billing.Default.Commit(reservationID); err != nil {
+		if err := lease.commit(); err != nil {
 			_ = os.Remove(outPath)
-			_ = billing.Default.Release(reservationID)
+			releaseBilling()
 			_ = r2Store.DeleteObject(context.Background(), r2Key)
-
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
 			return
 		}
 
+		billingSettled = true
 		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
 		if !accepted {
 			_ = r2Store.DeleteObject(context.Background(), r2Key)
 			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
 		}
-
-	}(taskId, inputPath, opts, reservation.ID, ownerIdentity)
+	}(taskId, inputPath, opts, reservationID, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"taskId": taskId,

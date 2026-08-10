@@ -43,10 +43,13 @@ func Resolve(store *Store) fiber.Handler {
 		now := time.Now()
 
 		fpHash := fingerprintHash(c)
-		uaHash := hashString(c.Get("User-Agent"))
-		ipHash := hashString(c.IP())
+		uaHash := HashString(c.Get("User-Agent"))
+		ipHash := HashString(c.IP())
 
 		guestID := strings.TrimSpace(c.Cookies(CookieGuestID))
+		if guestID == "" {
+			guestID = strings.TrimSpace(c.Get("X-Platen-Guest"))
+		}
 		var guest *GuestRecord
 
 		if guestID != "" {
@@ -107,6 +110,7 @@ func Resolve(store *Store) fiber.Handler {
 		c.Locals(LocalIdentityKey, ident)
 		c.Locals(LocalIdentityIDKey, ident.ID)
 		c.Locals(LocalIdentityType, string(ident.Type))
+		c.Locals(LocalUserIDKey, ident.ID)
 		return c.Next()
 	}
 }
@@ -160,10 +164,10 @@ func fingerprintHash(c *fiber.Ctx) string {
 	ip := strings.TrimSpace(c.IP())
 
 	base := fp + "|" + ua + "|" + ip
-	return hashString(base)
+	return HashString(base)
 }
 
-func hashString(s string) string {
+func HashString(s string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(s)))
 	return hex.EncodeToString(sum[:])
 }

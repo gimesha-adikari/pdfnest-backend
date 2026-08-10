@@ -565,7 +565,10 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
-	var userID = c.Locals("user_id").(string)
+	var userID string
+	if uid, ok := c.Locals("user_id").(string); ok {
+		userID = uid
+	}
 
 	pageSelection := c.FormValue("pages")
 	if pageSelection == "" {

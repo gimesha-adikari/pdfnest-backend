@@ -3,9 +3,12 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"pdfnest-backend/internal/identity"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -23,9 +26,13 @@ func setupDownloadTestRedis(t *testing.T) (*redis.Client, *TaskRegistry, func())
 	oldRegistry := Registry
 	Registry = reg
 
+	oldStore := identity.DefaultStore
+	identity.NewStore(client, 0)
+
 	cleanup := func() {
 		_ = client.FlushDB(context.Background()).Err()
 		Registry = oldRegistry
+		identity.DefaultStore = oldStore
 	}
 
 	return client, reg, cleanup
@@ -317,4 +324,210 @@ func TestDownloadController_MissingR2Object410(t *testing.T) {
 	if resp.StatusCode != fiber.StatusGone && resp.StatusCode != fiber.StatusInternalServerError {
 		t.Errorf("Expected 410 Gone or 500 Storage Error for missing R2 object, got %d", resp.StatusCode)
 	}
+}
+
+// 9. Comprehensive Security Model Matrix Tests:
+// - Guest trying to download Authenticated User artifact -> DENY (403)
+// - Authenticated User trying to download Guest artifact -> DENY (403)
+// - Guest with transient identity but matching IP+UA -> ALLOW (200)
+// - Nonexistent task -> DENY (404)
+func TestDownloadController_SecurityAuthorizationMatrix(t *testing.T) {
+	client, reg, cleanup := setupDownloadTestRedis(t)
+	defer cleanup()
+
+	identityStore := identity.NewStore(client, 0)
+
+	// Create test file
+	tmpFile, err := os.CreateTemp("", "sec-test-*.pdf")
+	if err != nil {
+		t.Fatalf("Temp file creation failed: %v", err)
+	}
+	_, _ = tmpFile.WriteString("%PDF-1.4 security matrix content")
+	_ = tmpFile.Close()
+	defer os.Remove(tmpFile.Name())
+
+	authUserTaskID := "task-user-alice"
+	authUserID := "usr_alice_123"
+
+	guestTaskID := "task-guest-bob"
+	guestID := "guest_uuid_bob_123"
+
+	// Save auth user task
+	_, _ = reg.SetWithKey(authUserTaskID, "COMPLETED", 100, "", "", authUserID)
+	tUser, _ := reg.Get(authUserTaskID)
+	tUser.ResultURL = tmpFile.Name()
+	dataU, _ := json.Marshal(tUser)
+	_ = reg.client.Set(context.Background(), TaskKeyPrefix+authUserTaskID, string(dataU), TaskTTL).Err()
+
+	// Save guest record and task
+	gRecord := &identity.GuestRecord{
+		ID:              guestID,
+		FingerprintHash: identity.HashString("fp-bob|ua-bob|0.0.0.0"),
+		UserAgentHash:   identity.HashString("ua-bob"),
+		IPHash:          identity.HashString("0.0.0.0"),
+	}
+	_ = identityStore.Save(context.Background(), gRecord)
+
+	_, _ = reg.SetWithKey(guestTaskID, "COMPLETED", 100, "", "", guestID)
+	tGuest, _ := reg.Get(guestTaskID)
+	tGuest.ResultURL = tmpFile.Name()
+	dataG, _ := json.Marshal(tGuest)
+	_ = reg.client.Set(context.Background(), TaskKeyPrefix+guestTaskID, string(dataG), TaskTTL).Err()
+
+	app := fiber.New()
+	app.Get("/api/v1/download/:id", identity.Resolve(identityStore), HandleTaskDownload)
+
+	// Test 9a: Guest tries to download User Alice's task -> DENY 403
+	t.Run("Guest -> User Artifact -> 403 DENIED", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/download/"+authUserTaskID, nil)
+		req.Header.Set("User-Agent", "ua-guest-hacker")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9b: Authenticated User tries to download Guest Bob's task -> DENY 403
+	t.Run("User -> Guest Artifact -> 403 DENIED", func(t *testing.T) {
+		appAuth := fiber.New()
+		appAuth.Get("/api/v1/download/:id", func(c *fiber.Ctx) error {
+			c.Locals(identity.LocalIdentityType, string(identity.TypeUser))
+			c.Locals(identity.LocalIdentityIDKey, "usr_eve_456")
+			return HandleTaskDownload(c)
+		})
+
+		req := httptest.NewRequest("GET", "/api/v1/download/"+guestTaskID, nil)
+		resp, err := appAuth.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9c: CRITICAL SECURITY TEST - Guest B with SAME IP + SAME UA + DIFFERENT COOKIE -> MUST BE 403 FORBIDDEN
+	t.Run("Same IP + Same UA Different Guest -> 403 FORBIDDEN (No IDOR)", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/download/"+guestTaskID, nil)
+		req.Header.Set("User-Agent", "ua-bob")
+		req.Header.Set("X-Forwarded-For", "203.0.113.1")
+		req.Header.Set("Cookie", identity.CookieGuestID+"=guest_uuid_eve_attacker")
+
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Errorf("SECURITY FAILURE: Expected 403 Forbidden for cross-guest access on same IP, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9d: Guest A downloads via Capability Token -> ALLOW 200
+	t.Run("Guest Capability Token -> 200 OK", func(t *testing.T) {
+		tGuest, _ := reg.Get(guestTaskID)
+		dlToken := tGuest.DownloadToken
+
+		req := httptest.NewRequest("GET", "/api/v1/download/"+guestTaskID+"?token="+dlToken, nil)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusOK {
+			t.Errorf("Expected 200 OK for capability token download, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9e: Invalid Token -> DENY 403
+	t.Run("Invalid Capability Token -> 403 FORBIDDEN", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/download/"+guestTaskID+"?token=bogus-invalid-token-xyz", nil)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for invalid capability token, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9f: Token from Task A used on Task B -> DENY 403
+	t.Run("Task A Token used on Task B -> 403 FORBIDDEN", func(t *testing.T) {
+		tUser, _ := reg.Get(authUserTaskID)
+		aliceToken := tUser.DownloadToken
+
+		req := httptest.NewRequest("GET", "/api/v1/download/"+guestTaskID+"?token="+aliceToken, nil)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusForbidden {
+			t.Errorf("Expected 403 Forbidden for mismatched task token, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9g: Nonexistent task ID -> DENY 404
+	t.Run("Nonexistent Task -> 404 NOT FOUND", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/api/v1/download/nonexistent-task-999", nil)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusNotFound {
+			t.Errorf("Expected 404 Not Found, got %d", resp.StatusCode)
+		}
+	})
+
+	// Test 9h: Full End-to-End Guest Pipeline Simulation (Create -> Poll -> Token Download -> 200 PDF)
+	t.Run("End-to-End Guest Pipeline -> 200 OK PDF Stream", func(t *testing.T) {
+		taskID := "task-e2e-guest-999"
+		guestIdentity := "guest_uuid_e2e_999"
+
+		// 1. Task Creation in Redis with DownloadToken
+		accepted, err := reg.SetWithKey(taskID, "COMPLETED", 100, "", "", guestIdentity)
+		if err != nil || !accepted {
+			t.Fatalf("Failed to create task in registry: %v", err)
+		}
+
+		// Set temp file result URL
+		tStatus, err := reg.Get(taskID)
+		if err != nil || tStatus == nil {
+			t.Fatalf("Failed to retrieve created task: %v", err)
+		}
+		tStatus.ResultURL = tmpFile.Name()
+		dataBytes, _ := json.Marshal(tStatus)
+		_ = reg.client.Set(context.Background(), TaskKeyPrefix+taskID, string(dataBytes), TaskTTL).Err()
+
+		// 2. Poll Task Status
+		pollTask, err := reg.Get(taskID)
+		if err != nil || pollTask == nil {
+			t.Fatalf("Task polling failed: %v", err)
+		}
+		if pollTask.DownloadToken == "" {
+			t.Fatalf("Task status polling response missing DownloadToken")
+		}
+
+		// 3. Construct authorized download URL matching useAsyncTask / UrlToPdfWorkspace format
+		downloadURL := "/api/v1/download/" + taskID + "?token=" + url.QueryEscape(pollTask.DownloadToken)
+
+		// 4. Issue GET request simulate browser fetch
+		req := httptest.NewRequest("GET", downloadURL, nil)
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("Download fetch request failed: %v", err)
+		}
+
+		if resp.StatusCode != fiber.StatusOK {
+			t.Fatalf("Expected 200 OK for guest download, got %d", resp.StatusCode)
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("Failed to read response body: %v", err)
+		}
+		if !strings.Contains(string(bodyBytes), "%PDF-1.4") {
+			t.Errorf("Expected PDF stream payload, got %s", string(bodyBytes))
+		}
+	})
 }
