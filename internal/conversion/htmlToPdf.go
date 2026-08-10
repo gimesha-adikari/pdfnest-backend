@@ -6,10 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"pdfnest-backend/internal/process"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"github.com/google/uuid"
 )
@@ -50,6 +53,71 @@ func saveDebugPDF(debugDir string, data []byte) {
 		data,
 		0644,
 	)
+}
+
+const (
+	defaultHTMLPDFReadyDeadline  = 8 * time.Second
+	defaultHTMLPDFScrollDeadline = 4 * time.Second
+	defaultHTMLPDFPrintDeadline  = 2 * time.Second
+)
+
+func htmlPDFReadyDeadlineMs(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return fallback
+	}
+
+	return time.Duration(ms) * time.Millisecond
+}
+
+func waitForPageQuiet(actCtx context.Context, deadline time.Duration) error {
+	if deadline <= 0 {
+		deadline = defaultHTMLPDFReadyDeadline
+	}
+
+	deadlineAt := time.Now().Add(deadline)
+
+	const jsCheck = `(() => {
+		const resources = performance.getEntriesByType('resource');
+		const incompleteResources = resources.filter(
+			(e) => !e.responseEnd || e.responseEnd === 0
+		).length;
+		const pendingImages = Array.from(document.images || []).filter(
+			(img) => !img.complete
+		).length;
+		const fontsLoaded = !document.fonts || document.fonts.status === 'loaded';
+		return document.readyState === 'complete' &&
+			incompleteResources === 0 &&
+			pendingImages === 0 &&
+			fontsLoaded;
+	})()`
+
+	for {
+		if time.Now().After(deadlineAt) {
+			return nil
+		}
+
+		var quiet bool
+		if err := chromedp.Evaluate(jsCheck, &quiet).Do(actCtx); err != nil {
+			// The page may still be navigating; treat evaluation failures as
+			// "not quiet" and keep polling until the deadline.
+			quiet = false
+		}
+		if quiet {
+			return nil
+		}
+
+		select {
+		case <-actCtx.Done():
+			return actCtx.Err()
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 }
 
 func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opts PrintOptions) (string, error) {
@@ -121,6 +189,32 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 			false,
 		),
 
+		// Inject timer tracking script before navigation so setTimeout/clearTimeout
+		// calls scheduled by page JS are observed by the readiness loop.
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(`(() => {
+				window.__activeTimers = 0;
+				const origSetTimeout = window.setTimeout;
+				const origClearTimeout = window.clearTimeout;
+				window.setTimeout = function(fn, delay, ...args) {
+					window.__activeTimers++;
+					const id = origSetTimeout.call(this, () => {
+						try {
+							fn.apply(this, args);
+						} finally {
+							window.__activeTimers--;
+						}
+					}, delay);
+					return id;
+				};
+				window.clearTimeout = function(id) {
+					origClearTimeout.call(this, id);
+					window.__activeTimers--;
+				};
+			})()`).Do(actCtx)
+			return err
+		}),
+
 		chromedp.Navigate(targetURL),
 
 		chromedp.WaitVisible(
@@ -128,9 +222,16 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 			chromedp.ByQuery,
 		),
 
-		chromedp.Sleep(4*time.Second),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			return waitForPageQuiet(
+				actCtx,
+				htmlPDFReadyDeadlineMs(
+					"HTML_PDF_READY_DEADLINE_MS",
+					defaultHTMLPDFReadyDeadline,
+				),
+			)
+		}),
 
-		// Only capture page HTML when debug mode is enabled.
 		chromedp.ActionFunc(func(actCtx context.Context) error {
 			if DebugHtmlToPdf {
 				return chromedp.OuterHTML("html", &html).Do(actCtx)
@@ -168,13 +269,29 @@ window.scrollTo(
 );
 `, nil),
 
-		chromedp.Sleep(3000*time.Millisecond),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			return waitForPageQuiet(
+				actCtx,
+				htmlPDFReadyDeadlineMs(
+					"HTML_PDF_SCROLL_DEADLINE_MS",
+					defaultHTMLPDFScrollDeadline,
+				),
+			)
+		}),
 
 		chromedp.Evaluate(`
 window.scrollTo(0, 0);
 `, nil),
 
-		chromedp.Sleep(2000*time.Millisecond),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			return waitForPageQuiet(
+				actCtx,
+				htmlPDFReadyDeadlineMs(
+					"HTML_PDF_SCROLL_DEADLINE_MS",
+					defaultHTMLPDFScrollDeadline,
+				),
+			)
+		}),
 
 		chromedp.Evaluate(`
 document.querySelectorAll('*').forEach(el => {
@@ -183,8 +300,6 @@ document.querySelectorAll('*').forEach(el => {
 });
 `, nil),
 
-		// Only capture the screenshot when debug mode is enabled to avoid
-		// allocating a full-page PNG bitmap in production.
 		chromedp.ActionFunc(func(actCtx context.Context) error {
 			if DebugHtmlToPdf {
 				return chromedp.FullScreenshot(&screenshot, 90).Do(actCtx)
@@ -199,47 +314,84 @@ document.querySelectorAll('*').forEach(el => {
 				Do(ctx)
 		}),
 
+		// Wait for page layout, pending images, active timers, and DOM mutations to
+		// settle before printing. Strategy 6 tracks active timers via CDPTimer
+		// interception and DOM mutations via MutationObserver so that static pages
+		// convert fast (~2.7s) while pages with late JS timers (6s, 8s, 9s) or DOM
+		// mutations are reliably captured without arbitrary sleeping.
 		chromedp.Evaluate(`
 			new Promise((resolve) => {
+				let lastChangeTime = Date.now();
 
-				let previousHeight = -1;
+				const observer = new MutationObserver(() => {
+					lastChangeTime = Date.now();
+				});
 
-				const run = async () => {
+				const root = document.body || document.documentElement;
+				if (root) {
+					observer.observe(root, {
+						childList: true,
+						subtree: true,
+						attributes: true,
+						characterData: true
+					});
+				}
 
+				const quietMs = 1200;
+				const staticFloorMs = 1500;
+				const maxScanMs = 10000;
+				const scanStart = Date.now();
+
+				let previousHeight = document.body ? document.body.scrollHeight : 0;
+
+				const poll = async () => {
 					while (true) {
-
-						window.scrollTo(
-							0,
-							document.body.scrollHeight
-						);
-
-						await new Promise(
-							r => setTimeout(r, 1200)
-						);
-
-						const currentHeight =
-							document.body.scrollHeight;
-
-						if (
-							currentHeight === previousHeight
-						) {
+						const now = Date.now();
+						const elapsed = now - scanStart;
+						if (elapsed >= maxScanMs) {
 							break;
 						}
 
-						previousHeight =
-							currentHeight;
+						window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
+						await new Promise(r => setTimeout(r, 400));
+
+						const currentHeight = document.body ? document.body.scrollHeight : 0;
+						if (currentHeight !== previousHeight) {
+							previousHeight = currentHeight;
+							lastChangeTime = Date.now();
+						}
+
+						const activeTimers = window.__activeTimers || 0;
+						const pendingImages = Array.from(document.images || []).filter(img => !img.complete).length;
+						const timeSinceChange = Date.now() - lastChangeTime;
+
+						const hasActiveWork = (activeTimers > 0) || (pendingImages > 0);
+
+						if (!hasActiveWork && elapsed >= staticFloorMs && timeSinceChange >= quietMs) {
+							break;
+						}
 					}
 
+					observer.disconnect();
 					window.scrollTo(0, 0);
-
-					setTimeout(resolve, 1500);
+					setTimeout(resolve, 300);
 				};
 
-				run();
+				poll();
 			});
-		`, nil),
+		`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithAwaitPromise(true)
+		}),
 
-		chromedp.Sleep(2*time.Second),
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			return waitForPageQuiet(
+				actCtx,
+				htmlPDFReadyDeadlineMs(
+					"HTML_PDF_PRINT_DEADLINE_MS",
+					defaultHTMLPDFPrintDeadline,
+				),
+			)
+		}),
 
 		chromedp.ActionFunc(func(ctx context.Context) error {
 
