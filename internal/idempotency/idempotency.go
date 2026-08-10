@@ -21,12 +21,13 @@ import (
 )
 
 const (
-	ProcessingTTL = 15 * time.Minute // 900 seconds safe lock TTL
-	CreatedTTL    = 24 * time.Hour   // 86400 seconds task ID TTL
+	// The reservation expires if admission does not create a task.
+	ProcessingTTL = 15 * time.Minute
+	CreatedTTL    = 24 * time.Hour
 )
 
 type Record struct {
-	State         string `json:"state"` // "PROCESSING" or "CREATED"
+	State         string `json:"state"`
 	TaskID        string `json:"taskId,omitempty"`
 	Fingerprint   string `json:"fingerprint"`
 	CreatedAt     int64  `json:"createdAt"`

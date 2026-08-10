@@ -21,7 +21,7 @@ func (s *ConversionService) OfficeToPdf(ctx context.Context, inputPath string) (
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to build office sandbox directory: %w", err)
 	}
-	defer os.RemoveAll(workDir) // cleanup our work folder sandbox
+	defer os.RemoveAll(workDir)
 
 	if ctx == nil {
 		ctx = context.Background()

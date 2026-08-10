@@ -27,7 +27,6 @@ type Box struct {
 	Color  string  `json:"color,omitempty"`
 }
 
-// HighlightBox Keep separate names so you do not have to touch old call sites too much.
 type HighlightBox = Box
 type UnderlineBox = Box
 type StrikeoutBox = Box

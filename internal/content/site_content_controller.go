@@ -14,8 +14,6 @@ func NewController() *Controller {
 	return &Controller{}
 }
 
-// --- HOME PAGE CONTROLLERS ---
-
 func (ctrl *Controller) GetHomePageContent(c *fiber.Ctx) error {
 	var content models.HomePageContent
 	if err := config.DB.First(&content, 1).Error; err != nil {
@@ -30,7 +28,8 @@ func (ctrl *Controller) UpdateHomePageContent(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "malformed structural payload data"})
 	}
 
-	payload.ID = 1 // Protect to enforce updating record 1 exclusively
+	// Home content is a singleton; updates must not create another record.
+	payload.ID = 1
 	payload.UpdatedAt = time.Now()
 
 	if err := config.DB.Save(&payload).Error; err != nil {
@@ -38,8 +37,6 @@ func (ctrl *Controller) UpdateHomePageContent(c *fiber.Ctx) error {
 	}
 	return c.JSON(payload)
 }
-
-// --- SUBSCRIBE PAGE CONTROLLERS ---
 
 func (ctrl *Controller) GetSubscribePageContent(c *fiber.Ctx) error {
 	var content models.SubscribePageContent

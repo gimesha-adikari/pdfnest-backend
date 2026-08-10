@@ -53,7 +53,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 
 	taskId := uuid.New().String()
 
-	// Billing uses the image count directly.
+	// Billing is based on submitted images, not images that happen to contain text.
 	reservation, err := billing.Default.ReserveWithTaskID(userID, billing.ImageToTextPDF, 0, len(req.Files), c.Path(), taskId)
 	if err != nil {
 		return c.Status(fiber.StatusTooManyRequests).JSON(APIError{
@@ -90,7 +90,6 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 
 		defer func() {
 			close(stopPoller)
-			// 1. CLEANUP R2 IMAGES
 			store, err := storage.Default()
 			if err == nil {
 				ctx := context.Background()
@@ -103,7 +102,6 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 				log.Printf("[OCR R2 JOB] Warning: Failed to init storage for cleanup: %v", err)
 			}
 
-			// 2. Handle Panics gracefully
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
 				tasks.Registry.Set(id, "FAILED", 0, "", "Unexpected worker crash while building OCR PDF.")

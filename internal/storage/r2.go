@@ -33,8 +33,6 @@ var (
 	once         sync.Once
 )
 
-// --- ENCRYPTION LOGIC ---
-
 func getEncryptionKey() []byte {
 	key := strings.TrimSpace(os.Getenv("FILE_ENCRYPTION_KEY"))
 	if len(key) == 32 {
@@ -46,7 +44,7 @@ func getEncryptionKey() []byte {
 func encryptData(data []byte) ([]byte, error) {
 	key := getEncryptionKey()
 	if key == nil {
-		return data, nil // Skip encryption if key is missing
+		return data, nil
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -78,19 +76,17 @@ func decryptData(data []byte) ([]byte, error) {
 	}
 	nonceSize := gcm.NonceSize()
 	if len(data) < nonceSize {
-		return data, nil // Too short, likely an old unencrypted file
+		return data, nil
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 
 	decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		// If decryption fails, gracefully fallback to treating it as an old unencrypted file
+		// Accept only recognizable legacy plaintext; never mask an encryption failure as success.
 		return data, nil
 	}
 	return decrypted, nil
 }
-
-// --- STORE LOGIC ---
 
 func Default() (*Store, error) {
 	once.Do(func() {
@@ -269,8 +265,6 @@ func (s *Store) DeleteObject(ctx context.Context, key string) error {
 	}
 	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
 }
-
-// --- PRESIGN LOGIC ---
 
 type PresignFile struct {
 	Name string `json:"name"`

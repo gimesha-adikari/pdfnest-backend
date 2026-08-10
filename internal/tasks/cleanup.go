@@ -105,13 +105,13 @@ func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
 func sweepExpiredTempFiles(ttl time.Duration) {
 	evictionCount := 0
 
-	// 1. Sweep dedicated PDFNest temporary directory (/tmp/pdfnest-temp)
+	// Sweep the dedicated workspace before scanning the shared system temp directory.
 	dedicatedDir := temp.GetDir()
 	if dedicatedDir != os.TempDir() {
 		evictionCount += sweepDir(dedicatedDir, ttl, false)
 	}
 
-	// 2. Sweep system temporary directory (/tmp) with prefix allowlist
+	// The shared temp directory is restricted to known application prefixes.
 	evictionCount += sweepDir(os.TempDir(), ttl, true)
 
 	if evictionCount > 0 {

@@ -1,4 +1,3 @@
-// file: internal/billing/errors.go
 package billing
 
 type ErrorCode string

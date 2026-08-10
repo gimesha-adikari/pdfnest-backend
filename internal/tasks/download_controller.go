@@ -28,7 +28,7 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		})
 	}
 
-	// 1. Authorization Ownership Check
+	// Task output is scoped to the identity that created the task.
 	requesterID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
 	if requesterID == "" {
 		requesterID = c.IP()
@@ -40,7 +40,6 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		})
 	}
 
-	// 2. R2 Storage Path (Authoritative)
 	key := task.ResultKey
 	if key == "" && strings.HasPrefix(task.ResultURL, "r2://") {
 		key = strings.TrimPrefix(task.ResultURL, "r2://")
@@ -67,7 +66,7 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 			_ = os.Remove(tmpPath)
 		}()
 
-		// Content-Type mapping derived from server-controlled key extension
+		// The object key is server-controlled, so its extension is safe for content-type selection.
 		contentType := "application/octet-stream"
 		switch strings.ToLower(ext) {
 		case ".pdf":
@@ -87,7 +86,7 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		return c.SendFile(tmpPath)
 	}
 
-	// 3. Legacy Local File Fallback (Local Dev / Pre-P1-C In-Flight Tasks)
+	// Retain the local fallback while tasks created before object storage migration can expire.
 	filePath := task.ResultURL
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{

@@ -260,9 +260,6 @@ func (ctrl *Controller) DeleteAccount(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
 	}
 
-	// Optional: cancel subscription in Paddle before deleting user
-	// and delete related settings, preferences, logs if you want hard cleanup.
-
 	if err := config.DB.Delete(&user).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete account"})
 	}
