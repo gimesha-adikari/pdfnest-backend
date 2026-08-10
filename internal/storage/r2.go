@@ -206,9 +206,26 @@ func (s *Store) DownloadToTemp(key, prefix, suffix string) (string, error) {
 	}
 	defer obj.Close()
 
-	data, err := io.ReadAll(obj)
+	// Stream encrypted data to a temp file to avoid holding the full object in
+	// Go heap memory.  AES-GCM still needs the complete ciphertext for
+	// authentication, but the intermediate disk copy keeps RSS lower than an
+	// in-memory ReadAll for large objects.
+	encTmp, err := os.CreateTemp("", prefix+"-enc-*"+suffix)
 	if err != nil {
-		return "", fmt.Errorf("read r2 object failed: %w", err)
+		return "", err
+	}
+	encTmpPath := encTmp.Name()
+	defer os.Remove(encTmpPath)
+
+	if _, err := io.Copy(encTmp, obj); err != nil {
+		encTmp.Close()
+		return "", fmt.Errorf("stream r2 object to disk failed: %w", err)
+	}
+	encTmp.Close()
+
+	data, err := os.ReadFile(encTmpPath)
+	if err != nil {
+		return "", fmt.Errorf("read encrypted temp file failed: %w", err)
 	}
 
 	decrypted, err := decryptData(data)

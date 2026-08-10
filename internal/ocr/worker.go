@@ -1,7 +1,6 @@
 package ocr
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -23,40 +22,52 @@ func postSingleFileToWorker(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
 
 	file, err := os.Open(inputPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open input file: %w", err)
 	}
-	defer file.Close()
 
-	part, err := writer.CreateFormFile(fieldName, filepath.Base(inputPath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create multipart file field: %w", err)
-	}
+	// Stream multipart body through an io.Pipe to avoid buffering the
+	// entire file in Go heap memory before sending to the worker.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := writer.FormDataContentType()
 
-	if _, err := io.Copy(part, file); err != nil {
-		return nil, fmt.Errorf("failed to copy file into multipart body: %w", err)
-	}
+	go func() {
+		defer file.Close()
 
-	for k, v := range fields {
-		if err := writer.WriteField(k, v); err != nil {
-			return nil, fmt.Errorf("failed to write multipart field %q: %w", k, err)
+		part, err := writer.CreateFormFile(fieldName, filepath.Base(inputPath))
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
 		}
-	}
 
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
-	}
+		if _, err := io.Copy(part, file); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, &body)
+		for k, v := range fields {
+			if err := writer.WriteField(k, v); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+		}
+
+		if err := writer.Close(); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, pr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := worker.Client.Do(req)
 	if err != nil {
@@ -76,45 +87,57 @@ func postMultipleFilesToWorker(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
 
-	for _, inputPath := range inputPaths {
-		file, err := os.Open(inputPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open input file %q: %w", inputPath, err)
-		}
+	// Stream multipart body through an io.Pipe to avoid buffering all
+	// input files in Go heap memory before sending to the worker.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := writer.FormDataContentType()
 
-		part, err := writer.CreateFormFile(fieldName, filepath.Base(inputPath))
-		if err != nil {
+	go func() {
+		for _, inputPath := range inputPaths {
+			file, err := os.Open(inputPath)
+			if err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("failed to open input file %q: %w", inputPath, err))
+				return
+			}
+
+			part, err := writer.CreateFormFile(fieldName, filepath.Base(inputPath))
+			if err != nil {
+				_ = file.Close()
+				_ = pw.CloseWithError(fmt.Errorf("failed to create multipart file field: %w", err))
+				return
+			}
+
+			if _, err := io.Copy(part, file); err != nil {
+				_ = file.Close()
+				_ = pw.CloseWithError(fmt.Errorf("failed to copy file into multipart body: %w", err))
+				return
+			}
+
 			_ = file.Close()
-			return nil, fmt.Errorf("failed to create multipart file field: %w", err)
 		}
 
-		if _, err := io.Copy(part, file); err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("failed to copy file into multipart body: %w", err)
+		for k, v := range fields {
+			if err := writer.WriteField(k, v); err != nil {
+				_ = pw.CloseWithError(fmt.Errorf("failed to write multipart field %q: %w", k, err))
+				return
+			}
 		}
 
-		_ = file.Close()
-	}
-
-	for k, v := range fields {
-		if err := writer.WriteField(k, v); err != nil {
-			return nil, fmt.Errorf("failed to write multipart field %q: %w", k, err)
+		if err := writer.Close(); err != nil {
+			_ = pw.CloseWithError(fmt.Errorf("failed to finalize multipart body: %w", err))
+			return
 		}
-	}
+		_ = pw.Close()
+	}()
 
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, worker.GetWorkerURL()+route, pr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := worker.Client.Do(req)
 	if err != nil {

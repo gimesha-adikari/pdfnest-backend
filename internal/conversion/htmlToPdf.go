@@ -130,7 +130,13 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 
 		chromedp.Sleep(4*time.Second),
 
-		chromedp.OuterHTML("html", &html),
+		// Only capture page HTML when debug mode is enabled.
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			if DebugHtmlToPdf {
+				return chromedp.OuterHTML("html", &html).Do(actCtx)
+			}
+			return nil
+		}),
 		chromedp.Evaluate(`
 (() => {
 
@@ -177,10 +183,14 @@ document.querySelectorAll('*').forEach(el => {
 });
 `, nil),
 
-		chromedp.FullScreenshot(
-			&screenshot,
-			90,
-		),
+		// Only capture the screenshot when debug mode is enabled to avoid
+		// allocating a full-page PNG bitmap in production.
+		chromedp.ActionFunc(func(actCtx context.Context) error {
+			if DebugHtmlToPdf {
+				return chromedp.FullScreenshot(&screenshot, 90).Do(actCtx)
+			}
+			return nil
+		}),
 
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return emulation.

@@ -73,37 +73,42 @@ func (s *ConversionService) ConvertPageToImageStream(ctx context.Context, fileHe
 	if err != nil {
 		return nil, fmt.Errorf("failed to open target pdf for worker request: %w", err)
 	}
-	defer pdfFile.Close()
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	// Stream multipart body through an io.Pipe to avoid buffering the
+	// entire PDF in Go heap memory for a single-page preview request.
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := writer.FormDataContentType()
 
-	part, err := writer.CreateFormFile("file", filepath.Base(targetPdfPath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file form part: %w", err)
-	}
+	go func() {
+		defer pdfFile.Close()
 
-	if _, err := io.Copy(part, pdfFile); err != nil {
-		return nil, fmt.Errorf("failed to stream pdf to worker: %w", err)
-	}
+		part, err := writer.CreateFormFile("file", filepath.Base(targetPdfPath))
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
 
-	if err := writer.WriteField("page", fmt.Sprintf("%d", pageNum)); err != nil {
-		return nil, fmt.Errorf("failed to set page field: %w", err)
-	}
+		if _, err := io.Copy(part, pdfFile); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
 
-	if err := writer.WriteField("dpi", fmt.Sprintf("%f", 72.0*scale)); err != nil {
-		return nil, fmt.Errorf("failed to set dpi field: %w", err)
-	}
+		_ = writer.WriteField("page", fmt.Sprintf("%d", pageNum))
+		_ = writer.WriteField("dpi", fmt.Sprintf("%f", 72.0*scale))
 
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize multipart body: %w", err)
-	}
+		if err := writer.Close(); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(workerBaseURL, "/")+"/api/v1/render/page", &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(workerBaseURL, "/")+"/api/v1/render/page", pr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build worker request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	client := &http.Client{
 		Timeout: 5 * time.Minute,

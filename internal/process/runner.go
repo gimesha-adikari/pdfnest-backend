@@ -27,9 +27,13 @@ func (r Runner) Run(
 		Setpgid: true,
 	}
 
+	// Cap captured subprocess output to 1 MB to prevent a misbehaving
+	// process from growing the Go heap unboundedly.  The tail is
+	// retained for diagnostic value.
 	var outBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &outBuf
+	lw := &limitedWriter{buf: &outBuf, limit: 1 << 20}
+	cmd.Stdout = lw
+	cmd.Stderr = lw
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProcessStart, err)
@@ -121,6 +125,26 @@ func KillProcessGroup(pgid int, gracePeriod time.Duration) error {
 	}
 
 	return nil
+}
+
+// limitedWriter writes up to limit bytes into buf, silently discarding
+// the rest.  This prevents unbounded memory growth from verbose or
+// misbehaving subprocesses while retaining the initial output for
+// diagnostics.
+type limitedWriter struct {
+	buf   *bytes.Buffer
+	limit int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buf.Len()
+	if remaining <= 0 {
+		return len(p), nil // discard silently
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	return w.buf.Write(p)
 }
 
 // NewHardenedExecAllocator configures chromedp to run Chromium inside an isolated
