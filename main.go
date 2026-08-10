@@ -84,7 +84,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint,Idempotency-Key`",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint,Idempotency-Key",
 		AllowMethods:     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		AllowCredentials: true,
 	}))
