@@ -10,7 +10,30 @@ import (
 )
 
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
-	router.Post("/conversion/preview/page", uploads.Prepare(), ctrl.StreamPagePreviewHandler)
+
+	previewGroup := router.Group("/conversion/preview")
+
+	previewGroup.Post(
+		"/page",
+		uploads.Prepare(),
+		ctrl.StreamPagePreviewHandler,
+	)
+
+	previewGroup.Post(
+		"/session",
+		uploads.Prepare(),
+		ctrl.CreatePreviewSessionHandler,
+	)
+
+	previewGroup.Get(
+		"/session/:sessionId/page/:page",
+		ctrl.StreamPreviewSessionPageHandler,
+	)
+
+	previewGroup.Delete(
+		"/session/:sessionId",
+		ctrl.DeletePreviewSessionHandler,
+	)
 
 	conversionGroup := router.Group("/conversion", uploads.Prepare(), limiter.Default.Middleware())
 

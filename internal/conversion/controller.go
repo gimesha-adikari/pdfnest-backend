@@ -18,6 +18,7 @@ import (
 	"pdfnest-backend/internal/temp"
 	"pdfnest-backend/internal/uploads"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -168,6 +169,110 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 	c.Set("Cache-Control", "public, max-age=60")
 
 	return c.Send(imgBytes)
+}
+
+func (cc *Controller) CreatePreviewSessionHandler(c *fiber.Ctx) error {
+	upload, err := uploads.MustPDFFile(c, "file")
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"code":    "MISSING_FILE",
+			"message": "Payload validation schema rejected: file is required.",
+		})
+	}
+
+	session, err := cc.service.CreatePreviewSession(
+		c.UserContext(),
+		upload.Header,
+	)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"code":    "PREVIEW_SESSION_CREATE_FAILED",
+			"message": err.Error(),
+		})
+	}
+
+	return c.Status(200).JSON(session)
+}
+func (cc *Controller) StreamPreviewSessionPageHandler(c *fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	if sessionID == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"code":    "MISSING_SESSION_ID",
+			"message": "Preview session ID is required.",
+		})
+	}
+
+	pageStr := c.Params("page")
+	pageNum, err := strconv.Atoi(pageStr)
+	if err != nil || pageNum < 1 {
+		return c.Status(400).JSON(fiber.Map{
+			"code":    "INVALID_PAGE",
+			"message": "Page number must be greater than 0.",
+		})
+	}
+
+	scaleStr := c.Query("scale", "2.0")
+	scale, err := strconv.ParseFloat(scaleStr, 64)
+	if err != nil || scale <= 0 {
+		scale = 2.0
+	}
+
+	imgBytes, err := cc.service.GetPreviewSessionPage(
+		c.UserContext(),
+		sessionID,
+		pageNum,
+		scale,
+	)
+	if err != nil {
+		if strings.Contains(
+			err.Error(),
+			"preview session not found",
+		) {
+			return c.Status(404).JSON(fiber.Map{
+				"code":    "SESSION_NOT_FOUND",
+				"message": err.Error(),
+			})
+		}
+
+		return c.Status(500).JSON(fiber.Map{
+			"code":    "PREVIEW_SESSION_PAGE_FAILED",
+			"message": err.Error(),
+		})
+	}
+
+	c.Set("Content-Type", "image/jpeg")
+	c.Set(
+		"Content-Length",
+		strconv.Itoa(len(imgBytes)),
+	)
+	c.Set(
+		"Cache-Control",
+		"private, max-age=60",
+	)
+
+	return c.Send(imgBytes)
+}
+
+func (cc *Controller) DeletePreviewSessionHandler(c *fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	if sessionID == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"code":    "MISSING_SESSION_ID",
+			"message": "Preview session ID is required.",
+		})
+	}
+
+	if err := cc.service.DeletePreviewSession(
+		c.UserContext(),
+		sessionID,
+	); err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"code":    "PREVIEW_SESSION_DELETE_FAILED",
+			"message": err.Error(),
+		})
+	}
+
+	return c.SendStatus(204)
 }
 
 func length(b []byte) int {

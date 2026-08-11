@@ -46,7 +46,6 @@ func Prepare() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		contentType := strings.ToLower(c.Get(fiber.HeaderContentType))
 
-		// Not multipart, so there is nothing to stage.
 		if !strings.Contains(contentType, fiber.MIMEMultipartForm) {
 			c.Locals(LocalKey, NewContext())
 			return c.Next()
