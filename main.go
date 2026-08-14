@@ -46,7 +46,6 @@ func main() {
 	config.ConnectDB()
 	content.SeedSiteContent()
 
-	config.ConnectDB()
 	config.ConnectRedis()
 
 	identityStore := identity.NewStore(
