@@ -24,4 +24,5 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	admin.Put("/subscribe", ctrl.UpdateSubscribePageContent)
 	admin.Put("/about", ctrl.UpdateAboutPageContent)
 	admin.Put("/tools-config", toolCtrl.UpdateToolConfiguration)
+	admin.Put("/tools-config/bulk", toolCtrl.BulkUpdateToolConfiguration)
 }
