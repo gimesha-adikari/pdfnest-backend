@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"os"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/log"
@@ -29,9 +30,23 @@ func Protect() fiber.Handler {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid signature authorization tracking tokens payload metrics"})
 		}
 
-		claims := token.Claims.(jwt.MapClaims)
-		c.Locals("user_id", claims["user_id"].(string))
-		c.Locals("role", claims["role"].(string))
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid token claims structure"})
+		}
+
+		userID, ok := claims["user_id"].(string)
+		if !ok || strings.TrimSpace(userID) == "" {
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid or missing user identity in token"})
+		}
+
+		role, ok := claims["role"].(string)
+		if !ok || strings.TrimSpace(role) == "" {
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid or missing role claim in token"})
+		}
+
+		c.Locals("user_id", userID)
+		c.Locals("role", role)
 
 		return c.Next()
 	}
