@@ -53,8 +53,27 @@ func (ctrl *Controller) ProcessOCR(c *fiber.Ctx) error {
 
 	lang := c.FormValue("lang", "eng")
 
-	outputPath, err := ctrl.service.ExtractTextFromPDF(c.UserContext(), upload.Path, lang)
+	// Monitor client disconnection to cancel backend & worker operations immediately
+	reqCtx := c.Context()
+	ctx, cancel := context.WithCancel(c.UserContext())
+	defer cancel()
+
+	go func() {
+		select {
+		case <-reqCtx.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	outputPath, err := ctrl.service.ExtractTextFromPDF(ctx, upload.Path, lang)
 	if err != nil {
+		if ctx.Err() != nil {
+			return c.Status(499).JSON(APIError{
+				Code:    "CLIENT_CLOSED_REQUEST",
+				Message: "Client closed request during OCR processing.",
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "OCR_PROCESSING_FAILED",
 			Message: "OCR extraction failed: " + err.Error(),
@@ -210,6 +229,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 				case <-ticker.C:
 					task, _ := tasks.Registry.Get(id)
 					if task != nil && task.Status == "CANCELLED" {
+						log.Printf("[FORENSIC %s] Context Cancelled for task %s", time.Now().UTC().Format(time.RFC3339Nano), id)
 						taskCancel()
 						return
 					}
@@ -229,6 +249,7 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 			if localOutPath != "" {
 				_ = os.Remove(localOutPath)
 			}
+			log.Printf("[FORENSIC %s] Backend Cleanup Completed for task %s", time.Now().UTC().Format(time.RFC3339Nano), id)
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Subprocess thread failure occurred.", owner)

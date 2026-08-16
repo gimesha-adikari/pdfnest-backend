@@ -408,6 +408,10 @@ func (r *TaskRegistry) CancelTask(id string, ownerIdentity string) (string, *Tas
 		}
 	}
 
+	if luaRes.Result == "CANCELLED_SUCCESS" {
+		log.Printf("[FORENSIC %s] Task Marked CANCELLED: %s (owner: %s)", time.Now().UTC().Format(time.RFC3339Nano), id, ownerIdentity)
+	}
+
 	return luaRes.Result, status, nil
 }
 

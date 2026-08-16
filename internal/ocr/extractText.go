@@ -42,11 +42,19 @@ func (s *ocrService) ExtractTextFromPDF(ctx context.Context, inputPath string, l
 	if err != nil {
 		return "", fmt.Errorf("failed creating output plain text file: %w", err)
 	}
-	defer out.Close()
+
+	success := false
+	defer func() {
+		_ = out.Close()
+		if !success {
+			_ = os.Remove(outputTextPath)
+		}
+	}()
 
 	if _, err := io.Copy(out, resp.Body); err != nil {
 		return "", fmt.Errorf("failed saving OCR output: %w", err)
 	}
 
+	success = true
 	return outputTextPath, nil
 }
