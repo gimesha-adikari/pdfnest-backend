@@ -42,7 +42,8 @@ func (ctrl *Controller) Compress(c *fiber.Ctx) error {
 	log.Printf("Filename: %s", upload.Header.Filename)
 	log.Printf("Size: %d", upload.Header.Size)
 
-	outputPath, err := ctrl.service.OptimizePDF(c.UserContext(), upload.Path)
+	level := c.FormValue("level", "medium")
+	outputPath, err := ctrl.service.OptimizePDF(c.UserContext(), upload.Path, level)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "COMPRESSION_ENGINE_FAILED",
