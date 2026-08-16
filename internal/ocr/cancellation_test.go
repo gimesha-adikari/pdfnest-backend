@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -140,5 +141,33 @@ func TestCancelTask_HTTPHandlerIntegration(t *testing.T) {
 	task, _ := tasks.Registry.Get(taskID)
 	if task == nil || task.Status != "CANCELLED" {
 		t.Fatalf("Expected task status CANCELLED in Redis, got: %+v", task)
+	}
+}
+
+func TestExtractTextFromPDF_ContextCancellation(t *testing.T) {
+	// Create an artificial dummy file
+	dummyFile, err := os.CreateTemp("", "pdfnest-test-dummy-*.pdf")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(dummyFile.Name())
+	_, _ = dummyFile.WriteString("%PDF-1.4 dummy content")
+	_ = dummyFile.Close()
+
+	service := NewService()
+
+	// Pre-cancelled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	outPath, err := service.ExtractTextFromPDF(ctx, dummyFile.Name(), "eng")
+	if err == nil {
+		t.Fatalf("Expected error on pre-cancelled context, got path: %s", outPath)
+	}
+
+	if outPath != "" {
+		if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+			t.Fatalf("Expected output file to be cleaned up on cancellation error, but file exists: %s", outPath)
+		}
 	}
 }
