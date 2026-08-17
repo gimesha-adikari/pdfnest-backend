@@ -72,7 +72,12 @@ func (m *mockStructureService) GetMetadataPDF(inputPath string, password string)
 }
 
 func (m *mockStructureService) CropPDF(inputPath string, cropBoxDesc string, selectedPages []string) (string, error) {
-	return "", nil
+	if _, err := os.Stat(inputPath); err != nil {
+		return "", fmt.Errorf("input file missing at %s: %w", inputPath, err)
+	}
+	tmp := filepath.Join(os.TempDir(), "test_cropped.pdf")
+	_ = os.WriteFile(tmp, []byte("%PDF-1.4 dummy cropped"), 0644)
+	return tmp, nil
 }
 
 func (m *mockStructureService) DuplicatePDFPages(inputPath string, pageSelection string, copies int) (string, error) {
@@ -261,3 +266,64 @@ func TestMerge_LargeDiskBackedFiles(t *testing.T) {
 		t.Fatalf("expected HTTP 200 for 34MB total merge, got %d: %s", resp.StatusCode, string(respBody))
 	}
 }
+
+func TestParseSelectedPages(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"", nil},
+		{"   ", nil},
+		{"1", []string{"1"}},
+		{"1, 2, 3", []string{"1", "2", "3"}},
+		{`["1"]`, []string{"1"}},
+		{`["1", "2"]`, []string{"1", "2"}},
+		{`["1-3", "5"]`, []string{"1-3", "5"}},
+	}
+
+	for _, tt := range tests {
+		result := parseSelectedPages(tt.input)
+		if len(result) != len(tt.expected) {
+			t.Errorf("parseSelectedPages(%q) length mismatch: got %v, want %v", tt.input, result, tt.expected)
+			continue
+		}
+		for i := range result {
+			if result[i] != tt.expected[i] {
+				t.Errorf("parseSelectedPages(%q)[%d] mismatch: got %s, want %s", tt.input, i, result[i], tt.expected[i])
+			}
+		}
+	}
+}
+
+func TestCrop_BrowserPayload(t *testing.T) {
+	app, _ := setupTestApp(t)
+
+	// Test 1: Exact browser UI payload pages="[\"1\"]"
+	req1 := createMultipartRequest(t, "/structure/crop", "file", "small.pdf", validPDFBytes, map[string]string{
+		"box":   "[10 20 500 700]",
+		"pages": `["1"]`,
+	})
+	resp1, err := app.Test(req1, -1)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp1.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp1.Body)
+		t.Fatalf("expected HTTP 200 for JSON pages payload, got %d: %s", resp1.StatusCode, string(respBody))
+	}
+
+	// Test 2: Comma-separated pages payload pages="1, 2"
+	req2 := createMultipartRequest(t, "/structure/crop", "file", "small.pdf", validPDFBytes, map[string]string{
+		"box":   "[10 20 500 700]",
+		"pages": "1, 2",
+	})
+	resp2, err := app.Test(req2, -1)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	if resp2.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("expected HTTP 200 for string pages payload, got %d: %s", resp2.StatusCode, string(respBody))
+	}
+}
+

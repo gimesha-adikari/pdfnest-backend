@@ -507,6 +507,22 @@ func parseSelectedPages(raw string) []string {
 		return nil
 	}
 
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		var jsonPages []string
+		if err := json.Unmarshal([]byte(raw), &jsonPages); err == nil && len(jsonPages) > 0 {
+			out := make([]string, 0, len(jsonPages))
+			for _, p := range jsonPages {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					out = append(out, p)
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
