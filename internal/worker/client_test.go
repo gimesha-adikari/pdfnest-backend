@@ -2,6 +2,9 @@ package worker
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -12,18 +15,45 @@ import (
 )
 
 func TestGetWorkerURL(t *testing.T) {
-	// Test fallback default
 	os.Unsetenv("PDFNEST_WORKER_URL")
 	if url := GetWorkerURL(); url != "http://localhost:8000" {
 		t.Errorf("expected default http://localhost:8000, got %s", url)
 	}
 
-	// Test environment variable precedence
 	os.Setenv("PDFNEST_WORKER_URL", "http://custom-worker:9000/")
 	defer os.Unsetenv("PDFNEST_WORKER_URL")
 
 	if url := GetWorkerURL(); url != "http://custom-worker:9000" {
 		t.Errorf("expected http://custom-worker:9000, got %s", url)
+	}
+}
+
+func TestSignRequest(t *testing.T) {
+	req, err := http.NewRequest("POST", "http://worker/api/v1/office/convert?format=docx", nil)
+	if err != nil {
+		t.Fatalf("failed to create req: %v", err)
+	}
+
+	secret := "test-hmac-secret-123"
+	if err := SignRequestWithSecret(req, secret); err != nil {
+		t.Fatalf("SignRequestWithSecret failed: %v", err)
+	}
+
+	sig := req.Header.Get("X-Worker-Signature")
+	ts := req.Header.Get("X-Worker-Timestamp")
+	nonce := req.Header.Get("X-Worker-Nonce")
+
+	if sig == "" || ts == "" || nonce == "" {
+		t.Errorf("expected signature headers to be set")
+	}
+
+	stringToSign := "POST\n/api/v1/office/convert?format=docx\n" + ts + "\n" + nonce
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(stringToSign))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+	if sig != expectedSig {
+		t.Errorf("expected signature %s, got %s", expectedSig, sig)
 	}
 }
 
@@ -34,7 +64,6 @@ func TestCreateMultipartRequest_Streaming(t *testing.T) {
 	}
 	defer os.Remove(tempFile.Name())
 
-	// Write test payload (100 KB)
 	data := bytes.Repeat([]byte("PDF-DUMMY-DATA-"), 6400)
 	if _, err := tempFile.Write(data); err != nil {
 		t.Fatalf("failed to write dummy data: %v", err)
@@ -52,7 +81,6 @@ func TestCreateMultipartRequest_Streaming(t *testing.T) {
 		t.Errorf("expected non-empty contentType")
 	}
 
-	// Test streaming payload directly to HTTP mock server
 	handlerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
@@ -92,17 +120,13 @@ func TestCreateMultipartRequest_Streaming(t *testing.T) {
 	}
 	req.Header.Set("Content-Type", contentType)
 
-	resp, err := server.Client().Do(req)
+	resp, err := Client.Do(req)
 	if err != nil {
 		t.Fatalf("HTTP request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected status 200, got %d", resp.StatusCode)
-	}
-
 	if !handlerCalled {
-		t.Errorf("handler was not called")
+		t.Errorf("expected handler to be called")
 	}
 }

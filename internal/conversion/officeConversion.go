@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"pdfnest-backend/internal/worker"
 )
 
 func ProcessOfficeConversion(format, inputPath, outputPath string) error {
@@ -62,11 +64,7 @@ func ProcessOfficeConversion(format, inputPath, outputPath string) error {
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	client := &http.Client{
-		Timeout: 30 * time.Minute,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return fmt.Errorf("worker request failed: %w", err)
 	}

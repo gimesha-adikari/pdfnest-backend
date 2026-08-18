@@ -8,7 +8,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
+
+	"pdfnest-backend/internal/worker"
 )
 
 type workerJobSubmission struct {
@@ -61,8 +62,7 @@ func postJSON(url string, payload any) (*workerJobSubmission, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("worker request failed: %w", err)
 	}
@@ -107,8 +107,7 @@ func (s *service) GetJobStatus(jobID string) (*workerJobRecord, error) {
 		return nil, fmt.Errorf("failed to create job status request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch job status: %w", err)
 	}
@@ -133,8 +132,7 @@ func (s *service) GetJobDownload(jobID string) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to build download request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Minute}
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download request failed: %w", err)
 	}

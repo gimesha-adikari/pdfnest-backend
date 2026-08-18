@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"pdfnest-backend/internal/worker"
 )
 
 type previewWorkerSession struct {
@@ -390,11 +391,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 		contentType,
 	)
 
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf(
 			"render session creation failed: %w",
@@ -466,11 +463,7 @@ func (s *ConversionService) renderWorkerSessionPage(
 		)
 	}
 
-	client := &http.Client{
-		Timeout: 5 * time.Minute,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"page render failed: %w",
@@ -696,11 +689,7 @@ func (s *ConversionService) DeletePreviewSession(
 		)
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	resp, err := client.Do(req)
+	resp, err := worker.Client.Do(req)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete worker preview session: %w",
