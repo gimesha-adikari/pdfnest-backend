@@ -34,9 +34,10 @@
 ## Required environment variables
 
 - `PORT=10000`
-- `WORKER_URL=https://your-worker-service.onrender.com`
-- `ALLOWED_ORIGINS=https://your-frontend-domain.com`
-- `DATABASE_URL=...`
+- `PDFNEST_WORKER_URL=https://worker.platenpdf.com` (Railway Worker)
+- `ALLOWED_ORIGINS=https://www.platenpdf.com`
+- `DATABASE_URL=...` (Neon PostgreSQL)
+- `REDIS_URL=...` (Railway Redis)
 - `JWT_SECRET=...`
 
 Add any additional authentication, payment, email, or third-party provider keys your backend requires.
@@ -45,9 +46,9 @@ Add any additional authentication, payment, email, or third-party provider keys 
 
 ## Worker deployment
 
-The FastAPI worker is a separate service and must be deployed independently.
+The FastAPI worker is a separate service deployed independently on Railway (`https://worker.platenpdf.com`).
 
-The Go backend expects it to be reachable through the `WORKER_URL` environment variable.
+The Go backend expects it to be reachable through the `PDFNEST_WORKER_URL` environment variable.
 
 ---
 
