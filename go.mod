@@ -3,6 +3,7 @@ module pdfnest-backend
 go 1.26
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/chromedp/cdproto v0.0.0-20260427013145-5737772c319b
 	github.com/chromedp/chromedp v0.15.1
 	github.com/gofiber/fiber/v2 v2.52.13
@@ -15,6 +16,9 @@ require (
 	github.com/pdfcpu/pdfcpu v0.12.1
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/resend/resend-go/v2 v2.28.0
+	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
+	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
+	github.com/stretchr/testify v1.11.1
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.53.0
 	golang.org/x/image v0.42.0
@@ -32,6 +36,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fasthttp/websocket v1.5.3 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -63,13 +68,13 @@ require (
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/savsgio/gotils v0.0.0-20230208104028-c358bd845dee // indirect
-	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c // indirect
-	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.71.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
@@ -87,4 +92,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
