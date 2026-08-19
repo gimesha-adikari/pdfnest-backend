@@ -47,21 +47,58 @@ func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int,
 	var reservation *config.BillingReservation
 
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var userRecord config.User
+		isRegisteredUser := (tx.Where("id = ?", userID).First(&userRecord).Error == nil)
+
 		var sub config.Subscription
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ?", userID).
-			First(&sub).Error; err != nil {
-			return ErrBillingMissing
+		if isRegisteredUser {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("user_id = ?", userID).
+				First(&sub).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					sub = config.Subscription{
+						ID:                   uuid.New().String(),
+						UserID:               userID,
+						PaddleCustomerID:     "free_cust_" + userID,
+						PaddleSubscriptionID: "free_sub_" + userID,
+						Status:               "active",
+						Tier:                 "free",
+						CurrentPeriodEnd:     now.AddDate(10, 0, 0),
+						CreatedAt:            now,
+						UpdatedAt:            now,
+					}
+					if createErr := tx.Create(&sub).Error; createErr != nil {
+						return createErr
+					}
+				} else {
+					return ErrBillingMissing
+				}
+			}
+
+			syncWindows(&sub, now)
+			if err := tx.Save(&sub).Error; err != nil {
+				return err
+			}
+		} else {
+			// Guest / Anonymous User (not in users table)
+			sub = config.Subscription{
+				ID:               uuid.New().String(),
+				UserID:           userID,
+				Status:           "active",
+				Tier:             "free",
+				CurrentPeriodEnd: now.AddDate(10, 0, 0),
+			}
 		}
 
-		syncWindows(&sub, now)
-		if err := tx.Save(&sub).Error; err != nil {
-			return err
-		}
-
-		totals, err := activeReservationTotals(tx, userID, now)
-		if err != nil {
-			return err
+		var totals reservationTotals
+		if isRegisteredUser {
+			var err error
+			totals, err = activeReservationTotals(tx, userID, now)
+			if err != nil {
+				return err
+			}
+		} else {
+			totals = reservationTotals{PlanUnits: 0, CreditUnits: 0}
 		}
 
 		limits := GetTierLimits(sub.Tier)
@@ -141,7 +178,10 @@ func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int,
 			UpdatedAt:   now,
 		}
 
-		return tx.Create(reservation).Error
+		if isRegisteredUser {
+			return tx.Create(reservation).Error
+		}
+		return nil
 	})
 
 	return reservation, err

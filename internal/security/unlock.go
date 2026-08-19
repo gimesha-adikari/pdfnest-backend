@@ -14,7 +14,9 @@ func (s *securityService) DecryptPDF(inputPath string, password string) (string,
 	outputFile := "unlocked-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
 
-	config := model.NewAESConfiguration(password, password, 128)
+	config := model.NewDefaultConfiguration()
+	config.UserPW = password
+	config.OwnerPW = password
 
 	err := api.DecryptFile(inputPath, outputPath, config)
 	if err != nil {

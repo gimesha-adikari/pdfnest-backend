@@ -239,6 +239,14 @@ var (
 		PageFactor: 0.10,
 		Estimate:   EstimateUploadedPDFFields("file", "files", "pdf", "pdfs", "documents"),
 	}
+	ConvertPDFToMarkdown = Tool{
+		Name:       "pdf_to_markdown",
+		Aliases:    []string{"pdf_to_md", "convert_pdf_to_markdown"},
+		Billable:   true,
+		BaseUnits:  3,
+		PageFactor: 0.15,
+		Estimate:   EstimateUploadedPDFFields("file", "files", "pdf", "pdfs", "documents"),
+	}
 	ConvertPDFToExcel = Tool{
 		Name:       "pdf_to_excel",
 		Aliases:    []string{"pdf_to_xlsx"},
@@ -509,6 +517,7 @@ func init() {
 		ConvertMarkdownToPDF,
 		ConvertCodeToPDF,
 		ConvertPDFToWord,
+		ConvertPDFToMarkdown,
 		ConvertPDFToExcel,
 		ConvertPDFToPowerPoint,
 		HTMLToPDF,

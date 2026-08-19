@@ -40,6 +40,10 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		})
 	}
 
+	if task.ReservationID != "" && CommitTaskBillingHandler != nil {
+		CommitTaskBillingHandler(task.ReservationID)
+	}
+
 	key := task.ResultKey
 	if key == "" && strings.HasPrefix(task.ResultURL, "r2://") {
 		key = strings.TrimPrefix(task.ResultURL, "r2://")
@@ -73,6 +77,8 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 			contentType = "application/pdf"
 		case ".txt":
 			contentType = "text/plain; charset=utf-8"
+		case ".md":
+			contentType = "text/markdown; charset=utf-8"
 		case ".json":
 			contentType = "application/json"
 		default:

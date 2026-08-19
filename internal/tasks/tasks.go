@@ -170,6 +170,7 @@ type staleLuaResult struct {
 }
 
 var StaleTaskBillingHandler func(reservationID string)
+var CommitTaskBillingHandler func(reservationID string)
 
 func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, error) {
 	client := r.getClient()
@@ -230,6 +231,73 @@ func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, 
 func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
 	task, _, _, err := r.GetWithTransition(id)
 	return task, err
+}
+
+func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, downloadToken string, reservationID ...string) (bool, error) {
+	client := r.getClient()
+	if client == nil {
+		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
+		return false, errors.New("redis client not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+
+	var resID string
+	if len(reservationID) > 0 && reservationID[0] != "" {
+		resID = reservationID[0]
+	}
+	dlToken := downloadToken
+	if dlToken == "" {
+		if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
+			var existingTask TaskStatus
+			if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
+				if resID == "" {
+					resID = existingTask.ReservationID
+				}
+				dlToken = existingTask.DownloadToken
+			}
+		}
+	}
+	if dlToken == "" {
+		dlToken = uuid.New().String()
+	}
+
+	task := &TaskStatus{
+		ID:            id,
+		Status:        status,
+		Progress:      progress,
+		ResultKey:     resultKey,
+		Error:         errStr,
+		UpdatedAt:     time.Now().Unix(),
+		OwnerIdentity: ownerIdentity,
+		ReservationID: resID,
+		DownloadToken: dlToken,
+	}
+
+	if resultKey != "" {
+		task.ResultURL = "r2://" + resultKey
+	}
+
+	data, err := json.Marshal(task)
+	if err != nil {
+		log.Printf("[TASK REGISTRY ERROR] Failed to marshal task %s: %v", id, err)
+		return false, err
+	}
+
+	res, err := client.Eval(ctx, atomicSetTaskLua, []string{key}, string(data), int(TaskTTL.Seconds())).Result()
+	if err != nil {
+		log.Printf("[TASK REGISTRY ERROR] Redis Set (atomic) failed for task %s: %v", id, err)
+		return false, err
+	}
+
+	resStr, ok := res.(string)
+	if ok && resStr == "ACCEPTED" {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (r *TaskRegistry) SetWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID ...string) (bool, error) {
