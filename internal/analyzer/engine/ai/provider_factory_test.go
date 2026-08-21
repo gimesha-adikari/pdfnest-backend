@@ -1,0 +1,173 @@
+package ai
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestProviderFactory_Mock(t *testing.T) {
+	cfg := Config{Provider: "mock"}
+	p, err := NewProvider(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, "mock", p.Name())
+}
+
+func TestProviderFactory_MissingKeys(t *testing.T) {
+	// Gemini missing key
+	_, err1 := NewProvider(Config{Provider: "gemini"})
+	assert.ErrorIs(t, err1, ErrProviderAuthenticationFailed)
+
+	// OpenAI missing key
+	_, err2 := NewProvider(Config{Provider: "openai"})
+	assert.ErrorIs(t, err2, ErrProviderAuthenticationFailed)
+
+	// Anthropic missing key
+	_, err3 := NewProvider(Config{Provider: "anthropic"})
+	assert.ErrorIs(t, err3, ErrProviderAuthenticationFailed)
+
+	// Unsupported provider
+	_, err4 := NewProvider(Config{Provider: "unsupported"})
+	assert.Error(t, err4)
+}
+
+func TestGeminiProvider_MockServer(t *testing.T) {
+	expectedSummary := "Synthesized Gemini Summary"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Contains(t, r.URL.Path, "/v1beta/models/gemini-1.5-flash:generateContent")
+		assert.Equal(t, "test-gemini-key", r.URL.Query().Get("key"))
+
+		responseJSON := map[string]interface{}{
+			"candidates": []map[string]interface{}{
+				{
+					"content": map[string]interface{}{
+						"parts": []map[string]string{
+							{
+								"text": fmtJSON(SynthesisResponse{
+									ProtocolVersion: "1.0.0",
+									TaskID:          "task-gemini",
+									Summary:         expectedSummary,
+								}),
+							},
+						},
+					},
+				},
+			},
+			"usageMetadata": map[string]int{
+				"promptTokenCount":     150,
+				"candidatesTokenCount": 80,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(responseJSON)
+	}))
+	defer ts.Close()
+
+	provider := NewGeminiProvider("test-gemini-key", "gemini-1.5-flash", 2*time.Second, ts.URL)
+	assert.Equal(t, "gemini", provider.Name())
+
+	resp, err := provider.Synthesize(context.Background(), SynthesisRequest{
+		TaskID: "task-gemini",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, expectedSummary, resp.Summary)
+	assert.Equal(t, "gemini", resp.Provider)
+	assert.Equal(t, 150, resp.InputTokens)
+}
+
+func TestOpenAIProvider_MockServer(t *testing.T) {
+	expectedSummary := "Synthesized OpenAI Summary"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "Bearer test-openai-key", r.Header.Get("Authorization"))
+
+		responseJSON := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]string{
+						"content": fmtJSON(SynthesisResponse{
+							ProtocolVersion: "1.0.0",
+							TaskID:          "task-openai",
+							Summary:         expectedSummary,
+						}),
+					},
+				},
+			},
+			"usage": map[string]int{
+				"prompt_tokens":     120,
+				"completion_tokens": 60,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(responseJSON)
+	}))
+	defer ts.Close()
+
+	provider := NewOpenAIProvider("test-openai-key", "gpt-4o-mini", 2*time.Second, ts.URL)
+	assert.Equal(t, "openai", provider.Name())
+
+	resp, err := provider.Synthesize(context.Background(), SynthesisRequest{
+		TaskID: "task-openai",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, expectedSummary, resp.Summary)
+	assert.Equal(t, "openai", resp.Provider)
+}
+
+func TestAnthropicProvider_MockServer(t *testing.T) {
+	expectedSummary := "Synthesized Anthropic Summary"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "POST", r.Method)
+		assert.Equal(t, "/v1/messages", r.URL.Path)
+		assert.Equal(t, "test-anthropic-key", r.Header.Get("x-api-key"))
+
+		responseJSON := map[string]interface{}{
+			"content": []map[string]string{
+				{
+					"type": "text",
+					"text": fmtJSON(SynthesisResponse{
+						ProtocolVersion: "1.0.0",
+						TaskID:          "task-anthropic",
+						Summary:         expectedSummary,
+					}),
+				},
+			},
+			"usage": map[string]int{
+				"input_tokens":  200,
+				"output_tokens": 90,
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(responseJSON)
+	}))
+	defer ts.Close()
+
+	provider := NewAnthropicProvider("test-anthropic-key", "claude-3-5-haiku", 2*time.Second, ts.URL)
+	assert.Equal(t, "anthropic", provider.Name())
+
+	resp, err := provider.Synthesize(context.Background(), SynthesisRequest{
+		TaskID: "task-anthropic",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, expectedSummary, resp.Summary)
+	assert.Equal(t, "anthropic", resp.Provider)
+}
+
+func fmtJSON(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
