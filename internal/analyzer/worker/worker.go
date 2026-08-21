@@ -4,22 +4,30 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // AnalyzerWorker manages the bounded concurrency daemon consuming and executing repository analyzer jobs.
 type AnalyzerWorker struct {
-	cfg       WorkerConfig
-	queue     JobQueue
-	sem       chan struct{}
-	wg        sync.WaitGroup
-	stopCh    chan struct{}
-	stopped   bool
-	activeMu  sync.Mutex
-	activeMap map[string]struct{}
-	mu        sync.Mutex
+	cfg           WorkerConfig
+	queue         JobQueue
+	workerID      string
+	hostname      string
+	pid           int
+	startedAt     time.Time
+	sem           chan struct{}
+	wg            sync.WaitGroup
+	stopCh        chan struct{}
+	heartbeatDone chan struct{}
+	stopped       bool
+	activeMu      sync.Mutex
+	activeMap     map[string]struct{}
+	mu            sync.Mutex
 }
 
 // NewAnalyzerWorker initializes an AnalyzerWorker with the provided queue and configuration.
@@ -31,19 +39,47 @@ func NewAnalyzerWorker(cfg WorkerConfig, queue JobQueue) (*AnalyzerWorker, error
 		return nil, fmt.Errorf("job queue is required")
 	}
 
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "localhost"
+	}
+	pid := os.Getpid()
+
+	workerID := cfg.WorkerID
+	if workerID == "" {
+		workerID = fmt.Sprintf("worker-%s-%d-%s", hostname, pid, uuid.New().String()[:8])
+	}
+
 	return &AnalyzerWorker{
-		cfg:       cfg,
-		queue:     queue,
-		sem:       make(chan struct{}, cfg.Concurrency),
-		stopCh:    make(chan struct{}),
-		activeMap: make(map[string]struct{}),
+		cfg:           cfg,
+		queue:         queue,
+		workerID:      workerID,
+		hostname:      hostname,
+		pid:           pid,
+		startedAt:     time.Now().UTC(),
+		sem:           make(chan struct{}, cfg.Concurrency),
+		stopCh:        make(chan struct{}),
+		heartbeatDone: make(chan struct{}),
+		activeMap:     make(map[string]struct{}),
 	}, nil
+}
+
+// WorkerID returns the unique identifier for this worker instance.
+func (w *AnalyzerWorker) WorkerID() string {
+	return w.workerID
 }
 
 // Start begins consuming jobs from the queue until the context is cancelled or Stop is called.
 func (w *AnalyzerWorker) Start(ctx context.Context) error {
-	log.Printf("[Analyzer Worker] Started daemon with concurrency=%d, queue=%s, timeout=%s",
-		w.cfg.Concurrency, w.cfg.QueueName, w.cfg.JobTimeout)
+	log.Printf("[Analyzer Worker] Started daemon worker_id=%s concurrency=%d queue=%s timeout=%s",
+		w.workerID, w.cfg.Concurrency, w.cfg.QueueName, w.cfg.JobTimeout)
+
+	// Launch background crash-safe heartbeat loop
+	go w.startHeartbeatLoop(ctx)
+
+	defer func() {
+		_ = w.queue.RemoveHeartbeat(context.Background(), w.workerID)
+	}()
 
 	for {
 		select {
@@ -94,13 +130,52 @@ func (w *AnalyzerWorker) Start(ctx context.Context) error {
 	}
 }
 
+func (w *AnalyzerWorker) startHeartbeatLoop(ctx context.Context) {
+	ticker := time.NewTicker(w.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	defer close(w.heartbeatDone)
+
+	// Initial heartbeat publication
+	w.publishHeartbeat(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			w.publishHeartbeat(ctx)
+		}
+	}
+}
+
+func (w *AnalyzerWorker) publishHeartbeat(ctx context.Context) {
+	info := WorkerInfo{
+		WorkerID:    w.workerID,
+		Hostname:    w.hostname,
+		PID:         w.pid,
+		Concurrency: w.cfg.Concurrency,
+		ActiveJobs:  w.ActiveJobCount(),
+		StartedAt:   w.startedAt,
+		HeartbeatAt: time.Now().UTC(),
+	}
+	if err := w.queue.SendHeartbeat(ctx, info, w.cfg.HeartbeatTTL); err != nil {
+		log.Printf("[Analyzer Worker] Heartbeat publication error for %s: %v", w.workerID, err)
+	}
+}
+
 func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob, receiptHandle string) {
 	w.trackJobStart(job.TaskID)
 	defer w.trackJobEnd(job.TaskID)
 
+	claimedAt := time.Now().UTC()
+	startedAt := claimedAt
+
 	// Recover panics to isolate individual job crashes
 	defer func() {
 		if r := recover(); r != nil {
+			failedAt := time.Now().UTC()
 			log.Printf("[Analyzer Worker] PANIC recovered in task %s: %v\nStack: %s",
 				job.TaskID, r, string(debug.Stack()))
 			_ = w.queue.PublishProgress(context.Background(), job.TaskID, TaskProgress{
@@ -110,14 +185,18 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 				ProgressPercent: 100,
 				StageMessage:    "Internal execution panic",
 				ErrorMessage:    fmt.Sprintf("internal worker panic: %v", r),
+				WorkerID:        w.workerID,
+				ClaimedAt:       &claimedAt,
+				StartedAt:       &startedAt,
+				FailedAt:        &failedAt,
 				UpdatedAt:       time.Now().UTC(),
 			})
 			_ = w.queue.Nack(context.Background(), receiptHandle, false)
 		}
 	}()
 
-	log.Printf("[Analyzer Worker] Processing task=%s session=%s source=%s",
-		job.TaskID, job.SessionID, job.SourceType)
+	log.Printf("[Analyzer Worker] Processing task=%s session=%s source=%s worker_id=%s",
+		job.TaskID, job.SessionID, job.SourceType, w.workerID)
 
 	jobCtx, cancel := context.WithTimeout(parentCtx, w.cfg.JobTimeout)
 	defer cancel()
@@ -129,6 +208,9 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 			Status:          status,
 			ProgressPercent: percent,
 			StageMessage:    msg,
+			WorkerID:        w.workerID,
+			ClaimedAt:       &claimedAt,
+			StartedAt:       &startedAt,
 			UpdatedAt:       time.Now().UTC(),
 		}
 		_ = w.queue.PublishProgress(jobCtx, job.TaskID, progress)
@@ -136,6 +218,7 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 
 	res, err := ExecutePipeline(jobCtx, job, w.cfg.SandboxBaseDir, progressHandler)
 	if err != nil {
+		failedAt := time.Now().UTC()
 		log.Printf("[Analyzer Worker] Task %s failed: %v", job.TaskID, err)
 		_ = w.queue.PublishProgress(context.Background(), job.TaskID, TaskProgress{
 			TaskID:          job.TaskID,
@@ -144,6 +227,10 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 			ProgressPercent: 100,
 			StageMessage:    "Analysis failed",
 			ErrorMessage:    err.Error(),
+			WorkerID:        w.workerID,
+			ClaimedAt:       &claimedAt,
+			StartedAt:       &startedAt,
+			FailedAt:        &failedAt,
 			UpdatedAt:       time.Now().UTC(),
 		})
 		_ = w.queue.Nack(context.Background(), receiptHandle, false)
@@ -157,6 +244,7 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 		return
 	}
 
+	completedAt := time.Now().UTC()
 	_ = w.queue.PublishProgress(context.Background(), job.TaskID, TaskProgress{
 		TaskID:          job.TaskID,
 		SessionID:       job.SessionID,
@@ -164,6 +252,10 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 		ProgressPercent: 100,
 		StageMessage:    "Analysis completed successfully",
 		Result:          res,
+		WorkerID:        w.workerID,
+		ClaimedAt:       &claimedAt,
+		StartedAt:       &startedAt,
+		CompletedAt:     &completedAt,
 		UpdatedAt:       time.Now().UTC(),
 	})
 
@@ -217,5 +309,6 @@ func (w *AnalyzerWorker) Stop(timeout time.Duration) error {
 		log.Printf("[Analyzer Worker] Graceful shutdown timeout exceeded, forcing stop")
 	}
 
+	_ = w.queue.RemoveHeartbeat(context.Background(), w.workerID)
 	return w.queue.Close()
 }

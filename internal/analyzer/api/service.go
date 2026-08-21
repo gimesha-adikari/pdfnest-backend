@@ -31,11 +31,14 @@ var (
 
 // Service defines the business contract for analyzer session and task lifecycle management.
 type Service struct {
-	db              *gorm.DB
-	redis           *redis.Client
-	queueName       string
-	scopeAdapter    *ScopeConfigAdapter
-	progressAdapter *TaskProgressAdapter
+	db                       *gorm.DB
+	redis                    *redis.Client
+	queueName                string
+	workerUnavailableTimeout time.Duration
+	maxQueueWaitTimeout      time.Duration
+	watchdogInterval         time.Duration
+	scopeAdapter             *ScopeConfigAdapter
+	progressAdapter          *TaskProgressAdapter
 }
 
 // NewService instantiates an Analyzer Service.
@@ -44,11 +47,14 @@ func NewService(db *gorm.DB, redisClient *redis.Client, queueName string) *Servi
 		queueName = worker.DefaultQueueName
 	}
 	return &Service{
-		db:              db,
-		redis:           redisClient,
-		queueName:       queueName,
-		scopeAdapter:    NewScopeConfigAdapter(),
-		progressAdapter: NewTaskProgressAdapter(),
+		db:                       db,
+		redis:                    redisClient,
+		queueName:                queueName,
+		workerUnavailableTimeout: worker.DefaultWorkerUnavailableTimeout,
+		maxQueueWaitTimeout:      worker.DefaultMaxQueueWaitTimeout,
+		watchdogInterval:         worker.DefaultWatchdogInterval,
+		scopeAdapter:             NewScopeConfigAdapter(),
+		progressAdapter:          NewTaskProgressAdapter(),
 	}
 }
 
@@ -301,13 +307,15 @@ func (s *Service) Analyze(ctx context.Context, ownerIdentity, sessionID string, 
 	}
 
 	// 1. Initialize Task State in Redis
+	now := time.Now().UTC()
 	initialProgress := worker.TaskProgress{
 		TaskID:          taskID,
 		SessionID:       session.ID,
 		Status:          worker.StatusQueued,
 		ProgressPercent: 0,
 		StageMessage:    "Analysis task queued",
-		UpdatedAt:       time.Now().UTC(),
+		QueuedAt:        &now,
+		UpdatedAt:       now,
 	}
 	progJSON, _ := json.Marshal(initialProgress)
 	taskKey := fmt.Sprintf("pdfnest:task:%s", taskID)
@@ -417,6 +425,241 @@ func (s *Service) GetTaskStatus(ctx context.Context, ownerIdentity, taskID strin
 		return nil, fmt.Errorf("unmarshal task progress: %w", err)
 	}
 
+	// Defensive check: if progress is still QUEUED and no workers are registered and threshold exceeded, reconcile
+	if progress.Status == worker.StatusQueued {
+		queuedAt := progress.QueuedAt
+		if queuedAt == nil {
+			queuedAt = &session.UpdatedAt
+		}
+		if time.Since(*queuedAt) > s.workerUnavailableTimeout {
+			activeWorkers, _ := s.GetActiveWorkers(ctx)
+			if len(activeWorkers) == 0 {
+				now := time.Now().UTC()
+				s.markTaskFailed(ctx, session.ID, taskID,
+					"Repository analysis service is currently unavailable. No active analyzer workers are running.",
+					now)
+				progress.Status = worker.StatusFailed
+				progress.ProgressPercent = 100
+				progress.StageMessage = "Analysis failed"
+				progress.ErrorMessage = "Repository analysis service is currently unavailable. No active analyzer workers are running."
+				progress.UpdatedAt = now
+			}
+		}
+	}
+
 	resp := s.progressAdapter.Adapt(progress)
 	return &resp, nil
+}
+
+// SetTimeouts configures custom watchdog and timeout durations (useful for tests and tuning).
+func (s *Service) SetTimeouts(workerUnavailable, maxQueueWait, watchdog time.Duration) {
+	if workerUnavailable > 0 {
+		s.workerUnavailableTimeout = workerUnavailable
+	}
+	if maxQueueWait > 0 {
+		s.maxQueueWaitTimeout = maxQueueWait
+	}
+	if watchdog > 0 {
+		s.watchdogInterval = watchdog
+	}
+}
+
+// GetActiveWorkers returns the slice of non-expired worker registrations.
+func (s *Service) GetActiveWorkers(ctx context.Context) ([]worker.WorkerInfo, error) {
+	members, err := s.redis.SMembers(ctx, worker.WorkerRegistryKey).Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query worker registry: %w", err)
+	}
+
+	var active []worker.WorkerInfo
+	var expired []string
+
+	for _, member := range members {
+		key := worker.WorkerHeartbeatKeyPrefix + member
+		data, err := s.redis.Get(ctx, key).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				expired = append(expired, member)
+			}
+			continue
+		}
+		var info worker.WorkerInfo
+		if err := json.Unmarshal([]byte(data), &info); err == nil {
+			active = append(active, info)
+		}
+	}
+
+	if len(expired) > 0 {
+		var ifaces []interface{}
+		for _, exp := range expired {
+			ifaces = append(ifaces, exp)
+		}
+		_ = s.redis.SRem(ctx, worker.WorkerRegistryKey, ifaces...).Err()
+	}
+
+	return active, nil
+}
+
+// CheckReadiness inspects Redis, queue, and worker readiness.
+func (s *Service) CheckReadiness(ctx context.Context) SubsystemReadiness {
+	readiness := SubsystemReadiness{
+		RedisReady:  false,
+		QueueReady:  false,
+		WorkerReady: false,
+		IsReady:     false,
+	}
+
+	// 1. Check Redis connectivity
+	if err := s.redis.Ping(ctx).Err(); err != nil {
+		readiness.Message = fmt.Sprintf("Redis connection failure: %v", err)
+		return readiness
+	}
+	readiness.RedisReady = true
+	readiness.QueueReady = true
+
+	// 2. Query active workers
+	workers, err := s.GetActiveWorkers(ctx)
+	if err != nil {
+		readiness.Message = fmt.Sprintf("Failed to query active workers: %v", err)
+		return readiness
+	}
+
+	readiness.Workers = workers
+	readiness.ActiveWorkers = len(workers)
+	readiness.WorkerReady = len(workers) > 0
+
+	if readiness.WorkerReady {
+		readiness.IsReady = true
+		readiness.Message = fmt.Sprintf("Analyzer subsystem ready with %d active worker(s)", len(workers))
+	} else {
+		readiness.Message = "Analyzer subsystem degraded: no active analyzer workers registered"
+	}
+
+	return readiness
+}
+
+// StartWatchdog starts a background reconciler that periodically sweeps stale or orphaned tasks.
+func (s *Service) StartWatchdog(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(s.watchdogInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.ReconcileStaleTasks(ctx)
+			}
+		}
+	}()
+}
+
+// ReconcileStaleTasks sweeps tasks in QUEUED or PROCESSING states against worker availability and timeouts.
+func (s *Service) ReconcileStaleTasks(ctx context.Context) {
+	activeWorkers, err := s.GetActiveWorkers(ctx)
+	if err != nil {
+		return
+	}
+
+	activeWorkerMap := make(map[string]bool)
+	for _, w := range activeWorkers {
+		activeWorkerMap[w.WorkerID] = true
+	}
+
+	var sessions []models.AnalyzerSession
+	err = s.db.WithContext(ctx).
+		Where("status IN ('QUEUED', 'PROCESSING')").
+		Find(&sessions).Error
+	if err != nil {
+		return
+	}
+
+	now := time.Now().UTC()
+
+	for _, session := range sessions {
+		if session.CurrentTaskID == nil || *session.CurrentTaskID == "" {
+			continue
+		}
+		taskID := *session.CurrentTaskID
+		taskKey := fmt.Sprintf("pdfnest:task:%s", taskID)
+
+		rawProgress, err := s.redis.Get(ctx, taskKey).Result()
+		if err != nil {
+			continue
+		}
+
+		var progress worker.TaskProgress
+		if err := json.Unmarshal([]byte(rawProgress), &progress); err != nil {
+			continue
+		}
+
+		// Handle QUEUED tasks
+		if progress.Status == worker.StatusQueued {
+			queuedAt := progress.QueuedAt
+			if queuedAt == nil {
+				queuedAt = &session.UpdatedAt
+			}
+
+			// Case A: No workers exist and task waited beyond WorkerUnavailableTimeout
+			if len(activeWorkers) == 0 && now.Sub(*queuedAt) > s.workerUnavailableTimeout {
+				s.markTaskFailed(ctx, session.ID, taskID,
+					"Repository analysis service is currently unavailable. No active analyzer workers are running.",
+					now)
+				continue
+			}
+
+			// Case B: Workers exist, but task has exceeded MaxQueueWaitTimeout
+			if now.Sub(*queuedAt) > s.maxQueueWaitTimeout {
+				s.markTaskFailed(ctx, session.ID, taskID,
+					"Analysis task exceeded maximum queue wait timeout (10 minutes).",
+					now)
+				continue
+			}
+		}
+
+		// Handle PROCESSING / ACQUIRING / INVENTORY tasks
+		if progress.Status != worker.StatusQueued && progress.Status != worker.StatusCompleted && progress.Status != worker.StatusFailed {
+			if progress.WorkerID != "" && !activeWorkerMap[progress.WorkerID] {
+				// Worker that claimed the job has disappeared from registry
+				if now.Sub(progress.UpdatedAt) > 30*time.Second {
+					s.markTaskFailed(ctx, session.ID, taskID,
+						"Analyzer worker processing this repository terminated unexpectedly.",
+						now)
+				}
+			}
+		}
+	}
+}
+
+func (s *Service) markTaskFailed(ctx context.Context, sessionID, taskID, errorMsg string, failedAt time.Time) {
+	// 1. Update PostgreSQL
+	_ = s.db.WithContext(ctx).Model(&models.AnalyzerSession{}).
+		Where("id = ?", sessionID).
+		Updates(map[string]interface{}{
+			"status":     "FAILED",
+			"updated_at": failedAt,
+		}).Error
+
+	// 2. Update Redis Task Progress
+	taskKey := fmt.Sprintf("pdfnest:task:%s", taskID)
+	failedProgress := worker.TaskProgress{
+		TaskID:          taskID,
+		SessionID:       sessionID,
+		Status:          worker.StatusFailed,
+		ProgressPercent: 100,
+		StageMessage:    "Analysis failed",
+		ErrorMessage:    errorMsg,
+		FailedAt:        &failedAt,
+		UpdatedAt:       failedAt,
+	}
+	progJSON, _ := json.Marshal(failedProgress)
+	_ = s.redis.Set(ctx, taskKey, progJSON, 24*time.Hour).Err()
+
+	// 3. Broadcast WebSocket notification if subscribers exist
+	wsChan := fmt.Sprintf("pdfnest:progress:%s", taskID)
+	_ = s.redis.Publish(ctx, wsChan, progJSON).Err()
 }

@@ -268,6 +268,15 @@ func (ctrl *Controller) GetTaskStatus(c *fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// GetReadiness handles GET /api/v1/analyzer/readiness.
+func (ctrl *Controller) GetReadiness(c *fiber.Ctx) error {
+	readiness := ctrl.service.CheckReadiness(c.Context())
+	if !readiness.IsReady {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(readiness)
+	}
+	return c.JSON(readiness)
+}
+
 // HandleWebSocketProgress manages real-time WebSocket progress broadcasts for /api/v1/tasks/:id/progress.
 func (ctrl *Controller) HandleWebSocketProgress(c *websocket.Conn) {
 	taskID := c.Params("id")

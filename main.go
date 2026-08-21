@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/admin"
 	analyzerApi "pdfnest-backend/internal/analyzer/api"
+	analyzerWorker "pdfnest-backend/internal/analyzer/worker"
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/contact"
@@ -157,9 +159,55 @@ func main() {
 	contactAdminController := contact.NewAdminController()
 	contact.RegisterAdminRoutes(apiGroup, contactAdminController)
 
-	analyzerService := analyzerApi.NewService(config.DB, config.Redis, "")
+	analyzerQueueName := os.Getenv("ANALYZER_QUEUE")
+	analyzerService := analyzerApi.NewService(config.DB, config.Redis, analyzerQueueName)
 	analyzerController := analyzerApi.NewController(analyzerService)
 	analyzerApi.RegisterRoutes(toolGroup, analyzerController)
+
+	// Start background watchdog for stale task reconciliation and worker unavailability monitoring
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	analyzerService.StartWatchdog(watchdogCtx)
+
+	// Automatic Embedded Analyzer Worker Daemon (default: enabled unless ANALYZER_EMBEDDED_WORKER is false)
+	enableEmbedded := os.Getenv("ANALYZER_EMBEDDED_WORKER")
+	if enableEmbedded != "false" && enableEmbedded != "0" {
+		workerCfg := analyzerWorker.DefaultWorkerConfig()
+		if analyzerQueueName != "" {
+			workerCfg.QueueName = analyzerQueueName
+		}
+		if baseDir := os.Getenv("ANALYZER_SANDBOX_BASE_DIR"); baseDir != "" {
+			workerCfg.SandboxBaseDir = baseDir
+		}
+		jobQueue, err := analyzerWorker.NewRedisJobQueueWithClient(config.Redis, workerCfg)
+		if err != nil {
+			log.Printf("[PDFNest Backend] Failed to initialize embedded analyzer job queue: %v", err)
+		} else {
+			embeddedWorker, err := analyzerWorker.NewAnalyzerWorker(workerCfg, jobQueue)
+			if err != nil {
+				log.Printf("[PDFNest Backend] Failed to create embedded analyzer worker: %v", err)
+			} else {
+				workerCtx, workerCancel := context.WithCancel(context.Background())
+				go func() {
+					log.Printf("[PDFNest Backend] Starting Embedded Analyzer Worker (worker_id=%s, concurrency=%d, queue=%s)...",
+						embeddedWorker.WorkerID(), workerCfg.Concurrency, workerCfg.QueueName)
+					if err := embeddedWorker.Start(workerCtx); err != nil && err != context.Canceled {
+						log.Printf("[PDFNest Backend] Embedded worker stopped with error: %v", err)
+					}
+				}()
+				app.Hooks().OnShutdown(func() error {
+					workerCancel()
+					watchdogCancel()
+					return embeddedWorker.Stop(5 * time.Second)
+				})
+			}
+		}
+	} else {
+		log.Println("[PDFNest Backend] Embedded Analyzer Worker disabled (ANALYZER_EMBEDDED_WORKER=false). Relying on external worker daemons.")
+		app.Hooks().OnShutdown(func() error {
+			watchdogCancel()
+			return nil
+		})
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {

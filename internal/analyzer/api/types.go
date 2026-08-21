@@ -111,3 +111,14 @@ type TaskStatusResponse struct {
 	ErrorMessage    string            `json:"errorMessage,omitempty"`
 	UpdatedAt       time.Time         `json:"updatedAt"`
 }
+
+// SubsystemReadiness reports analyzer infrastructure health and active worker count.
+type SubsystemReadiness struct {
+	RedisReady    bool                `json:"redisReady"`
+	QueueReady    bool                `json:"queueReady"`
+	WorkerReady   bool                `json:"workerReady"`
+	ActiveWorkers int                 `json:"activeWorkers"`
+	Workers       []worker.WorkerInfo `json:"workers,omitempty"`
+	IsReady       bool                `json:"isReady"`
+	Message       string              `json:"message"`
+}

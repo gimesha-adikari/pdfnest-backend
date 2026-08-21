@@ -17,6 +17,9 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	group.Post("/sessions/:id/analyze", ctrl.Analyze)
 	group.Get("/sessions/:id/result", ctrl.GetResult)
 
+	// Readiness & Health Probe
+	group.Get("/readiness", ctrl.GetReadiness)
+
 	// Task Progress & Status
 	group.Get("/tasks/:id", ctrl.GetTaskStatus)
 
