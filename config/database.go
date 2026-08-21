@@ -3,6 +3,7 @@ package config
 import (
 	"log"
 	"os"
+	analyzerModels "pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/models"
 	"time"
 
@@ -194,6 +195,7 @@ func ConnectDB() {
 		&models.SubscribePageContent{},
 		&models.DynamicToolItem{},
 		models.AboutPageContent{},
+		&analyzerModels.AnalyzerSession{},
 	)
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)

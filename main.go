@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/admin"
+	analyzerApi "pdfnest-backend/internal/analyzer/api"
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/contact"
@@ -155,6 +156,10 @@ func main() {
 
 	contactAdminController := contact.NewAdminController()
 	contact.RegisterAdminRoutes(apiGroup, contactAdminController)
+
+	analyzerService := analyzerApi.NewService(config.DB, config.Redis, "")
+	analyzerController := analyzerApi.NewController(analyzerService)
+	analyzerApi.RegisterRoutes(toolGroup, analyzerController)
 
 	port := os.Getenv("PORT")
 	if port == "" {
