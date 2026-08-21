@@ -13,3 +13,4 @@
 # Virtual environments
 venv/
 .venv/
+/test-corpus/
