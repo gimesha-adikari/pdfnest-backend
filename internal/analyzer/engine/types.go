@@ -72,6 +72,7 @@ type TechnologyItem struct {
 	Version                  *string            `json:"version"`
 	Confidence               ConfidenceLevel    `json:"confidence"`
 	Evidence                 []EvidenceItem     `json:"evidence"`
+	CanonicalEvidence        []Evidence         `json:"canonicalEvidence,omitempty"`
 	NegativeAssertionsPassed []string           `json:"negativeAssertionsPassed"`
 }
 

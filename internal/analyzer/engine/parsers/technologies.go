@@ -371,6 +371,16 @@ func DetectTechnologies(
 					Detail:   "Identified primary source language files",
 				},
 			},
+			CanonicalEvidence: []engine.Evidence{
+				{
+					ID:          "tech_lang_" + strings.ToLower(lang),
+					SourceType:  "inventory",
+					FilePath:    "inventory",
+					Detector:    "technologies_parser",
+					Confidence:  engine.EpistemicConfidenceConfirmed,
+					Description: "Identified primary source language files",
+				},
+			},
 			NegativeAssertionsPassed: make([]string, 0),
 		}
 		results = append(results, item)
@@ -380,6 +390,7 @@ func DetectTechnologies(
 	// 2. Evaluate Technology Catalog Rules
 	for _, matcher := range catalog {
 		evidence := make([]engine.EvidenceItem, 0)
+		canonicalEvidence := make([]engine.Evidence, 0)
 		var version *string
 
 		// Check Manifest Dependencies
@@ -396,6 +407,14 @@ func DetectTechnologies(
 					RuleType: engine.RuleManifestDep,
 					Detail:   detail,
 				})
+				canonicalEvidence = append(canonicalEvidence, engine.Evidence{
+					ID:          "tech_dep_" + matcher.ID,
+					SourceType:  "manifest",
+					FilePath:    match.SourcePath,
+					Detector:    "technologies_parser",
+					Confidence:  engine.EpistemicConfidenceConfirmed,
+					Description: detail,
+				})
 			}
 		}
 
@@ -408,6 +427,14 @@ func DetectTechnologies(
 						FilePath: f.RelPath,
 						RuleType: engine.RuleConfigFile,
 						Detail:   "Configuration file presence",
+					})
+					canonicalEvidence = append(canonicalEvidence, engine.Evidence{
+						ID:          "tech_cfg_" + matcher.ID,
+						SourceType:  "config",
+						FilePath:    f.RelPath,
+						Detector:    "technologies_parser",
+						Confidence:  engine.EpistemicConfidenceStronglyInferred,
+						Description: "Configuration file presence",
 					})
 				}
 			}
@@ -423,6 +450,14 @@ func DetectTechnologies(
 						RuleType: engine.RuleFilePresence,
 						Detail:   "Architectural schema or workflow file presence",
 					})
+					canonicalEvidence = append(canonicalEvidence, engine.Evidence{
+						ID:          "tech_glob_" + matcher.ID,
+						SourceType:  "file",
+						FilePath:    path,
+						Detector:    "technologies_parser",
+						Confidence:  engine.EpistemicConfidenceWeaklyInferred,
+						Description: "Architectural schema or workflow file presence",
+					})
 				}
 			}
 		}
@@ -434,6 +469,14 @@ func DetectTechnologies(
 					FilePath: ".env.example",
 					RuleType: engine.RuleEnvVar,
 					Detail:   "Environment configuration reference: " + envKey,
+				})
+				canonicalEvidence = append(canonicalEvidence, engine.Evidence{
+					ID:          "tech_env_" + matcher.ID,
+					SourceType:  "env",
+					FilePath:    ".env.example",
+					Detector:    "technologies_parser",
+					Confidence:  engine.EpistemicConfidenceWeaklyInferred,
+					Description: "Environment configuration reference: " + envKey,
 				})
 			}
 		}
@@ -462,6 +505,7 @@ func DetectTechnologies(
 				Version:                  version,
 				Confidence:               confidence,
 				Evidence:                 evidence,
+				CanonicalEvidence:        canonicalEvidence,
 				NegativeAssertionsPassed: make([]string, 0),
 			})
 		}

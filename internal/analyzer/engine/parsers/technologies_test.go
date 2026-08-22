@@ -65,3 +65,49 @@ func TestDetectTechnologiesWithNegativeAssertions(t *testing.T) {
 	assert.Contains(t, techMap["Redis"].NegativeAssertionsPassed, "Memcached")
 	assert.Contains(t, techMap["Redis"].NegativeAssertionsPassed, "Kafka")
 }
+
+func TestDetectTechnologiesCanonicalEvidence(t *testing.T) {
+	inv := &inventory.ScopeInventory{
+		LanguagesFound: []string{"TypeScript"},
+		Files: []inventory.FileEntry{
+			{RelPath: "next.config.js", Category: inventory.CategoryConfig},
+			{RelPath: ".env.example", Category: inventory.CategoryConfig},
+		},
+	}
+
+	manifestDeps := []DependencyRecord{
+		{Name: "next", Version: "14.2.0", Manager: "npm", SourcePath: "package.json"},
+	}
+
+	envVarNames := []string{"POSTGRES_PASSWORD"}
+
+	techs := DetectTechnologies(inv, manifestDeps, envVarNames)
+	assert.NotEmpty(t, techs)
+
+	techMap := make(map[string]engine.TechnologyItem)
+	for _, tech := range techs {
+		techMap[tech.Name] = tech
+	}
+
+	// Verify Canonical Evidence
+	nextjs, found := techMap["Next.js"]
+	assert.True(t, found)
+	assert.NotEmpty(t, nextjs.CanonicalEvidence)
+
+	var hasConfirmed, hasStronglyInferred bool
+	for _, ev := range nextjs.CanonicalEvidence {
+		if ev.Confidence == engine.EpistemicConfidenceConfirmed && ev.SourceType == "manifest" {
+			hasConfirmed = true
+		}
+		if ev.Confidence == engine.EpistemicConfidenceStronglyInferred && ev.SourceType == "config" {
+			hasStronglyInferred = true
+		}
+	}
+	assert.True(t, hasConfirmed, "Expected Confirmed evidence for manifest")
+	assert.True(t, hasStronglyInferred, "Expected StronglyInferred evidence for config")
+
+	postgres, found := techMap["PostgreSQL"]
+	assert.True(t, found)
+	assert.NotEmpty(t, postgres.CanonicalEvidence)
+	assert.Equal(t, engine.EpistemicConfidenceWeaklyInferred, postgres.CanonicalEvidence[0].Confidence)
+}
