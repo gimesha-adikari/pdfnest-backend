@@ -238,3 +238,10 @@ func TestValidateSynthesisResponse_CanonicalResultImmutability(t *testing.T) {
 	assert.Equal(t, "Fiber", canonical.Technologies[0].Name)
 	assert.Len(t, canonical.Technologies, 1)
 }
+
+// TestFactValidation is a wrapper to satisfy the exact verify command.
+func TestFactValidation(t *testing.T) {
+	TestValidateSynthesisResponse_Valid(t)
+	TestValidateSynthesisResponse_FactIDWhitelistAndDeduplication(t)
+	TestValidateSynthesisResponse_HallucinationRejection(t)
+}
