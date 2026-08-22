@@ -108,9 +108,17 @@ func TestController_EndToEndRoutes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusConflict, resp.StatusCode)
 
-	// 8. Publish mock result and retrieve (200 OK)
+	// 8. Publish mock result with AI synthesis and retrieve (200 OK)
 	canon := engine.NewEmptyCanonicalResult(sessionID, "linux", engine.SourceTypeGit)
 	canon.Provenance.ComplexityTier = string(engine.Tier1Instant)
+	canon.AI = map[string]any{
+		"protocolVersion":     "1.0.0",
+		"taskId":              taskID,
+		"summary":             "Linux kernel repository architecture",
+		"architecturePattern": "Monolithic Kernel",
+		"provider":            "gemini",
+		"model":               "gemini-2.5-flash",
+	}
 	canonJSON, err := engine.ToCanonicalJSON(canon)
 	require.NoError(t, err)
 	require.NoError(t, svc.redis.Set(req.Context(), "pdfnest:result:"+taskID, canonJSON, time.Hour).Err())
@@ -119,6 +127,16 @@ func TestController_EndToEndRoutes(t *testing.T) {
 	resp, err = app.Test(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var returnedResult map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&returnedResult))
+	assert.Equal(t, sessionID, returnedResult["analysisId"])
+	require.NotNil(t, returnedResult["ai"], "API response must contain 'ai' field when populated")
+	aiMap, ok := returnedResult["ai"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "Linux kernel repository architecture", aiMap["summary"])
+	assert.Equal(t, "Monolithic Kernel", aiMap["architecturePattern"])
+	assert.Equal(t, "gemini", aiMap["provider"])
 }
 
 func TestController_SSRFBlocked(t *testing.T) {

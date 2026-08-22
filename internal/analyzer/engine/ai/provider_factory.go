@@ -139,7 +139,7 @@ func (p *GeminiProvider) Synthesize(ctx context.Context, req SynthesisRequest) (
 		return nil, ErrProviderRateLimited
 	}
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: HTTP status %d", ErrProviderUnavailable, httpResp.StatusCode)
+		return nil, fmt.Errorf("%w: HTTP status %d: %s", ErrProviderUnavailable, httpResp.StatusCode, string(respBytes))
 	}
 
 	var rawResponse struct {

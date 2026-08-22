@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,6 +20,7 @@ func TestRealGeminiIntegration(t *testing.T) {
 		t.Skip("Skipping live Gemini integration test. Set RUN_GEMINI_INTEGRATION=1 to run.")
 	}
 
+	_ = godotenv.Load("../../../../.env")
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
 		t.Skip("Skipping live Gemini integration test: GEMINI_API_KEY environment variable is not set.")
@@ -89,6 +91,13 @@ func TestRealGeminiIntegration(t *testing.T) {
 		sessionID,
 		true,
 	)
+
+	if valRes != nil {
+		t.Logf("ValRes valid=%v reasons=%v", valRes.Valid, valRes.RejectionReasons)
+	}
+	if resp != nil {
+		t.Logf("Resp summary=%q pattern=%q", resp.Summary, resp.ArchitecturePattern)
+	}
 
 	// 5. Verification Gate
 	require.NoError(t, err)
