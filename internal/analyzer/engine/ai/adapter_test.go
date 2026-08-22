@@ -233,3 +233,38 @@ func TestSynthesizeArchitectureSummary_ConcurrentRaceSafety(t *testing.T) {
 	wg.Wait()
 	assert.Equal(t, 15, mockP.GetCallCount())
 }
+
+func TestPipelineIntegrationAdapter(t *testing.T) {
+	canonical := createTestCanonicalResult()
+	mockResp := &SynthesisResponse{
+		ProtocolVersion:     "1.0.0",
+		TaskID:              "task-1",
+		Summary:             "Go Fiber service with PostgreSQL database",
+		ArchitecturePattern: "Monolith",
+		KeyComponents: []ComponentDescription{
+			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-1", "ROUTE-1"}},
+		},
+		Model: "mock-v1",
+	}
+	mockP := NewMockProvider(mockResp, nil, 0)
+	cfg := Config{Enabled: true, Timeout: 5 * time.Second}
+
+	resp, valRes, err := SynthesizeArchitectureSummary(
+		context.Background(),
+		cfg,
+		mockP,
+		canonical,
+		"task-1",
+		"sess-1",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, valRes)
+	assert.True(t, valRes.Valid)
+	assert.Equal(t, "Go Fiber service with PostgreSQL database", resp.Summary)
+	assert.Equal(t, 1, mockP.GetCallCount())
+	assert.NotNil(t, canonical.AI)
+	assert.Equal(t, resp, canonical.AI)
+}

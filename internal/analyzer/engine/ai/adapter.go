@@ -94,5 +94,6 @@ func SynthesizeArchitectureSummary(
 	}
 
 	// 8. Return Validated Architecture Summary
+	canonical.AI = validatedResponse
 	return validatedResponse, &valResult, nil
 }

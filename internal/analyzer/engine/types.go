@@ -315,4 +315,5 @@ type CanonicalAnalysisResult struct {
 	Evidence      []Evidence            `json:"evidence,omitempty"`
 	Provenance    Provenance            `json:"provenance"`
 	Intelligence  *IntelligenceAnalysis `json:"intelligence,omitempty"`
+	AI            any                   `json:"ai,omitempty"`
 }
