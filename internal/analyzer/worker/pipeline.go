@@ -12,6 +12,7 @@ import (
 	"pdfnest-backend/internal/analyzer/engine/exclusion"
 	"pdfnest-backend/internal/analyzer/engine/inventory"
 	"pdfnest-backend/internal/analyzer/engine/parsers"
+	"pdfnest-backend/internal/analyzer/engine/structure"
 )
 
 // ValidateJob validates the integrity and supported boundaries of an incoming analyzer job.
@@ -137,6 +138,16 @@ func ExecutePipeline(
 		return nil, ctx.Err()
 	}
 
+	repoNameStr := acqResult.RepositoryName
+	if repoNameStr == "" {
+		repoNameStr = "repository"
+	}
+
+	projStructure, asciiTree, structErr := structure.BuildProjectStructure(inv, repoNameStr, structure.DefaultDisplayOptions())
+	if structErr != nil && inv.IncludedFiles > 0 {
+		return nil, fmt.Errorf("structure builder failed on non-empty inventory: %w", structErr)
+	}
+
 	// 4. Deterministic Static Manifest & Evidence Analysis
 	if onProgress != nil {
 		onProgress(StatusAnalyzing, 70, "Parsing manifests and extracting technology evidence")
@@ -216,6 +227,8 @@ func ExecutePipeline(
 	res.Setup = facts.Setup
 	res.Testing = facts.Testing
 	res.Deployment = facts.Deployment
+	res.Structure = projStructure
+	res.StructureTree = asciiTree
 
 	// Provenance & Complexity Policy
 	durationMs := time.Since(startTime).Milliseconds()
