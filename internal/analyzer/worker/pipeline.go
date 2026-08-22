@@ -239,6 +239,56 @@ func ExecutePipeline(
 	res.Graph = relGraph.Serialize()
 	res.GraphMetrics = graphMetrics
 
+	// Aggregate all canonical Evidence records across entities, edges, and technologies
+	evidenceMap := make(map[string]engine.Evidence)
+	if relGraph != nil {
+		for _, ent := range relGraph.Entities {
+			for _, ev := range ent.Evidence {
+				if ev.ID != "" {
+					evidenceMap[ev.ID] = ev
+				}
+			}
+		}
+		for _, ed := range relGraph.Edges {
+			for _, ev := range ed.Evidence {
+				if ev.ID != "" {
+					evidenceMap[ev.ID] = ev
+				}
+			}
+		}
+	}
+	for _, tech := range facts.Technologies {
+		for idx, ev := range tech.Evidence {
+			evID := fmt.Sprintf("ev:tech:%s:%d", tech.Name, idx+1)
+			if _, exists := evidenceMap[evID]; !exists {
+				lineStart := ev.LineNumber
+				conf := engine.EpistemicConfidenceConfirmed
+				if tech.Confidence == engine.ConfidenceProbable {
+					conf = engine.EpistemicConfidenceStronglyInferred
+				} else if tech.Confidence == engine.ConfidencePossible {
+					conf = engine.EpistemicConfidenceWeaklyInferred
+				}
+				evidenceMap[evID] = engine.Evidence{
+					ID:          evID,
+					SourceType:  string(tech.Category),
+					FilePath:    ev.FilePath,
+					LineStart:   lineStart,
+					Detector:    string(ev.RuleType),
+					Confidence:  conf,
+					Description: fmt.Sprintf("%s detected in %s: %s", tech.Name, ev.FilePath, ev.Detail),
+				}
+			}
+		}
+	}
+	evList := make([]engine.Evidence, 0, len(evidenceMap))
+	for _, ev := range evidenceMap {
+		evList = append(evList, ev)
+	}
+	sort.Slice(evList, func(i, j int) bool {
+		return evList[i].ID < evList[j].ID
+	})
+	res.Evidence = evList
+
 	if relGraph != nil {
 		intelRes, _ := intelligence.RunIntelligencePipeline(relGraph)
 		res.Intelligence = intelRes

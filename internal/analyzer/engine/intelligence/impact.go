@@ -13,14 +13,14 @@ const (
 )
 
 type ImpactAnalysis struct {
-	EntityID            string
-	DirectDependents    int
-	IndirectDependents  int
-	ForwardDependencies int
-	AffectedRoutes      int
-	AffectedServices    int
-	AffectedTests       int
-	RiskScore           RiskScore
+	EntityID            string    `json:"entityId"`
+	DirectDependents    int       `json:"directDependents"`
+	IndirectDependents  int       `json:"indirectDependents"`
+	ForwardDependencies int       `json:"forwardDependencies"`
+	AffectedRoutes      int       `json:"affectedRoutes"`
+	AffectedServices    int       `json:"affectedServices"`
+	AffectedTests       int       `json:"affectedTests"`
+	RiskScore           RiskScore `json:"riskScore"`
 }
 
 type ChangeImpactEngine struct {
@@ -47,7 +47,7 @@ func (e *ChangeImpactEngine) Analyze(entityID string, maxDepth int) (*ImpactAnal
 	}
 
 	directMap := make(map[string]bool)
-	
+
 	// Avoid panics if graph is mutated, though we assume read-only here
 	if e.graph.Inbound != nil {
 		for _, edge := range e.graph.Inbound[entityID] {

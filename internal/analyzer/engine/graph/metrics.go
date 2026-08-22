@@ -3,16 +3,16 @@ package graph
 type LanguageCoverage string
 
 type GraphMetrics struct {
-	EntityCount                int
-	EdgeCount                  int
-	RelationshipCounts         map[RelationType]int
-	EvidenceCoveragePct        float64
-	ConfirmedEdgeCount         int
-	InferredEdgeCount          int
-	UnresolvedReferences       int
-	CycleCount                 int
-	OrphanEntityCount          int
-	LanguageResolutionCoverage map[string]LanguageCoverage
+	EntityCount                int                         `json:"entityCount"`
+	EdgeCount                  int                         `json:"edgeCount"`
+	RelationshipCounts         map[RelationType]int        `json:"relationshipCounts"`
+	EvidenceCoveragePct        float64                     `json:"evidenceCoveragePct"`
+	ConfirmedEdgeCount         int                         `json:"confirmedEdgeCount"`
+	InferredEdgeCount          int                         `json:"inferredEdgeCount"`
+	UnresolvedReferences       int                         `json:"unresolvedReferences"`
+	CycleCount                 int                         `json:"cycleCount"`
+	OrphanEntityCount          int                         `json:"orphanEntityCount"`
+	LanguageResolutionCoverage map[string]LanguageCoverage `json:"languageResolutionCoverage"`
 }
 
 func ComputeGraphMetrics(g *RelationshipGraph) *GraphMetrics {

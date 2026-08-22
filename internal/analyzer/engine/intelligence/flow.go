@@ -6,15 +6,15 @@ import (
 )
 
 type FlowStep struct {
-	EntityID   string
-	Action     string // e.g., "HTTP Request", "Calls", "Persists To"
-	TargetID   string
-	Confidence engine.EpistemicConfidence
+	EntityID   string                     `json:"entityId"`
+	Action     string                     `json:"action"` // e.g., "HTTP Request", "Calls", "Persists To"
+	TargetID   string                     `json:"targetId"`
+	Confidence engine.EpistemicConfidence `json:"confidence"`
 }
 
 type ExecutionFlow struct {
-	ID    string
-	Steps []FlowStep
+	ID    string     `json:"id"`
+	Steps []FlowStep `json:"steps"`
 }
 
 type ExecutionFlowEngine struct {
@@ -26,18 +26,18 @@ func NewExecutionFlowEngine(g *graph.RelationshipGraph) *ExecutionFlowEngine {
 }
 
 func (e *ExecutionFlowEngine) Analyze() []ExecutionFlow {
-
-	var flows []ExecutionFlow
+	flows := make([]ExecutionFlow, 0)
 
 	// Find entrypoints (e.g., routes)
 	for id, entity := range e.graph.Entities {
 		if entity.Kind == graph.EntityRoute {
 			flow := ExecutionFlow{
-				ID: "flow_" + id,
+				ID:    "flow_" + id,
+				Steps: make([]FlowStep, 0),
 			}
 			visited := make(map[string]bool)
 			e.trace(id, &flow, visited)
-			
+
 			if len(flow.Steps) > 0 {
 				flows = append(flows, flow)
 			}
@@ -68,7 +68,7 @@ func (e *ExecutionFlowEngine) trace(currentID string, flow *ExecutionFlow, visit
 		case graph.RelPublishesTo:
 			action = "Publishes To"
 			conf = engine.EpistemicConfidenceConfirmed
-		case graph.RelExposes: // If a controller exposes a route, wait... the route is the entrypoint. 
+		case graph.RelExposes: // If a controller exposes a route, wait... the route is the entrypoint.
 			// A file exposes a route? No, a Route might call a Controller?
 			action = "Delegates To"
 			conf = engine.EpistemicConfidenceConfirmed

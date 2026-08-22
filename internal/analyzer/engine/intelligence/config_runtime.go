@@ -7,26 +7,26 @@ import (
 )
 
 type ConfigUsage struct {
-	ConfigID       string
-	ConfigName     string
-	IsSecret       bool
-	IsOptional     bool
-	InDocs         bool
-	UsedInCode     bool
-	UsageLocations []string
+	ConfigID       string   `json:"configId"`
+	ConfigName     string   `json:"configName"`
+	IsSecret       bool     `json:"isSecret"`
+	IsOptional     bool     `json:"isOptional"`
+	InDocs         bool     `json:"inDocs"`
+	UsedInCode     bool     `json:"usedInCode"`
+	UsageLocations []string `json:"usageLocations"`
 }
 
 type RuntimeDeploymentInfo struct {
-	Dockerfiles   []string
-	DockerCompose []string
-	CIWorkflows   []string
-	StartupCmds   []string
-	PortMappings  []string
+	Dockerfiles   []string `json:"dockerfiles"`
+	DockerCompose []string `json:"dockerCompose"`
+	CIWorkflows   []string `json:"ciWorkflows"`
+	StartupCmds   []string `json:"startupCmds"`
+	PortMappings  []string `json:"portMappings"`
 }
 
 type ConfigRuntimeIntelligence struct {
-	ConfigUsages map[string]ConfigUsage
-	Runtime      RuntimeDeploymentInfo
+	ConfigUsages map[string]ConfigUsage `json:"configUsages"`
+	Runtime      RuntimeDeploymentInfo  `json:"runtime"`
 }
 
 type ConfigRuntimeEngine struct {
@@ -40,6 +40,13 @@ func NewConfigRuntimeEngine(g *graph.RelationshipGraph) *ConfigRuntimeEngine {
 func (e *ConfigRuntimeEngine) Analyze() ConfigRuntimeIntelligence {
 	result := ConfigRuntimeIntelligence{
 		ConfigUsages: make(map[string]ConfigUsage),
+		Runtime: RuntimeDeploymentInfo{
+			Dockerfiles:   make([]string, 0),
+			DockerCompose: make([]string, 0),
+			CIWorkflows:   make([]string, 0),
+			StartupCmds:   make([]string, 0),
+			PortMappings:  make([]string, 0),
+		},
 	}
 
 	for id, entity := range e.graph.Entities {

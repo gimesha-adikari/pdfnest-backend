@@ -5,21 +5,21 @@ import (
 )
 
 type UntestedComponent struct {
-	EntityID string
-	Name     string
-	Kind     graph.EntityKind
-	FanIn    int
+	EntityID string           `json:"entityId"`
+	Name     string           `json:"name"`
+	Kind     graph.EntityKind `json:"kind"`
+	FanIn    int              `json:"fanIn"`
 }
 
 type TestMapping struct {
-	EntityID   string
-	EntityName string
-	TestFiles  []string
+	EntityID   string   `json:"entityId"`
+	EntityName string   `json:"entityName"`
+	TestFiles  []string `json:"testFiles"`
 }
 
 type TestIntelligence struct {
-	Mappings           []TestMapping
-	UntestedComponents []UntestedComponent
+	Mappings           []TestMapping       `json:"mappings"`
+	UntestedComponents []UntestedComponent `json:"untestedComponents"`
 }
 
 type TestIntelligenceEngine struct {
@@ -35,7 +35,10 @@ func NewTestIntelligenceEngine(g *graph.RelationshipGraph) *TestIntelligenceEngi
 }
 
 func (e *TestIntelligenceEngine) Analyze(fanInThreshold int) TestIntelligence {
-	var result TestIntelligence
+	result := TestIntelligence{
+		Mappings:           make([]TestMapping, 0),
+		UntestedComponents: make([]UntestedComponent, 0),
+	}
 
 	mappings := make(map[string]*TestMapping)
 

@@ -18,10 +18,10 @@ const (
 )
 
 type ArchitectureComponent struct {
-	EntityID   string
-	Tier       ComponentTier
-	Confidence engine.EpistemicConfidence
-	Evidence   []engine.Evidence
+	EntityID   string                     `json:"entityId"`
+	Tier       ComponentTier              `json:"tier"`
+	Confidence engine.EpistemicConfidence `json:"confidence"`
+	Evidence   []engine.Evidence          `json:"evidence"`
 }
 
 type ArchitectureEngine struct {
@@ -35,14 +35,13 @@ func NewArchitectureEngine(g *graph.RelationshipGraph) *ArchitectureEngine {
 func (e *ArchitectureEngine) Analyze() []ArchitectureComponent {
 	// The graph properties mu is not exported in my test, wait it's not exported. Let me check.
 	// Oh wait, mu sync.RWMutex is unexported. I can't RLock it from another package.
-	// I should use g.Serialize() or just not lock if it's read only here, but let's just not lock. 
-	// Wait, g.Entities is exported, but without lock it might race if modified concurrently. 
-	// The plan assumes graph is fully built before intelligence runs.
-	var components []ArchitectureComponent
+	// I should use g.Serialize() or just not lock if it's read only here, but let's just not lock.
+	// Wait, g.Entities is exported, but without lock it might race if modified concurrently.
+	components := make([]ArchitectureComponent, 0)
 
 	for id, entity := range e.graph.Entities {
 		outbound := e.graph.Outbound[id]
-		
+
 		isWorker := false
 		isAPI := false
 		hasAmqpImport := false

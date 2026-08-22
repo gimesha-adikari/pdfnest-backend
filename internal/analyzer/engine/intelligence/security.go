@@ -16,14 +16,14 @@ const (
 )
 
 type SecurityFinding struct {
-	RuleID      string
-	Title       string
-	Description string
-	Severity    Severity
-	Confidence  engine.EpistemicConfidence
-	EntityID    string
-	Evidence    []engine.Evidence
-	Remediation string
+	RuleID      string                     `json:"ruleId"`
+	Title       string                     `json:"title"`
+	Description string                     `json:"description"`
+	Severity    Severity                   `json:"severity"`
+	Confidence  engine.EpistemicConfidence `json:"confidence"`
+	EntityID    string                     `json:"entityId"`
+	Evidence    []engine.Evidence          `json:"evidence"`
+	Remediation string                     `json:"remediation"`
 }
 
 type SecurityEngine struct {
@@ -35,7 +35,7 @@ func NewSecurityEngine(g *graph.RelationshipGraph) *SecurityEngine {
 }
 
 func (e *SecurityEngine) Analyze() ([]SecurityFinding, error) {
-	var findings []SecurityFinding
+	findings := make([]SecurityFinding, 0)
 
 	ssrfRegex := regexp.MustCompile(`(?i)http\.Get\([^)]*req\.URL\.Query\(\)\.Get\("url"\)`)
 	execRegex := regexp.MustCompile(`(?i)exec\.Command\([^)]*req\.URL`)

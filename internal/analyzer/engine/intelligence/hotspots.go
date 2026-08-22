@@ -6,13 +6,13 @@ import (
 )
 
 type HotspotScore struct {
-	EntityID      string
-	FanIn         int
-	FanOut        int
-	Centrality    float64
-	Complexity    float64
-	IsTested      bool
-	HotspotMetric float64
+	EntityID      string  `json:"entityId"`
+	FanIn         int     `json:"fanIn"`
+	FanOut        int     `json:"fanOut"`
+	Centrality    float64 `json:"centrality"`
+	Complexity    float64 `json:"complexity"`
+	IsTested      bool    `json:"isTested"`
+	HotspotMetric float64 `json:"hotspotMetric"`
 }
 
 type EdgeWeights map[graph.RelationType]float64
@@ -40,7 +40,7 @@ func NewHotspotEngine(g *graph.RelationshipGraph) *HotspotEngine {
 }
 
 func (e *HotspotEngine) Analyze() []HotspotScore {
-	var scores []HotspotScore
+	scores := make([]HotspotScore, 0)
 
 	for id, entity := range e.graph.Entities {
 		fanIn := 0
@@ -87,7 +87,7 @@ func (e *HotspotEngine) Analyze() []HotspotScore {
 		}
 
 		hotspot := centrality + (complexity * 2.0)
-		
+
 		// If node has high fan-in or centrality but lacks tests, penalize it to highlight as hotspot
 		if !isTested && (fanIn > 0 || complexity > 5) {
 			hotspot *= 1.5
@@ -103,7 +103,7 @@ func (e *HotspotEngine) Analyze() []HotspotScore {
 			HotspotMetric: hotspot,
 		})
 	}
-	
+
 	// Sort by hotspot metric descending
 	sort.Slice(scores, func(i, j int) bool {
 		return scores[i].HotspotMetric > scores[j].HotspotMetric
