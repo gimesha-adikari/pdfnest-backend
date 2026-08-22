@@ -14,6 +14,7 @@ import (
 	"pdfnest-backend/internal/analyzer/engine/parsers"
 	"pdfnest-backend/internal/analyzer/engine/structure"
 	"pdfnest-backend/internal/analyzer/engine/graph"
+	"pdfnest-backend/internal/analyzer/engine/intelligence"
 )
 
 // ValidateJob validates the integrity and supported boundaries of an incoming analyzer job.
@@ -237,6 +238,11 @@ func ExecutePipeline(
 	res.StructureTree = asciiTree
 	res.Graph = relGraph.Serialize()
 	res.GraphMetrics = graphMetrics
+
+	if relGraph != nil {
+		intelRes, _ := intelligence.RunIntelligencePipeline(relGraph)
+		res.Intelligence = intelRes
+	}
 
 	// Provenance & Complexity Policy
 	durationMs := time.Since(startTime).Milliseconds()
