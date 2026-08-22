@@ -104,6 +104,27 @@ func TestCanonicalAnalysisResultSerialization(t *testing.T) {
 			TargetPlatforms: []string{"Docker", "Node.js"},
 		},
 		StructureTree: "test-repo/\n├── src/\n└── package.json",
+		Structure: &ProjectStructure{
+			RootName: "test-repo",
+			Root: &StructureNode{
+				Path:     "/",
+				Name:     "test-repo",
+				Type:     StructureNodeDir,
+				Children: []*StructureNode{},
+			},
+			TotalFiles: 1,
+			TotalDirs:  1,
+		},
+		Evidence: []Evidence{
+			{
+				ID:          "ev-1",
+				SourceType:  "FILE",
+				FilePath:    "package.json",
+				Detector:    "npm-parser",
+				Confidence:  EpistemicConfidenceConfirmed,
+				Description: "NPM package file found",
+			},
+		},
 		Provenance: Provenance{
 			Engine:               EngineNameGoAnalyzerWorker,
 			EngineVersion:        "1.0.0",

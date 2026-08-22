@@ -93,6 +93,7 @@ func NewEmptyCanonicalResult(analysisID string, repoName string, srcType SourceT
 			TargetPlatforms: make([]string, 0),
 		},
 		StructureTree: "",
+		Evidence:      make([]Evidence, 0),
 		Provenance: Provenance{
 			Engine:        EngineNameGoAnalyzerWorker,
 			EngineVersion: "1.0.0",

@@ -205,6 +205,55 @@ type Provenance struct {
 	ScopeHash            string  `json:"scopeHash"`
 }
 
+// EpistemicConfidence represents the degree of certainty for a detected feature.
+type EpistemicConfidence string
+
+const (
+	EpistemicConfidenceConfirmed        EpistemicConfidence = "CONFIRMED"
+	EpistemicConfidenceStronglyInferred EpistemicConfidence = "STRONGLY_INFERRED"
+	EpistemicConfidenceWeaklyInferred   EpistemicConfidence = "WEAKLY_INFERRED"
+)
+
+// Evidence represents a canonical, traceable piece of evidence.
+type Evidence struct {
+	ID          string              `json:"id"`
+	SourceType  string              `json:"sourceType"`
+	FilePath    string              `json:"filePath"`
+	LineStart   *int                `json:"lineStart,omitempty"`
+	LineEnd     *int                `json:"lineEnd,omitempty"`
+	Symbol      *string             `json:"symbol,omitempty"`
+	Detector    string              `json:"detector"`
+	Confidence  EpistemicConfidence `json:"confidence"`
+	Description string              `json:"description"`
+}
+
+// StructureNodeType defines whether a node is a file or directory.
+type StructureNodeType string
+
+const (
+	StructureNodeDir  StructureNodeType = "directory"
+	StructureNodeFile StructureNodeType = "file"
+)
+
+// StructureNode represents a single file or directory in the project tree.
+type StructureNode struct {
+	Path     string            `json:"path"`
+	Name     string            `json:"name"`
+	Type     StructureNodeType `json:"type"`
+	Size     int64             `json:"size,omitempty"`
+	Category string            `json:"category,omitempty"`
+	Language string            `json:"language,omitempty"`
+	Children []*StructureNode  `json:"children,omitempty"`
+}
+
+// ProjectStructure represents the full hierarchical structure of a project.
+type ProjectStructure struct {
+	RootName   string         `json:"rootName"`
+	Root       *StructureNode `json:"root"`
+	TotalFiles int            `json:"totalFiles"`
+	TotalDirs  int            `json:"totalDirs"`
+}
+
 // CanonicalAnalysisResult is the single source of truth data structure for PDFNest Repository Analyzer.
 type CanonicalAnalysisResult struct {
 	SchemaVersion string            `json:"schemaVersion"`
@@ -220,5 +269,7 @@ type CanonicalAnalysisResult struct {
 	Testing       TestingInfo       `json:"testing"`
 	Deployment    DeploymentInfo    `json:"deployment"`
 	StructureTree string            `json:"structureTree"`
+	Structure     *ProjectStructure `json:"structure,omitempty"`
+	Evidence      []Evidence        `json:"evidence,omitempty"`
 	Provenance    Provenance        `json:"provenance"`
 }
