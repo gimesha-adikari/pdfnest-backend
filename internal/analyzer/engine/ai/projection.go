@@ -194,7 +194,6 @@ func BuildSafeFactProjection(canonical *engine.CanonicalAnalysisResult) (SafeFac
 		projection.DeploymentSystems = append(projection.DeploymentSystems, d)
 	}
 
-
 	// 7. Intelligence Projection
 	if canonical.Intelligence != nil {
 		if archs, ok := canonical.Intelligence.Architecture.([]intelligence.ArchitectureComponent); ok {

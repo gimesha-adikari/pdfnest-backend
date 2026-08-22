@@ -79,7 +79,8 @@ func TestSynthesizeArchitectureSummary_Success(t *testing.T) {
 		Summary:             "Go Fiber service with PostgreSQL database",
 		ArchitecturePattern: "Monolith",
 		KeyComponents: []ComponentDescription{
-			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-1", "ROUTE-1"}},
+			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-2", "ROUTE-1"}},
+			{Name: "PostgreSQL Database", Role: "Relational Storage", FactIDs: []string{"TECH-1"}},
 		},
 		Model: "mock-v1",
 	}
@@ -102,6 +103,105 @@ func TestSynthesizeArchitectureSummary_Success(t *testing.T) {
 	assert.True(t, valRes.Valid)
 	assert.Equal(t, "Go Fiber service with PostgreSQL database", resp.Summary)
 	assert.Equal(t, 1, mockP.GetCallCount())
+
+	// Verify that the provider received the populated FactCatalog
+	lastReq := mockP.GetLastRequest()
+	require.NotNil(t, lastReq)
+	assert.NotEmpty(t, lastReq.Catalog.Facts)
+	assert.Equal(t, len(lastReq.Catalog.Facts), lastReq.Catalog.TotalFactsCount)
+	assert.Contains(t, lastReq.Catalog.FactMap, "TECH-1")
+	assert.Contains(t, lastReq.Catalog.FactMap, "TECH-2")
+	assert.Contains(t, lastReq.Catalog.FactMap, "ROUTE-1")
+	assert.Contains(t, lastReq.Catalog.FactMap, "ENV-1")
+}
+
+func TestSynthesizeArchitectureSummary_FactCatalogPropagation(t *testing.T) {
+	canonical := createTestCanonicalResult()
+	mockP := NewMockProvider(nil, nil, 0)
+	cfg := Config{Enabled: true, Timeout: 5 * time.Second}
+
+	_, _, err := SynthesizeArchitectureSummary(
+		context.Background(),
+		cfg,
+		mockP,
+		canonical,
+		"task-cat-test",
+		"sess-cat-test",
+		true,
+	)
+	require.NoError(t, err)
+
+	lastReq := mockP.GetLastRequest()
+	require.NotNil(t, lastReq)
+	assert.Equal(t, "task-cat-test", lastReq.TaskID)
+	assert.NotEmpty(t, lastReq.Catalog.Facts)
+	assert.Equal(t, len(lastReq.Catalog.Facts), lastReq.Catalog.TotalFactsCount)
+
+	// Verify prompt payload built from request contains the deterministic Fact IDs
+	promptPayload, promptErr := BuildPromptPayload(lastReq.Facts, lastReq.Catalog, DefaultMaxPromptBytes)
+	require.NoError(t, promptErr)
+	assert.Contains(t, promptPayload.UserData, "TECH-1")
+	assert.Contains(t, promptPayload.UserData, "TECH-2")
+	assert.Contains(t, promptPayload.UserData, "ROUTE-1")
+	assert.Contains(t, promptPayload.UserData, "ENV-1")
+}
+
+func TestSynthesizeArchitectureSummary_MismatchedFactIDGrounding(t *testing.T) {
+	canonical := createTestCanonicalResult()
+	// TECH-1 is PostgreSQL, TECH-2 is Fiber
+	mockResp := &SynthesisResponse{
+		ProtocolVersion:     "1.0.0",
+		TaskID:              "task-grounding",
+		Summary:             "Test summary",
+		ArchitecturePattern: "Monolith",
+		KeyComponents: []ComponentDescription{
+			{
+				Name:    "PostgreSQL Relational DB",
+				Role:    "Relational database storage",
+				FactIDs: []string{"TECH-2"}, // TECH-2 is Fiber, NOT PostgreSQL!
+			},
+		},
+		Model: "mock-v1",
+	}
+	mockP := NewMockProvider(mockResp, nil, 0)
+	cfg := Config{Enabled: true, Timeout: 5 * time.Second}
+
+	resp, valRes, err := SynthesizeArchitectureSummary(
+		context.Background(),
+		cfg,
+		mockP,
+		canonical,
+		"task-grounding",
+		"sess-grounding",
+		true,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	require.NotNil(t, valRes)
+	assert.True(t, valRes.Valid)
+	assert.Equal(t, 1, valRes.RejectedClaims)
+	assert.Empty(t, resp.KeyComponents, "Claim asserting PostgreSQL while citing TECH-2 (Fiber) must be rejected as ungrounded")
+}
+
+func TestSynthesizeArchitectureSummary_Determinism(t *testing.T) {
+	canonical1 := createTestCanonicalResult()
+	canonical2 := createTestCanonicalResult()
+
+	proj1, cat1, err1 := BuildSafeFactProjection(canonical1)
+	require.NoError(t, err1)
+
+	proj2, cat2, err2 := BuildSafeFactProjection(canonical2)
+	require.NoError(t, err2)
+
+	assert.Equal(t, len(cat1.Facts), len(cat2.Facts))
+	for i := range cat1.Facts {
+		assert.Equal(t, cat1.Facts[i].ID, cat2.Facts[i].ID)
+		assert.Equal(t, cat1.Facts[i].Value, cat2.Facts[i].Value)
+		assert.Equal(t, cat1.Facts[i].Category, cat2.Facts[i].Category)
+	}
+	assert.Equal(t, proj1.RepositoryName, proj2.RepositoryName)
+	assert.Equal(t, proj1.Technologies, proj2.Technologies)
 }
 
 func TestSynthesizeArchitectureSummary_TimeoutNonFatal(t *testing.T) {
@@ -242,7 +342,7 @@ func TestPipelineIntegrationAdapter(t *testing.T) {
 		Summary:             "Go Fiber service with PostgreSQL database",
 		ArchitecturePattern: "Monolith",
 		KeyComponents: []ComponentDescription{
-			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-1", "ROUTE-1"}},
+			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-2", "ROUTE-1"}},
 		},
 		Model: "mock-v1",
 	}

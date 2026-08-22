@@ -28,7 +28,7 @@ func TestFullAIPipeline(t *testing.T) {
 		Summary:             "Go Fiber service with PostgreSQL database",
 		ArchitecturePattern: "Monolith",
 		KeyComponents: []ComponentDescription{
-			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-1", "ROUTE-1"}},
+			{Name: "Fiber API", Role: "Web Router", FactIDs: []string{"TECH-2", "ROUTE-1"}},
 			{Name: "Redis Cache", Role: "Cache", FactIDs: []string{"TECH-999"}}, // Hallucination!
 		},
 		Model: "mock-v1",
@@ -50,15 +50,15 @@ func TestFullAIPipeline(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	require.NotNil(t, valRes)
-	
+
 	// Valid, but rejected some claims
 	assert.True(t, valRes.Valid)
 	assert.Equal(t, 1, valRes.RejectedClaims)
-	
+
 	// Should only have 1 key component after hallucination is stripped
 	assert.Len(t, resp.KeyComponents, 1)
 	assert.Equal(t, "Fiber API", resp.KeyComponents[0].Name)
-	
+
 	// Ensure AI is attached
 	require.NotNil(t, canonical.AI)
 	assert.Equal(t, resp, canonical.AI)

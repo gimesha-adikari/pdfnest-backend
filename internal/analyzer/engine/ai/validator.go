@@ -300,19 +300,9 @@ func isUngroundedHallucination(claimText string, citedIDs []string, catalog *Fac
 	// Check if claim explicitly asserts a known tech keyword that is NOT present in the cited facts
 	for _, kw := range knownTechKeywords {
 		if containsWord(claimLower, kw) {
-			// Keyword is asserted in claim text; verify if it is grounded in cited facts or the overall catalog
+			// Keyword is asserted in claim text; verify if it is grounded in cited facts
 			if !containsWord(combinedFacts, kw) {
-				// If not present in cited facts, verify if it exists anywhere in the catalog
-				existsInCatalog := false
-				for _, fact := range catalog.Facts {
-					if containsWord(strings.ToLower(fact.Value), kw) {
-						existsInCatalog = true
-						break
-					}
-				}
-				if !existsInCatalog {
-					return true // Definite ungrounded hallucination
-				}
+				return true // Ungrounded claim: technology asserted without supporting cited facts
 			}
 		}
 	}

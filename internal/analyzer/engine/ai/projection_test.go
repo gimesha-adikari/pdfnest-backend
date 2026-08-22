@@ -1,9 +1,9 @@
 package ai
 
 import (
-	"testing"
 	"pdfnest-backend/internal/analyzer/engine"
 	"pdfnest-backend/internal/analyzer/engine/intelligence"
+	"testing"
 )
 
 func TestFactProjection(t *testing.T) {

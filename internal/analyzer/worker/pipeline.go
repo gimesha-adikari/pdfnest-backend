@@ -10,11 +10,11 @@ import (
 	"pdfnest-backend/internal/analyzer/engine/acquisition"
 	"pdfnest-backend/internal/analyzer/engine/ai"
 	"pdfnest-backend/internal/analyzer/engine/exclusion"
+	"pdfnest-backend/internal/analyzer/engine/graph"
+	"pdfnest-backend/internal/analyzer/engine/intelligence"
 	"pdfnest-backend/internal/analyzer/engine/inventory"
 	"pdfnest-backend/internal/analyzer/engine/parsers"
 	"pdfnest-backend/internal/analyzer/engine/structure"
-	"pdfnest-backend/internal/analyzer/engine/graph"
-	"pdfnest-backend/internal/analyzer/engine/intelligence"
 )
 
 // ValidateJob validates the integrity and supported boundaries of an incoming analyzer job.

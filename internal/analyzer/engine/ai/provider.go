@@ -63,6 +63,7 @@ type SynthesisRequest struct {
 	TaskID          string             `json:"taskId"`
 	SessionID       string             `json:"sessionId"`
 	Facts           SafeFactProjection `json:"facts"`
+	Catalog         FactCatalog        `json:"catalog"`
 	MaxOutputTokens int                `json:"maxOutputTokens"`
 	Temperature     float32            `json:"temperature"`
 }

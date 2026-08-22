@@ -58,6 +58,7 @@ func SynthesizeArchitectureSummary(
 		TaskID:          taskID,
 		SessionID:       sessionID,
 		Facts:           projection,
+		Catalog:         catalog,
 		MaxOutputTokens: cfg.MaxOutputTokens,
 		Temperature:     cfg.Temperature,
 	}

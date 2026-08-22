@@ -26,7 +26,7 @@ func NewProvider(cfg Config) (Provider, error) {
 		}
 		model := cfg.Model
 		if model == "" {
-			model = "gemini-1.5-flash"
+			model = "gemini-2.5-flash"
 		}
 		return NewGeminiProvider(cfg.GeminiAPIKey, model, cfg.Timeout, ""), nil
 	case "openai":
@@ -85,10 +85,7 @@ func (p *GeminiProvider) Name() string {
 }
 
 func (p *GeminiProvider) Synthesize(ctx context.Context, req SynthesisRequest) (*SynthesisResponse, error) {
-	catalog := FactCatalog{
-		Facts: make([]FactItem, 0),
-	}
-	promptPayload, err := BuildPromptPayload(req.Facts, catalog, DefaultMaxPromptBytes)
+	promptPayload, err := BuildPromptPayload(req.Facts, req.Catalog, DefaultMaxPromptBytes)
 	if err != nil {
 		return nil, fmt.Errorf("build prompt: %w", err)
 	}
@@ -163,12 +160,24 @@ func (p *GeminiProvider) Synthesize(ctx context.Context, req SynthesisRequest) (
 		return nil, fmt.Errorf("%w: malformed gemini response", ErrProviderInvalidResponse)
 	}
 
-	responseText := rawResponse.Candidates[0].Content.Parts[0].Text
+	responseText := strings.TrimSpace(rawResponse.Candidates[0].Content.Parts[0].Text)
+	if strings.HasPrefix(responseText, "```json") {
+		responseText = strings.TrimPrefix(responseText, "```json")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	} else if strings.HasPrefix(responseText, "```") {
+		responseText = strings.TrimPrefix(responseText, "```")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	}
+
 	var synthesisResp SynthesisResponse
 	if err := json.Unmarshal([]byte(responseText), &synthesisResp); err != nil {
 		return nil, fmt.Errorf("%w: json decode synthesis response: %v", ErrProviderInvalidResponse, err)
 	}
 
+	synthesisResp.ProtocolVersion = "1.0.0"
+	synthesisResp.TaskID = req.TaskID
 	synthesisResp.Provider = "gemini"
 	synthesisResp.Model = p.model
 	synthesisResp.DurationMs = time.Since(startTime).Milliseconds()
@@ -211,7 +220,7 @@ func (p *OpenAIProvider) Name() string {
 }
 
 func (p *OpenAIProvider) Synthesize(ctx context.Context, req SynthesisRequest) (*SynthesisResponse, error) {
-	promptPayload, err := BuildPromptPayload(req.Facts, FactCatalog{}, DefaultMaxPromptBytes)
+	promptPayload, err := BuildPromptPayload(req.Facts, req.Catalog, DefaultMaxPromptBytes)
 	if err != nil {
 		return nil, fmt.Errorf("build prompt: %w", err)
 	}
@@ -282,11 +291,24 @@ func (p *OpenAIProvider) Synthesize(ctx context.Context, req SynthesisRequest) (
 		return nil, fmt.Errorf("%w: malformed openai response", ErrProviderInvalidResponse)
 	}
 
+	responseText := strings.TrimSpace(rawResponse.Choices[0].Message.Content)
+	if strings.HasPrefix(responseText, "```json") {
+		responseText = strings.TrimPrefix(responseText, "```json")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	} else if strings.HasPrefix(responseText, "```") {
+		responseText = strings.TrimPrefix(responseText, "```")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	}
+
 	var synthesisResp SynthesisResponse
-	if err := json.Unmarshal([]byte(rawResponse.Choices[0].Message.Content), &synthesisResp); err != nil {
+	if err := json.Unmarshal([]byte(responseText), &synthesisResp); err != nil {
 		return nil, fmt.Errorf("%w: json decode synthesis response: %v", ErrProviderInvalidResponse, err)
 	}
 
+	synthesisResp.ProtocolVersion = "1.0.0"
+	synthesisResp.TaskID = req.TaskID
 	synthesisResp.Provider = "openai"
 	synthesisResp.Model = p.model
 	synthesisResp.DurationMs = time.Since(startTime).Milliseconds()
@@ -329,7 +351,7 @@ func (p *AnthropicProvider) Name() string {
 }
 
 func (p *AnthropicProvider) Synthesize(ctx context.Context, req SynthesisRequest) (*SynthesisResponse, error) {
-	promptPayload, err := BuildPromptPayload(req.Facts, FactCatalog{}, DefaultMaxPromptBytes)
+	promptPayload, err := BuildPromptPayload(req.Facts, req.Catalog, DefaultMaxPromptBytes)
 	if err != nil {
 		return nil, fmt.Errorf("build prompt: %w", err)
 	}
@@ -398,11 +420,24 @@ func (p *AnthropicProvider) Synthesize(ctx context.Context, req SynthesisRequest
 		return nil, fmt.Errorf("%w: malformed anthropic response", ErrProviderInvalidResponse)
 	}
 
+	responseText := strings.TrimSpace(rawResponse.Content[0].Text)
+	if strings.HasPrefix(responseText, "```json") {
+		responseText = strings.TrimPrefix(responseText, "```json")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	} else if strings.HasPrefix(responseText, "```") {
+		responseText = strings.TrimPrefix(responseText, "```")
+		responseText = strings.TrimSuffix(responseText, "```")
+		responseText = strings.TrimSpace(responseText)
+	}
+
 	var synthesisResp SynthesisResponse
-	if err := json.Unmarshal([]byte(rawResponse.Content[0].Text), &synthesisResp); err != nil {
+	if err := json.Unmarshal([]byte(responseText), &synthesisResp); err != nil {
 		return nil, fmt.Errorf("%w: json decode synthesis response: %v", ErrProviderInvalidResponse, err)
 	}
 
+	synthesisResp.ProtocolVersion = "1.0.0"
+	synthesisResp.TaskID = req.TaskID
 	synthesisResp.Provider = "anthropic"
 	synthesisResp.Model = p.model
 	synthesisResp.DurationMs = time.Since(startTime).Milliseconds()
