@@ -38,11 +38,10 @@ CORE OPERATIONAL INVARIANTS:
 
 	systemInstruction = ScrubSecrets(systemInstruction)
 
-	// Available budget for user data block
 	overhead := len(systemInstruction) + 1
 	userDataBudget := maxBytes - overhead
-	if userDataBudget < 100 {
-		userDataBudget = 100
+	if userDataBudget < 0 {
+		userDataBudget = 0
 	}
 
 	userData, truncated := formatUserData(facts, catalog.Facts, userDataBudget)
@@ -60,16 +59,19 @@ CORE OPERATIONAL INVARIANTS:
 
 func formatUserData(facts SafeFactProjection, items []FactItem, budget int) (string, bool) {
 	var sb strings.Builder
-	sb.WriteString("<repository_facts>\n")
-	sb.WriteString(fmt.Sprintf("  <repository_name>%s</repository_name>\n", escapeXML(facts.RepositoryName)))
-
+	header := "<repository_facts>\n"
+	header += fmt.Sprintf("  <repository_name>%s</repository_name>\n", escapeXML(facts.RepositoryName))
 	if len(facts.PrimaryLanguages) > 0 {
-		sb.WriteString(fmt.Sprintf("  <primary_languages>%s</primary_languages>\n", escapeXML(strings.Join(facts.PrimaryLanguages, ", "))))
+		header += fmt.Sprintf("  <primary_languages>%s</primary_languages>\n", escapeXML(strings.Join(facts.PrimaryLanguages, ", ")))
+	}
+	header += "  <catalog>\n"
+	closeTag := "  </catalog>\n</repository_facts>"
+
+	if len(header)+len(closeTag) > budget {
+		return "", true
 	}
 
-	sb.WriteString("  <catalog>\n")
-
-	closeTag := "  </catalog>\n</repository_facts>"
+	sb.WriteString(header)
 	truncated := false
 
 	for _, item := range items {
@@ -91,7 +93,6 @@ func formatUserData(facts SafeFactProjection, items []FactItem, budget int) (str
 	}
 
 	sb.WriteString(closeTag)
-
 	return sb.String(), truncated
 }
 
