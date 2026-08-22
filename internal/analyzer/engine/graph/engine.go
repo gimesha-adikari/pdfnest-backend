@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -62,4 +63,33 @@ func (g *RelationshipGraph) AddEdge(edge *GraphEdge) error {
 	g.Inbound[edge.TargetID] = append(g.Inbound[edge.TargetID], edge)
 
 	return nil
+}
+
+
+
+// Serialize exports the graph into a deterministic JSON-serializable structure.
+func (g *RelationshipGraph) Serialize() *SerializedGraph {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	entities := make([]GraphEntity, 0, len(g.Entities))
+	for _, e := range g.Entities {
+		entities = append(entities, *e)
+	}
+	sort.Slice(entities, func(i, j int) bool {
+		return entities[i].ID < entities[j].ID
+	})
+
+	edges := make([]GraphEdge, 0, len(g.Edges))
+	for _, e := range g.Edges {
+		edges = append(edges, *e)
+	}
+	sort.Slice(edges, func(i, j int) bool {
+		return edges[i].ID < edges[j].ID
+	})
+
+	return &SerializedGraph{
+		Entities: entities,
+		Edges:    edges,
+	}
 }

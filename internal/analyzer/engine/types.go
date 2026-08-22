@@ -1,6 +1,9 @@
 package engine
 
-import "time"
+import (
+	"time"
+
+)
 
 // SchemaVersion defines the authoritative version of the CanonicalAnalysisResult schema.
 const SchemaVersion = "1.0.0"
@@ -271,6 +274,8 @@ type CanonicalAnalysisResult struct {
 	Deployment    DeploymentInfo    `json:"deployment"`
 	StructureTree string            `json:"structureTree"`
 	Structure     *ProjectStructure `json:"structure,omitempty"`
+	Graph         any               `json:"graph,omitempty"`
+	GraphMetrics  any               `json:"graphMetrics,omitempty"`
 	Evidence      []Evidence        `json:"evidence,omitempty"`
 	Provenance    Provenance        `json:"provenance"`
 }

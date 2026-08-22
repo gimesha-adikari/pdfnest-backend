@@ -119,3 +119,9 @@ type GraphEdge struct {
 	Evidence   []engine.Evidence          `json:"evidence,omitempty"`
 	Properties map[string]string          `json:"properties,omitempty"`
 }
+
+// SerializedGraph represents a JSON-serializable, deterministic graph structure.
+type SerializedGraph struct {
+	Entities []GraphEntity `json:"entities"`
+	Edges    []GraphEdge   `json:"edges"`
+}

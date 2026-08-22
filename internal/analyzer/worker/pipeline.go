@@ -13,6 +13,7 @@ import (
 	"pdfnest-backend/internal/analyzer/engine/inventory"
 	"pdfnest-backend/internal/analyzer/engine/parsers"
 	"pdfnest-backend/internal/analyzer/engine/structure"
+	"pdfnest-backend/internal/analyzer/engine/graph"
 )
 
 // ValidateJob validates the integrity and supported boundaries of an incoming analyzer job.
@@ -161,6 +162,11 @@ func ExecutePipeline(
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	// Build Semantic Graph
+	relGraph, graphMetrics, err := graph.BuildRelationshipGraph(ctx, inv, nil, facts)
+	if err != nil {
+		return nil, fmt.Errorf("relationship graph construction failed: %w", err)
+	}
 
 	// 5. Construct Canonical Result
 	if onProgress != nil {
@@ -229,6 +235,8 @@ func ExecutePipeline(
 	res.Deployment = facts.Deployment
 	res.Structure = projStructure
 	res.StructureTree = asciiTree
+	res.Graph = relGraph.Serialize()
+	res.GraphMetrics = graphMetrics
 
 	// Provenance & Complexity Policy
 	durationMs := time.Since(startTime).Milliseconds()
