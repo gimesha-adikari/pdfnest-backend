@@ -258,24 +258,61 @@ type ProjectStructure struct {
 	TotalDirs  int            `json:"totalDirs"`
 }
 
+// ScorecardRecommendation represents an actionable recommendation based on intelligence findings.
+type ScorecardRecommendation struct {
+	Title        string `json:"title"`
+	Description  string `json:"description"`
+	Priority     string `json:"priority"`
+	TargetNodeID string `json:"targetNodeId,omitempty"`
+}
+
+// ScorecardQualityScore represents a component or overall quality score.
+type ScorecardQualityScore struct {
+	Component string  `json:"component"`
+	Score     float64 `json:"score"`
+	Grade     string  `json:"grade"`
+	Rationale string  `json:"rationale"`
+}
+
+// Scorecard contains overall and component scores and recommendations.
+type Scorecard struct {
+	OverallScore    float64                   `json:"overallScore"`
+	OverallGrade    string                    `json:"overallGrade"`
+	Components      []ScorecardQualityScore   `json:"components"`
+	Recommendations []ScorecardRecommendation `json:"recommendations"`
+}
+
+// IntelligenceAnalysis encapsulates all findings from intelligence engines.
+type IntelligenceAnalysis struct {
+	Architecture any        `json:"architecture,omitempty"`
+	Flow         any        `json:"flow,omitempty"`
+	Impact       any        `json:"impact,omitempty"`
+	Hotspots     any        `json:"hotspots,omitempty"`
+	Security     any        `json:"security,omitempty"`
+	Test         any        `json:"test,omitempty"`
+	Config       any        `json:"config,omitempty"`
+	Scorecard    *Scorecard `json:"scorecard,omitempty"`
+}
+
 // CanonicalAnalysisResult is the single source of truth data structure for PDFNest Repository Analyzer.
 type CanonicalAnalysisResult struct {
-	SchemaVersion string            `json:"schemaVersion"`
-	AnalysisID    string            `json:"analysisId"`
-	CreatedAt     time.Time         `json:"createdAt"`
-	Repository    RepositoryInfo    `json:"repository"`
-	Metrics       AnalysisMetrics   `json:"metrics"`
-	Technologies  []TechnologyItem  `json:"technologies"`
-	Dependencies  DependenciesBlock `json:"dependencies"`
-	Routes        []ApiRouteItem    `json:"routes"`
-	Environment   EnvironmentBlock  `json:"environment"`
-	Setup         SetupInfo         `json:"setup"`
-	Testing       TestingInfo       `json:"testing"`
-	Deployment    DeploymentInfo    `json:"deployment"`
-	StructureTree string            `json:"structureTree"`
-	Structure     *ProjectStructure `json:"structure,omitempty"`
-	Graph         any               `json:"graph,omitempty"`
-	GraphMetrics  any               `json:"graphMetrics,omitempty"`
-	Evidence      []Evidence        `json:"evidence,omitempty"`
-	Provenance    Provenance        `json:"provenance"`
+	SchemaVersion string                `json:"schemaVersion"`
+	AnalysisID    string                `json:"analysisId"`
+	CreatedAt     time.Time             `json:"createdAt"`
+	Repository    RepositoryInfo        `json:"repository"`
+	Metrics       AnalysisMetrics       `json:"metrics"`
+	Technologies  []TechnologyItem      `json:"technologies"`
+	Dependencies  DependenciesBlock     `json:"dependencies"`
+	Routes        []ApiRouteItem        `json:"routes"`
+	Environment   EnvironmentBlock      `json:"environment"`
+	Setup         SetupInfo             `json:"setup"`
+	Testing       TestingInfo           `json:"testing"`
+	Deployment    DeploymentInfo        `json:"deployment"`
+	StructureTree string                `json:"structureTree"`
+	Structure     *ProjectStructure     `json:"structure,omitempty"`
+	Graph         any                   `json:"graph,omitempty"`
+	GraphMetrics  any                   `json:"graphMetrics,omitempty"`
+	Evidence      []Evidence            `json:"evidence,omitempty"`
+	Provenance    Provenance            `json:"provenance"`
+	Intelligence  *IntelligenceAnalysis `json:"intelligence,omitempty"`
 }
