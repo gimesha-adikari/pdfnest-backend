@@ -71,6 +71,35 @@ func TestSynthesizeArchitectureSummary_ConsentCheck(t *testing.T) {
 	assert.Equal(t, 0, mockP.GetCallCount(), "Provider must never be called when user opted out")
 }
 
+func TestSynthesizeArchitectureSummary_EmptyGeminiKeySafeFailure(t *testing.T) {
+	canonical := createTestCanonicalResult()
+	// When AI is enabled with Gemini but GEMINI_API_KEY is empty, it must fail safely without panic or error
+	cfg := Config{
+		Enabled:      true,
+		Provider:     "gemini",
+		GeminiAPIKey: "", // empty key
+	}
+
+	resp, valRes, err := SynthesizeArchitectureSummary(
+		context.Background(),
+		cfg,
+		nil, // dynamically resolve provider from cfg
+		canonical,
+		"task-empty-key",
+		"sess-empty-key",
+		true,
+	)
+
+	// Fails safely: non-fatal, err is nil, resp is nil, valRes records authentication/init failure
+	require.NoError(t, err)
+	assert.Nil(t, resp)
+	require.NotNil(t, valRes)
+	assert.False(t, valRes.Valid)
+	assert.NotEmpty(t, valRes.RejectionReasons)
+	assert.Contains(t, valRes.RejectionReasons[0], "GEMINI_API_KEY is required")
+	assert.Nil(t, canonical.AI)
+}
+
 func TestSynthesizeArchitectureSummary_Success(t *testing.T) {
 	canonical := createTestCanonicalResult()
 	mockResp := &SynthesisResponse{
