@@ -48,6 +48,13 @@ type SafeFactProjection struct {
 	EnvironmentVariables []string `json:"environmentVariables"`
 	TestingFrameworks    []string `json:"testingFrameworks"`
 	DeploymentSystems    []string `json:"deploymentSystems"`
+	Topology             []string `json:"topology"`
+	ExecutionFlows       []string `json:"executionFlows"`
+	ChangeImpact         []string `json:"changeImpact"`
+	Hotspots             []string `json:"hotspots"`
+	SecurityFindings     []string `json:"securityFindings"`
+	TestCoverage         []string `json:"testCoverage"`
+	Scorecards           []string `json:"scorecards"`
 }
 
 // SynthesisRequest encapsulates the provider-neutral input contract for AI architecture synthesis.

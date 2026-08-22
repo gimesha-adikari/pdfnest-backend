@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"pdfnest-backend/internal/analyzer/engine"
+	"pdfnest-backend/internal/analyzer/engine/intelligence"
 )
 
 // FactItem represents an individual verified repository fact with a deterministic ID.
@@ -40,6 +41,13 @@ func BuildSafeFactProjection(canonical *engine.CanonicalAnalysisResult) (SafeFac
 		EnvironmentVariables: make([]string, 0),
 		TestingFrameworks:    make([]string, 0),
 		DeploymentSystems:    make([]string, 0),
+		Topology:             make([]string, 0),
+		ExecutionFlows:       make([]string, 0),
+		ChangeImpact:         make([]string, 0),
+		Hotspots:             make([]string, 0),
+		SecurityFindings:     make([]string, 0),
+		TestCoverage:         make([]string, 0),
+		Scorecards:           make([]string, 0),
 	}
 
 	facts := make([]FactItem, 0)
@@ -184,6 +192,135 @@ func BuildSafeFactProjection(canonical *engine.CanonicalAnalysisResult) (SafeFac
 		facts = append(facts, item)
 		factMap[id] = item
 		projection.DeploymentSystems = append(projection.DeploymentSystems, d)
+	}
+
+
+	// 7. Intelligence Projection
+	if canonical.Intelligence != nil {
+		if archs, ok := canonical.Intelligence.Architecture.([]intelligence.ArchitectureComponent); ok {
+			for i, a := range archs {
+				id := fmt.Sprintf("TOPOLOGY-%d", i+1)
+				val := fmt.Sprintf("%s (Tier: %s)", sanitizeFactString(a.EntityID), a.Tier)
+				item := FactItem{
+					ID:       id,
+					Category: "topology",
+					Value:    val,
+					Detail:   fmt.Sprintf("confidence: %s", a.Confidence),
+				}
+				facts = append(facts, item)
+				factMap[id] = item
+				projection.Topology = append(projection.Topology, val)
+			}
+		}
+
+		if flows, ok := canonical.Intelligence.Flow.([]intelligence.ExecutionFlow); ok {
+			for i, f := range flows {
+				id := fmt.Sprintf("FLOW-%d", i+1)
+				val := fmt.Sprintf("Flow %s (Len: %d)", sanitizeFactString(f.ID), len(f.Steps))
+				item := FactItem{
+					ID:       id,
+					Category: "flow",
+					Value:    val,
+				}
+				facts = append(facts, item)
+				factMap[id] = item
+				projection.ExecutionFlows = append(projection.ExecutionFlows, val)
+			}
+		}
+
+		if impacts, ok := canonical.Intelligence.Impact.(map[string]*intelligence.ImpactAnalysis); ok {
+			i := 1
+			// sort map keys for determinism
+			keys := make([]string, 0, len(impacts))
+			for k := range impacts {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, entityID := range keys {
+				imp := impacts[entityID]
+				id := fmt.Sprintf("IMPACT-%d", i)
+				val := fmt.Sprintf("Impact of %s: Score %s (Forward %d, Dependents %d)", sanitizeFactString(entityID), imp.RiskScore, imp.ForwardDependencies, imp.DirectDependents)
+				item := FactItem{
+					ID:       id,
+					Category: "impact",
+					Value:    val,
+				}
+				facts = append(facts, item)
+				factMap[id] = item
+				projection.ChangeImpact = append(projection.ChangeImpact, val)
+				i++
+			}
+		}
+
+		if hotspots, ok := canonical.Intelligence.Hotspots.([]intelligence.HotspotScore); ok {
+			for i, h := range hotspots {
+				id := fmt.Sprintf("HOTSPOT-%d", i+1)
+				val := fmt.Sprintf("Hotspot %s (Score: %.2f)", sanitizeFactString(h.EntityID), h.HotspotMetric)
+				item := FactItem{
+					ID:       id,
+					Category: "hotspot",
+					Value:    val,
+				}
+				facts = append(facts, item)
+				factMap[id] = item
+				projection.Hotspots = append(projection.Hotspots, val)
+			}
+		}
+
+		if secs, ok := canonical.Intelligence.Security.([]intelligence.SecurityFinding); ok {
+			for i, s := range secs {
+				id := fmt.Sprintf("SEC-%d", i+1)
+				val := fmt.Sprintf("Security %s: %s", s.Severity, sanitizeFactString(s.Title))
+				item := FactItem{
+					ID:       id,
+					Category: "security",
+					Value:    val,
+					Detail:   sanitizeFactString(s.Remediation),
+				}
+				facts = append(facts, item)
+				factMap[id] = item
+				projection.SecurityFindings = append(projection.SecurityFindings, val)
+			}
+		}
+
+		if t, ok := canonical.Intelligence.Test.(intelligence.TestIntelligence); ok {
+			id := "TESTCOV-1"
+			val := fmt.Sprintf("Test Coverage: %d mappings, %d untested components", len(t.Mappings), len(t.UntestedComponents))
+			item := FactItem{
+				ID:       id,
+				Category: "test_coverage",
+				Value:    val,
+			}
+			facts = append(facts, item)
+			factMap[id] = item
+			projection.TestCoverage = append(projection.TestCoverage, val)
+		}
+
+		if sc := canonical.Intelligence.Scorecard; sc != nil {
+			id := "SCORECARD-1"
+			val := fmt.Sprintf("Scorecard Grade: %s (%.2f)", sc.OverallGrade, sc.OverallScore)
+			item := FactItem{
+				ID:       id,
+				Category: "scorecard",
+				Value:    val,
+			}
+			facts = append(facts, item)
+			factMap[id] = item
+			projection.Scorecards = append(projection.Scorecards, val)
+
+			for i, rec := range sc.Recommendations {
+				rid := fmt.Sprintf("REC-%d", i+1)
+				rval := fmt.Sprintf("Recommendation (%s): %s", rec.Priority, sanitizeFactString(rec.Title))
+				ritem := FactItem{
+					ID:       rid,
+					Category: "recommendation",
+					Value:    rval,
+				}
+				facts = append(facts, ritem)
+				factMap[rid] = ritem
+				projection.Scorecards = append(projection.Scorecards, rval)
+			}
+		}
 	}
 
 	catalog := FactCatalog{
