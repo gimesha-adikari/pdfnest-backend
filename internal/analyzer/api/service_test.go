@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"pdfnest-backend/internal/analyzer/engine"
 	"pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/analyzer/worker"
+	"pdfnest-backend/internal/storage"
 )
 
 func setupTestDBAndRedis(t *testing.T) (*gorm.DB, *redis.Client) {
@@ -156,7 +158,12 @@ func TestService_StorageKeySecurity(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidStorageKey)
 
-	// 3. Valid key accepted
+	// 3. Persist valid object first to satisfy canonical storage existence check
+	testZipBytes := createValidZipBuffer(t)
+	_, _, err = storage.SaveLocalStream(ctx, "repositories/raw/123-session.zip", bytes.NewReader(testZipBytes))
+	require.NoError(t, err)
+
+	// 4. Valid key accepted
 	validSession, err := svc.CreateSession(ctx, user, CreateSessionRequest{
 		SourceType: engine.SourceTypeZip,
 		StorageKey: "repositories/raw/123-session.zip",

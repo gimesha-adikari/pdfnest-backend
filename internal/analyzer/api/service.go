@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"path"
 	"strings"
 	"time"
@@ -17,16 +18,18 @@ import (
 	"pdfnest-backend/internal/analyzer/engine/acquisition"
 	"pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/analyzer/worker"
+	"pdfnest-backend/internal/storage"
 )
 
 var (
-	ErrSessionNotFound     = errors.New("analyzer: session not found or access denied")
-	ErrTaskNotFound        = errors.New("analyzer: task not found or access denied")
-	ErrAnalysisRunning     = errors.New("analyzer: analysis is currently in progress")
-	ErrAnalysisFailed      = errors.New("analyzer: analysis task failed")
-	ErrResultNotReady      = errors.New("analyzer: analysis result is not ready")
-	ErrInvalidStorageKey   = errors.New("analyzer: invalid storage key")
-	ErrUnsupportedFeatures = errors.New("analyzer: deep AST and AI features are not supported in Phase 5")
+	ErrSessionNotFound       = errors.New("analyzer: session not found or access denied")
+	ErrTaskNotFound          = errors.New("analyzer: task not found or access denied")
+	ErrAnalysisRunning       = errors.New("analyzer: analysis is currently in progress")
+	ErrAnalysisFailed        = errors.New("analyzer: analysis task failed")
+	ErrResultNotReady        = errors.New("analyzer: analysis result is not ready")
+	ErrInvalidStorageKey     = errors.New("analyzer: invalid storage key")
+	ErrStorageObjectNotFound = errors.New("analyzer: storage object not found")
+	ErrUnsupportedFeatures   = errors.New("analyzer: deep AST and AI features are not supported in Phase 5")
 )
 
 // Service defines the business contract for analyzer session and task lifecycle management.
@@ -92,6 +95,9 @@ func (s *Service) CreateSession(ctx context.Context, ownerIdentity string, req C
 		cleanKey := strings.TrimSpace(req.StorageKey)
 		if strings.Contains(cleanKey, "..") || strings.HasPrefix(cleanKey, "/") {
 			return nil, fmt.Errorf("%w: path traversal or absolute path detected", ErrInvalidStorageKey)
+		}
+		if !storage.ObjectExists(ctx, cleanKey) {
+			return nil, fmt.Errorf("%w: object key '%s' not found in storage", ErrStorageObjectNotFound, cleanKey)
 		}
 		storageKeyPtr = &cleanKey
 		if repoName == "" {
@@ -503,16 +509,22 @@ func (s *Service) GetActiveWorkers(ctx context.Context) ([]worker.WorkerInfo, er
 	return active, nil
 }
 
-// CheckReadiness inspects Redis, queue, and worker readiness.
+// CheckReadiness inspects Redis, queue, worker, and Git runtime readiness.
 func (s *Service) CheckReadiness(ctx context.Context) SubsystemReadiness {
 	readiness := SubsystemReadiness{
 		RedisReady:  false,
 		QueueReady:  false,
 		WorkerReady: false,
+		GitReady:    false,
 		IsReady:     false,
 	}
 
-	// 1. Check Redis connectivity
+	// 1. Check Git runtime availability
+	if _, err := exec.LookPath("git"); err == nil {
+		readiness.GitReady = true
+	}
+
+	// 2. Check Redis connectivity
 	if err := s.redis.Ping(ctx).Err(); err != nil {
 		readiness.Message = fmt.Sprintf("Redis connection failure: %v", err)
 		return readiness
@@ -520,7 +532,7 @@ func (s *Service) CheckReadiness(ctx context.Context) SubsystemReadiness {
 	readiness.RedisReady = true
 	readiness.QueueReady = true
 
-	// 2. Query active workers
+	// 3. Query active workers
 	workers, err := s.GetActiveWorkers(ctx)
 	if err != nil {
 		readiness.Message = fmt.Sprintf("Failed to query active workers: %v", err)

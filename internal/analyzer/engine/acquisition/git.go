@@ -2,6 +2,7 @@ package acquisition
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -121,7 +122,7 @@ func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
 			}
 			return nil
 		}
-		return fmt.Errorf("dns lookup failed for host %s: %w", hostname, err)
+		return fmt.Errorf("%w: dns lookup failed for host %s: %v", ErrGitUnreachable, hostname, err)
 	}
 
 	for _, ip := range ips {
@@ -222,7 +223,49 @@ func CloneGitRepository(
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		_ = sandbox.Cleanup()
-		return nil, fmt.Errorf("%w: %s (output: %s)", ErrGitCloneFailed, err, string(output))
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+		outStr := strings.TrimSpace(string(output))
+
+		// 1. Context Deadline / Timeout Diagnosis
+		if errors.Is(cloneCtx.Err(), context.DeadlineExceeded) || (ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+			return nil, fmt.Errorf("%w: repository clone timed out after %s (exceeded limit %s)", ErrGitTimeout, elapsed, timeout)
+		}
+
+		// 2. Parent Context Cancellation (e.g. user aborted or worker shutting down)
+		if errors.Is(cloneCtx.Err(), context.Canceled) || (ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled)) {
+			return nil, fmt.Errorf("%w: git clone operation canceled", ErrGitAcquisitionFailed)
+		}
+
+		// 3. Process Exit Code / Signal Inspection
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Exit code 137 = SIGKILL (Linux OS OOM killer or container resource cgroup limit)
+			if exitErr.ExitCode() == 137 || exitErr.String() == "signal: killed" {
+				return nil, fmt.Errorf("%w: git clone process terminated by system (exceeded memory or container resource limit)", ErrGitResourceLimit)
+			}
+		}
+
+		// 4. Stderr pattern classification
+		lowerOut := strings.ToLower(outStr)
+		if strings.Contains(lowerOut, "authentication failed") ||
+			strings.Contains(lowerOut, "could not read username") ||
+			strings.Contains(lowerOut, "terminal prompts disabled") {
+			return nil, fmt.Errorf("%w: authentication required for repository", ErrGitAuthRequired)
+		}
+
+		if strings.Contains(lowerOut, "could not resolve host") ||
+			strings.Contains(lowerOut, "failed to connect") ||
+			strings.Contains(lowerOut, "connection refused") ||
+			strings.Contains(lowerOut, "network is unreachable") {
+			return nil, fmt.Errorf("%w: could not connect to git host (%s)", ErrGitUnreachable, outStr)
+		}
+
+		if strings.Contains(lowerOut, "repository not found") ||
+			strings.Contains(lowerOut, "remote: not found") ||
+			strings.Contains(lowerOut, "not found") {
+			return nil, fmt.Errorf("%w: repository not found or inaccessible (%s)", ErrGitInvalidRepository, outStr)
+		}
+
+		return nil, fmt.Errorf("%w: %s (output: %s)", ErrGitAcquisitionFailed, err, outStr)
 	}
 
 	// Capture commit hash via direct rev-parse

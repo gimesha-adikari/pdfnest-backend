@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     dumb-init \
     ghostscript \
     chromium \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -35,7 +36,8 @@ COPY --from=builder /out/server /app/server
 COPY --from=builder /src/config /app/config
 
 RUN useradd --system --uid 10001 --create-home appuser && \
-    chown -R appuser:appuser /app
+    mkdir -p /tmp/platen_storage && \
+    chown -R appuser:appuser /app /tmp/platen_storage
 
 USER appuser
 

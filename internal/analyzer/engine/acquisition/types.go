@@ -2,6 +2,8 @@ package acquisition
 
 import (
 	"errors"
+	"os"
+	"strconv"
 	"time"
 
 	"pdfnest-backend/internal/analyzer/engine"
@@ -16,6 +18,24 @@ var (
 
 	// ErrGitCloneFailed is returned when Git shallow clone fails or exits with non-zero code.
 	ErrGitCloneFailed = errors.New("acquisition: git clone operation failed")
+
+	// ErrGitAcquisitionFailed is returned when Git shallow clone fails.
+	ErrGitAcquisitionFailed = errors.New("GIT_ACQUISITION_FAILED: git clone operation failed")
+
+	// ErrGitTimeout is returned when Git clone exceeds the acquisition deadline.
+	ErrGitTimeout = errors.New("GIT_TIMEOUT: git clone operation timed out")
+
+	// ErrGitResourceLimit is returned when Git clone process is terminated due to memory or system resource limits.
+	ErrGitResourceLimit = errors.New("GIT_RESOURCE_LIMIT: git clone process exceeded system resource limits")
+
+	// ErrGitUnreachable is returned when the remote Git host or network target is unreachable.
+	ErrGitUnreachable = errors.New("GIT_UNREACHABLE: could not connect to remote git repository")
+
+	// ErrGitAuthRequired is returned when the repository requires private authentication.
+	ErrGitAuthRequired = errors.New("GIT_AUTH_REQUIRED: authentication required for repository")
+
+	// ErrGitInvalidRepository is returned when the remote repository URL or ref does not exist.
+	ErrGitInvalidRepository = errors.New("GIT_INVALID_REPOSITORY: repository not found or inaccessible")
 
 	// ErrMaxExtractedSizeExceeded is returned when uncompressed archive volume exceeds the 250 MB ceiling.
 	ErrMaxExtractedSizeExceeded = errors.New("acquisition: archive extracted size exceeds maximum allowed ceiling (250 MB)")
@@ -45,13 +65,19 @@ type AcquisitionLimits struct {
 	ExtractTimeout        time.Duration
 }
 
-// DefaultAcquisitionLimits returns the standard production limits (250 MB, 25k files, 10:1 ratio).
+// DefaultAcquisitionLimits returns the standard production limits (250 MB, 25k files, 100:1 ratio, 300s git timeout).
 func DefaultAcquisitionLimits() AcquisitionLimits {
+	gitTimeout := 300 * time.Second
+	if envSec := os.Getenv("ANALYZER_GIT_TIMEOUT_SECONDS"); envSec != "" {
+		if sec, err := strconv.Atoi(envSec); err == nil && sec > 0 {
+			gitTimeout = time.Duration(sec) * time.Second
+		}
+	}
 	return AcquisitionLimits{
 		MaxExtractedBytes:     250 * 1024 * 1024, // 250 MB
 		MaxFileCount:          25000,             // 25,000 files
 		MaxDecompressionRatio: 100.0,             // 100:1 ratio
-		GitTimeout:            90 * time.Second,  // 90s clone timeout
+		GitTimeout:            gitTimeout,        // Configurable git timeout (default 5m)
 		ExtractTimeout:        30 * time.Second,  // 30s extraction timeout
 	}
 }

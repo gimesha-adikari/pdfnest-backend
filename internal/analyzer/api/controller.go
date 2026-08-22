@@ -75,6 +75,12 @@ func (ctrl *Controller) CreateSession(c *fiber.Ctx) error {
 				Message: err.Error(),
 			})
 		}
+		if errors.Is(err, ErrStorageObjectNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(APIError{
+				Code:    "STORAGE_OBJECT_NOT_FOUND",
+				Message: err.Error(),
+			})
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    ErrCodeInvalidRequest,
 			Message: err.Error(),

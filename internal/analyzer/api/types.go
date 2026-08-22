@@ -117,6 +117,7 @@ type SubsystemReadiness struct {
 	RedisReady    bool                `json:"redisReady"`
 	QueueReady    bool                `json:"queueReady"`
 	WorkerReady   bool                `json:"workerReady"`
+	GitReady      bool                `json:"gitReady"`
 	ActiveWorkers int                 `json:"activeWorkers"`
 	Workers       []worker.WorkerInfo `json:"workers,omitempty"`
 	IsReady       bool                `json:"isReady"`

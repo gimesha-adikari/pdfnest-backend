@@ -9,6 +9,9 @@ import (
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	group := router.Group("/v1/analyzer")
 
+	// Upload & Ingestion
+	group.Post("/upload", ctrl.UploadArchive)
+
 	// Session Lifecycle
 	group.Post("/sessions", ctrl.CreateSession)
 	group.Get("/sessions/:id", ctrl.GetSession)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"pdfnest-backend/internal/analyzer/engine"
+	"pdfnest-backend/internal/storage"
 )
 
 // ExtractZipArchive securely extracts a staged ZIP archive into the sandbox workspace,
@@ -26,8 +27,15 @@ func ExtractZipArchive(
 		return nil, ErrSandboxClosed
 	}
 
+	// 0. Resolve canonical storage key or staged path to an absolute local file
+	resolvedPath, cleanup, err := storage.ResolveArchive(ctx, zipFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve zip archive: %w", err)
+	}
+	defer cleanup()
+
 	// 1. Calculate source artifact SHA-256
-	artifactSha, err := engine.HashFileSHA256(zipFilePath)
+	artifactSha, err := engine.HashFileSHA256(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("hash zip archive: %w", err)
 	}
@@ -58,7 +66,7 @@ func ExtractZipArchive(
 	startTime := time.Now()
 
 	// 2. Open ZIP reader
-	r, err := zip.OpenReader(zipFilePath)
+	r, err := zip.OpenReader(resolvedPath)
 	if err != nil {
 		_ = sandbox.Cleanup()
 		return nil, fmt.Errorf("open zip archive: %w", err)

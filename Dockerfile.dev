@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     chromium \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 RUN go install github.com/air-verse/air@latest
