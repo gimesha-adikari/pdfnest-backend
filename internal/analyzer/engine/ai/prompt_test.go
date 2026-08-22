@@ -208,3 +208,14 @@ func TestBuildPromptPayload_SizeCeilingAndDeterministicTruncation(t *testing.T) 
 	assert.True(t, payload.Truncated, "Must flag truncated payload when exceeding byte budget")
 	assert.LessOrEqual(t, payload.EstimatedBytes, 1500)
 }
+
+func TestPromptGeneration(t *testing.T) {
+	canonical := createCanonicalFixture()
+	projection, catalog, _ := BuildSafeFactProjection(canonical)
+	payload, err := BuildPromptPayload(projection, catalog, 32*1024)
+	require.NoError(t, err)
+
+	assert.Contains(t, payload.SystemInstruction, "EPISTEMIC CONFIDENCE")
+	assert.Contains(t, payload.SystemInstruction, "\"Insufficient evidence\"")
+	assert.Contains(t, payload.SystemInstruction, "FACT-ID CITATION")
+}
