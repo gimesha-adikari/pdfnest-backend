@@ -22,14 +22,14 @@ func SeedSiteContent() {
 			HeroSubtitleGuest:     "Edit, convert, secure, and organize PDFs online with advanced, cloud-native processing tools.",
 			HeroSubtitleGuestBold: "Start free. Upgrade anytime.",
 
-			AuthBannerProAccess:  "Access: All Premium Workspaces & Advanced Tools",
-			AuthBannerFreeUsage:  "Usage: unit-based billing with 3-hour, daily, and monthly limits",
-			AuthBannerFreeAction: "Upgrade to Pro",
+			AuthBannerProAccess:  "Capacity: High-allowance unit allocation for intensive processing",
+			AuthBannerFreeUsage:  "Usage: 20 daily units • 8 per 3-hour window • 80 per month",
+			AuthBannerFreeAction: "Upgrade to Plus",
 
 			Feature1Title:       "Free Tier Included",
-			Feature1Description: "Access baseline document utilities instantly with no upfront cost.",
-			Feature2Title:       "Pro Ecosystem",
-			Feature2Description: "Unlock high-performance processing, interactive canvas features, and larger workflows.",
+			Feature1Description: "Access core document utilities with daily processing units at zero upfront cost.",
+			Feature2Title:       "High-Capacity Processing",
+			Feature2Description: "Higher unit allowances across 3-hour, daily, and monthly windows for demanding workloads.",
 			Feature3Title:       "Isolated Sandbox",
 			Feature3Description: "Secure processing sandboxes compile your document jobs and clear data after completion.",
 
@@ -61,70 +61,80 @@ func SeedSiteContent() {
 			CategoryOptimizeDesc:  "Compress, repair, and optimize PDFs for storage, sharing, and printing.",
 
 			CategoryStudioTitle: "PDF Studio",
-			CategoryStudioDesc:  "Access an all-in-one workspace for advanced PDF editing and document management.",
+			CategoryStudioDesc:  "Access an all-in-one workspace for visual PDF editing and document management.",
 		}
 		config.DB.Create(&homeContent)
 	}
 
 	var subCount int64
 	config.DB.Model(&models.SubscribePageContent{}).Count(&subCount)
-	if subCount == 0 {
-		subContent := models.SubscribePageContent{
-			ID:                1,
-			HeroBadge:         "Value Upgrades",
-			HeroTitle:         "Unlock More With",
-			HeroTitleGradient: "PDFNest Pro Ecosystem",
-			HeroSubtitle:      "Everything you need to edit, convert, organize and secure PDFs. Start free. Upgrade when your workflow grows.",
+	if subCount > 0 {
+		var existing models.SubscribePageContent
+		if err := existing.ResetExistingData(config.DB); err != nil {
+			panic(err)
+		}
+	}
 
-			PremiumSectionTitle: "Premium Features Built For Production Workflows",
-			StudioTitle:         "Virtual Document Studio",
-			StudioDescription:   "Manage PDF workflows from a single workspace.",
-			StudioBulletPoints:  "Edit pages,Watermarks,Metadata,Security controls,Multi-step workflows",
-			CanvasTitle:         "Interactive Canvas",
-			CanvasDescription:   "Create PDFs visually.",
-			CanvasBulletPoints:  "Drag and drop,Custom layouts,Multiple images,Professional exports",
-			SpeedTitle:          "Faster Processing",
-			SpeedDescription:    "Built for power users.",
-			SpeedBulletPoints:   "Priority queues,Lower wait times,Flexible usage windows,Premium tools",
+	subContent := models.SubscribePageContent{
+		ID:                1,
+		HeroBadge:         "Transparent Computing Tiers",
+		HeroTitle:         "Choose the Right Capacity for",
+		HeroTitleGradient: "Your Document Workflows",
+		HeroSubtitle:      "All tools, Studio, and privacy features are available on every plan. Upgrade for higher processing unit allowances and demanding workloads.",
 
-			FreeTitle:        "Free",
-			FreePrice:        "0",
-			FreeSubtitle:     "Perfect for occasional use",
-			FreeBulletPoints: "Core PDF tools,Light OCR,Secure processing,Small unit allowance,3-hour / daily / monthly limits",
+		PremiumSectionTitle: "Processing Capacity Built for Every Workload",
+		StudioTitle:         "More Processing Capacity",
+		StudioDescription:   "Handle more document-processing work with higher 3-hour burst and daily unit allowances.",
+		StudioBulletPoints:  "Higher daily unit allowances,3-hour burst capacity,Seamless workflow continuity,Predictable usage resets",
+		CanvasTitle:         "Built for Demanding Documents",
+		CanvasDescription:   "Resource-intensive operations scale transparently with document complexity, page count, and images.",
+		CanvasBulletPoints:  "Page-weighted unit cost scaling,Multi-page batch conversions,Intensive OCR text extraction,High-volume document compilation",
+		SpeedTitle:          "Room for Heavy Workloads",
+		SpeedDescription:    "Higher tiers provide substantially more processing capacity for regular and heavy multi-document jobs.",
+		SpeedBulletPoints:   "100 to 400 daily processing units,Extended page duplication limits,Optional credit top-ups,7-day free trial on Plus & Pro",
 
-			PlusTitle:        "Plus",
-			PlusMonthlyPrice: "4.99",
-			PlusYearlyPrice:  "49.99",
-			PlusSubtitle:     "For active users",
-			PlusBulletPoints: "Everything in Free,More units per window,Full OCR support,Better burst allowance,Priority processing",
+		FreeTitle:        "Free",
+		FreePrice:        "0",
+		FreeSubtitle:     "For everyday, occasional document tasks",
+		FreeBulletPoints: "Access to all 39+ PDF tools,Studio workspace access,20 processing units per day,8 units per 3-hour window,80 units per month allowance",
 
-			ProTitle:        "Pro",
-			ProMonthlyPrice: "9.99",
-			ProYearlyPrice:  "99.99",
-			ProSubtitle:     "For professionals",
-			ProBulletPoints: "Everything in Plus,Highest unit allowance,Advanced workflows,Large file handling,Premium workspace tools",
+		PlusTitle:        "Plus",
+		PlusMonthlyPrice: "4.99",
+		PlusYearlyPrice:  "49.99",
+		PlusSubtitle:     "For active users and frequent document tasks",
+		PlusBulletPoints: "Everything in Free,100 processing units per day,50 units per 3-hour window,500 units per month allowance,Higher capacity for multi-page jobs",
 
-			TrialText: "7-day free trial",
+		ProTitle:        "Pro",
+		ProMonthlyPrice: "9.99",
+		ProYearlyPrice:  "99.99",
+		ProSubtitle:     "For power users and demanding batch workloads",
+		ProBulletPoints: "Everything in Plus,400 processing units per day,150 units per 3-hour window,2000 units per month allowance,Maximum capacity for heavy OCR and conversion jobs,Extended page duplication limits",
 
-			SecurityTitle:    "Your files stay completely private",
-			SecuritySubtitle: "Document security is built into the core architecture.",
-			SecurityTags:     "Temporary processing,Secure transfers,Automatic cleanup,No permanent storage",
+		TrialText: "7-day free trial",
 
-			CtaGuestTitle: "Create a free account and start using Platen PDF today.",
+		SecurityTitle:    "Your files stay completely private",
+		SecuritySubtitle: "Document security is built into the core architecture.",
+		SecurityTags:     "Temporary processing,Secure transfers,Automatic cleanup,No permanent storage",
 
-			CtaFreeTitle:    "Need more power?",
-			CtaFreeSubtitle: "Choose monthly or yearly billing and start with a 7-day free trial.",
+		CtaGuestTitle: "Create a free account and start using Platen PDF today.",
 
-			CtaPlusTitle:    "Need even higher limits?",
-			CtaPlusSubtitle: "Upgrade to Pro for Studio, Interactive Canvas and maximum processing limits.",
+		CtaFreeTitle:    "Need more power?",
+		CtaFreeSubtitle: "Choose monthly or yearly billing and start with a 7-day free trial.",
 
-			CtaProTitle:    "You're on our most powerful plan.",
-			CtaProSubtitle: "Manage your subscription anytime from your account settings.",
+		CtaPlusTitle:    "Need even higher limits?",
+		CtaPlusSubtitle: "Upgrade to Pro for 400 daily units and maximum processing capacity.",
 
-			FaqsJSON: `[
+		CtaProTitle:    "You're on our most powerful plan.",
+		CtaProSubtitle: "Manage your subscription anytime from your account settings.",
+
+		FaqsJSON: `[
     {
         "q":"Is Platen PDF free?",
-        "a":"Yes. The Free plan includes essential PDF tools with limited daily usage."
+        "a":"Yes. The Free plan includes all 39+ PDF tools and the Studio workspace with 20 processing units per day."
+    },
+    {
+        "q":"How do processing units work?",
+        "a":"Each tool operation consumes units based on document size and complexity. Simple operations use 1–2 units, while complex OCR or conversions consume units proportionally to page count."
     },
     {
         "q":"Do Plus and Pro include a free trial?",
@@ -132,7 +142,7 @@ func SeedSiteContent() {
     },
     {
         "q":"Can I choose monthly or yearly billing?",
-        "a":"Yes. Both Plus and Pro are available with monthly and yearly billing."
+        "a":"Yes. Both Plus and Pro are available with monthly and yearly billing options."
     },
     {
         "q":"Can I cancel during the trial?",
@@ -144,13 +154,12 @@ func SeedSiteContent() {
     },
     {
         "q":"Are my files stored?",
-        "a":"No. Files are processed temporarily and automatically deleted after processing."
+        "a":"No. Files are processed temporarily in ephemeral sandboxes and automatically deleted after processing."
     }
 ]`,
-		}
-
-		config.DB.Create(&subContent)
 	}
+
+	config.DB.Create(&subContent)
 
 	var count int64
 	config.DB.Model(&models.AboutPageContent{}).Count(&count)
@@ -160,7 +169,7 @@ func SeedSiteContent() {
 			HeroTag:             "About Platen PDF",
 			HeroTitle:           "Built For Modern PDF Workflows",
 			HeroDescription:     "Platen PDF combines powerful PDF tools, visual workspaces, and secure cloud processing into a single platform. Whether you're editing a document, creating a portfolio, preparing reports, or managing complex PDF workflows, Platen PDF helps you work faster and smarter.",
-			StatsJson:           `[{"value":"37+","label":"PDF Tools"},{"value":"3","label":"Workspace Types"},{"value":"Free","label":"Plan Available"},{"value":"Pro","label":"Advanced Workspaces"}]`,
+			StatsJson:           `[{"value":"39+","label":"PDF Tools"},{"value":"100%","label":"Privacy First"},{"value":"Free","label":"Plan Available"},{"value":"Pro","label":"High-Capacity Plans"}]`,
 			SectionTitle:        "What Makes Platen PDF Different",
 			SectionSubtitle:     "More than a PDF converter. A complete PDF workspace.",
 			HighlightsJson:      `[{"title":"37+ PDF Tools","description":"Merge, split, compress, convert, secure, and organize PDFs with fast and reliable tools built for everyday work.","icon_type":"file"},{"title":"Virtual Document Studio","description":"Manage pages, watermarks, metadata, merging, compression, and document workflows from a single workspace.","icon_type":"layers"},{"title":"Interactive Canvas","description":"Design PDFs visually using drag-and-drop positioning, scaling controls, layer management, and visual editing.","icon_type":"pen"}]`,

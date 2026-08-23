@@ -176,7 +176,7 @@ func (ctrl *Controller) UpdateSubscribePageContent(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "malformed structural payload data"})
 	}
 
-	safeMap := filterAllowed(bodyMap, subscribeAllowedFields)
+	safeMap := models.SubscribePageContent{}.FilterUpdatePayload(bodyMap)
 
 	var existing models.SubscribePageContent
 	if err := config.DB.First(&existing, 1).Error; err != nil {

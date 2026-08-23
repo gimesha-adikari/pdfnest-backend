@@ -1,6 +1,10 @@
 package models
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 type HomePageContent struct {
 	ID uint `gorm:"primaryKey" json:"id"`
@@ -120,4 +124,74 @@ type SubscribePageContent struct {
 
 	FaqsJSON  string    `gorm:"type:text;not null" json:"faqsJson"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+var subscribePageContentAllowedFields = map[string]struct{}{
+	"heroBadge":           {},
+	"heroTitle":           {},
+	"heroTitleGradient":   {},
+	"heroSubtitle":        {},
+	"premiumSectionTitle": {},
+	"studioTitle":         {},
+	"studioDescription":   {},
+	"studioBulletPoints":  {},
+	"canvasTitle":         {},
+	"canvasDescription":   {},
+	"canvasBulletPoints":  {},
+	"speedTitle":          {},
+	"speedDescription":    {},
+	"speedBulletPoints":   {},
+	"freeTitle":           {},
+	"freePrice":           {},
+	"freeSubtitle":        {},
+	"freeBulletPoints":    {},
+	"plusTitle":           {},
+	"plusMonthlyPrice":    {},
+	"plusYearlyPrice":     {},
+	"plusSubtitle":        {},
+	"plusBulletPoints":    {},
+	"proTitle":            {},
+	"proMonthlyPrice":     {},
+	"proYearlyPrice":      {},
+	"proSubtitle":         {},
+	"proBulletPoints":     {},
+	"trialText":           {},
+	"securityTitle":       {},
+	"securitySubtitle":    {},
+	"securityTags":        {},
+	"ctaGuestTitle":       {},
+	"ctaFreeTitle":        {},
+	"ctaFreeSubtitle":     {},
+	"ctaPlusTitle":        {},
+	"ctaPlusSubtitle":     {},
+	"ctaProTitle":         {},
+	"ctaProSubtitle":      {},
+	"faqsJson":            {},
+}
+
+// FilterUpdatePayload strips any non-whitelisted keys from an incoming payload
+// before the model is updated. This prevents arbitrary or legacy fields from
+// being persisted into the singleton subscribe-page content record.
+func (SubscribePageContent) FilterUpdatePayload(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return map[string]interface{}{"updatedAt": time.Now()}
+	}
+
+	out := make(map[string]interface{}, len(subscribePageContentAllowedFields)+1)
+	for key, value := range src {
+		if _, ok := subscribePageContentAllowedFields[key]; ok {
+			out[key] = value
+		}
+	}
+	out["updatedAt"] = time.Now()
+	return out
+}
+
+// ResetExistingData clears any previously persisted subscribe-page content so the
+// app can fully reseed it on the next startup.
+func (SubscribePageContent) ResetExistingData(db *gorm.DB) error {
+	if db == nil {
+		return nil
+	}
+	return db.Where("1 = 1").Delete(&SubscribePageContent{}).Error
 }
