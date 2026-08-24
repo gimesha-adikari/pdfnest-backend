@@ -5,6 +5,7 @@ import (
 	"os"
 	analyzerModels "pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/models"
+	studioModels "pdfnest-backend/internal/studio/models"
 	"time"
 
 	"github.com/google/uuid"
@@ -196,6 +197,13 @@ func ConnectDB() {
 		&models.DynamicToolItem{},
 		models.AboutPageContent{},
 		&analyzerModels.AnalyzerSession{},
+		&studioModels.StudioDocument{},
+		&studioModels.StudioAsset{},
+		&studioModels.StudioSnapshot{},
+		&studioModels.StudioVersion{},
+		&studioModels.StudioOperation{},
+		&studioModels.StudioSession{},
+		&studioModels.StudioExport{},
 	)
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)
