@@ -24,6 +24,7 @@ import (
 	"pdfnest-backend/internal/security"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/structure"
+	"pdfnest-backend/internal/studio"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/user"
 	"time"
@@ -163,6 +164,12 @@ func main() {
 	analyzerService := analyzerApi.NewService(config.DB, config.Redis, analyzerQueueName)
 	analyzerController := analyzerApi.NewController(analyzerService)
 	analyzerApi.RegisterRoutes(toolGroup, analyzerController)
+
+	studioRepo := studio.NewRepository(config.DB)
+	studioService := studio.NewService(studioRepo)
+	studioRenderer := studio.NewTileRenderer(studioRepo)
+	studioController := studio.NewController(studioService, studioRenderer)
+	studio.RegisterRoutes(toolGroup, studioController)
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
