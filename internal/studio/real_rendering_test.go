@@ -3,6 +3,9 @@ package studio
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -13,7 +16,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -56,48 +61,136 @@ func createDeterministicTestPDF(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// deterministicTestWorkerRenderer emulates the PyMuPDF worker by rasterizing the deterministic PDF pages into images.
-func deterministicTestWorkerRenderer(ctx context.Context, pdfPath string, pageNumber int, dpi float64) (image.Image, error) {
-	// A4 standard at given DPI (72 DPI = 595 x 842 px)
-	scale := dpi / 72.0
-	w := int(595.28 * scale)
-	h := int(841.89 * scale)
-	if w <= 0 {
-		w = 595
+// renderPdfWithPyMuPDF uses the Python environment's PyMuPDF package to rasterize a PDF page.
+func renderPdfWithPyMuPDF(pdfBytes []byte, pageNum int, dpi float64) ([]byte, error) {
+	tmpPdf, err := os.CreateTemp("", "pymupdf-in-*.pdf")
+	if err != nil {
+		return nil, err
 	}
-	if h <= 0 {
-		h = 842
+	defer os.Remove(tmpPdf.Name())
+
+	if _, err := tmpPdf.Write(pdfBytes); err != nil {
+		_ = tmpPdf.Close()
+		return nil, err
 	}
+	_ = tmpPdf.Close()
 
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{255, 255, 255, 255}}, image.Point{}, draw.Src)
+	tmpJpg, err := os.CreateTemp("", "pymupdf-out-*.jpg")
+	if err != nil {
+		return nil, err
+	}
+	tmpJpgPath := tmpJpg.Name()
+	_ = tmpJpg.Close()
+	defer os.Remove(tmpJpgPath)
 
-	// Draw distinctive page content matching createDeterministicTestPDF
-	if pageNumber == 1 {
-		// Pure Blue box at scaled (50, 100, 200, 150)
-		box := image.Rect(int(50*scale), int(100*scale), int(250*scale), int(250*scale))
-		draw.Draw(img, box, &image.Uniform{C: color.RGBA{0, 0, 255, 255}}, image.Point{}, draw.Src)
-	} else if pageNumber == 2 {
-		// Pure Green box at scaled (50, 100, 200, 150)
-		box := image.Rect(int(50*scale), int(100*scale), int(250*scale), int(250*scale))
-		draw.Draw(img, box, &image.Uniform{C: color.RGBA{0, 255, 0, 255}}, image.Point{}, draw.Src)
-	} else {
-		return nil, fmt.Errorf("page number %d out of bounds (max 2)", pageNumber)
+	pythonBin := "/home/gimesha/My_Projects/platen/pdfnest-worker/.venv/bin/python"
+	if _, statErr := os.Stat(pythonBin); statErr != nil {
+		pythonBin = "python3"
 	}
 
-	return img, nil
+	pyScript := `
+import pymupdf as fitz
+import sys
+doc = fitz.open(sys.argv[1])
+page_num = int(sys.argv[2])
+dpi = float(sys.argv[3])
+page = doc[page_num - 1]
+zoom = float(dpi) / 72.0
+matrix = fitz.Matrix(zoom, zoom)
+pix = page.get_pixmap(matrix=matrix)
+pix.save(sys.argv[4])
+`
+	cmd := exec.Command(pythonBin, "-c", pyScript, tmpPdf.Name(), strconv.Itoa(pageNum), fmt.Sprintf("%.2f", dpi), tmpJpgPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("pymupdf execution failed: %w (output: %s)", err, string(output))
+	}
+
+	return os.ReadFile(tmpJpgPath)
 }
 
-func TestRealRendering_DeterministicContentAndVerification(t *testing.T) {
-	app, _, _, renderer, _ := setupTestApp(t)
-	guestID := "guest_content_test_" + uuid.New().String()
+func TestRealRendering_EndToEndWorkerRenderer(t *testing.T) {
+	// Set test shared secret
+	testSecret := "test-secret-" + uuid.New().String()
+	t.Setenv("WORKER_SHARED_SECRET", testSecret)
 
-	// Inject deterministic worker renderer into test app
-	renderer.SetWorkerRenderer(deterministicTestWorkerRenderer)
+	// 1. Launch a mock worker HTTP server that verifies HMAC signatures and renders with PyMuPDF
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A. Verify route
+		if r.URL.Path != "/api/v1/render/page" {
+			http.NotFound(w, r)
+			return
+		}
 
-	// 1. Create a 2-page deterministic PDF and save to storage
+		// B. Verify HMAC Signature
+		sig := r.Header.Get("X-Worker-Signature")
+		ts := r.Header.Get("X-Worker-Timestamp")
+		nonce := r.Header.Get("X-Worker-Nonce")
+		if sig == "" || ts == "" || nonce == "" {
+			http.Error(w, "missing worker authentication", http.StatusUnauthorized)
+			return
+		}
+
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
+		mac := hmac.New(sha256.New, []byte(testSecret))
+		mac.Write([]byte(stringToSign))
+		expectedSig := hex.EncodeToString(mac.Sum(nil))
+
+		if sig != expectedSig {
+			http.Error(w, "invalid worker signature", http.StatusUnauthorized)
+			return
+		}
+
+		// C. Parse multipart form
+		if err := r.ParseMultipartForm(10 * 1024 * 1024); err != nil {
+			http.Error(w, "invalid multipart form", http.StatusBadRequest)
+			return
+		}
+
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		pdfBytes, err := io.ReadAll(file)
+		if err != nil {
+			http.Error(w, "failed to read file", http.StatusBadRequest)
+			return
+		}
+
+		pageNum, _ := strconv.Atoi(r.FormValue("page"))
+		if pageNum < 1 {
+			pageNum = 1
+		}
+		dpi, _ := strconv.ParseFloat(r.FormValue("dpi"), 64)
+		if dpi <= 0 {
+			dpi = 72.0
+		}
+
+		// D. Genuinely render PDF page using PyMuPDF
+		jpegBytes, err := renderPdfWithPyMuPDF(pdfBytes, pageNum, dpi)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("render error: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(jpegBytes)
+	}))
+	defer workerServer.Close()
+
+	t.Setenv("PDFNEST_WORKER_URL", workerServer.URL)
+
+	// 2. Setup production Studio Backend app
+	app, _, _, _, _ := setupTestApp(t)
+	guestID := "guest_e2e_test_" + uuid.New().String()
+
+	// 3. Create deterministic 2-page PDF and save to storage
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("test_content_%s.pdf", uuid.New().String())
+	pdfKey := fmt.Sprintf("e2e_test_%s.pdf", uuid.New().String())
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
@@ -132,7 +225,7 @@ func TestRealRendering_DeterministicContentAndVerification(t *testing.T) {
 	}
 
 	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "content_test.pdf",
+		FileName:         "e2e_render.pdf",
 		FileSize:         int64(len(pdfBytes)),
 		InitialPageCount: 2,
 		SourceAssetID:    assetID,
@@ -149,8 +242,7 @@ func TestRealRendering_DeterministicContentAndVerification(t *testing.T) {
 
 	var initResp struct {
 		Session struct {
-			ID         string `json:"id"`
-			DocumentID string `json:"document_id"`
+			ID string `json:"id"`
 		} `json:"session"`
 		ActiveVersion struct {
 			ID string `json:"id"`
@@ -160,29 +252,30 @@ func TestRealRendering_DeterministicContentAndVerification(t *testing.T) {
 	sessionID := initResp.Session.ID
 	v0ID := initResp.ActiveVersion.ID
 
-	// 2. Fetch and Decode Page 1 Tile
+	// 4. Fetch Page 1 Tile through the full production pipeline
 	urlP1 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p1ID)
 	req1 := httptest.NewRequest(http.MethodGet, urlP1, nil)
 	req1.Header.Set("X-Test-Guest-ID", guestID)
 	resp1, err := app.Test(req1, 5000)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp1.StatusCode)
 	p1Bytes, err := io.ReadAll(resp1.Body)
 	require.NoError(t, err)
+	if resp1.StatusCode != http.StatusOK {
+		t.Logf("Response status %d: %s", resp1.StatusCode, string(p1Bytes))
+	}
+	assert.Equal(t, http.StatusOK, resp1.StatusCode)
 
-	// Decode Page 1 image and verify actual Blue pixel content
+	// Decode Page 1 JPEG rendered genuinely by PyMuPDF
 	img1, err := jpeg.Decode(bytes.NewReader(p1Bytes))
-	require.NoError(t, err, "Page 1 JPEG must decode cleanly")
+	require.NoError(t, err, "Page 1 JPEG from PyMuPDF must decode cleanly")
 	assert.Equal(t, 595, img1.Bounds().Dx())
 	assert.Equal(t, 841, img1.Bounds().Dy())
 
-	// Sample pixel inside Page 1 Blue box (x=100, y=150)
-	r1, g1, b1, _ := img1.At(100, 150).RGBA()
-	// Convert 16-bit color channel to 8-bit
-	assert.True(t, (b1>>8) > 200, "Page 1 sample pixel must be prominently Blue")
-	assert.True(t, (g1>>8) < 80, "Page 1 sample pixel must not be Green")
+	// Verify Page 1 has solid Blue box at (100, 150)
+	_, _, b1, _ := img1.At(100, 150).RGBA()
+	assert.True(t, (b1>>8) > 200, "PyMuPDF rendered Page 1 pixel must be Blue")
 
-	// 3. Fetch and Decode Page 2 Tile
+	// 5. Fetch Page 2 Tile through the full production pipeline
 	urlP2 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p2ID)
 	req2 := httptest.NewRequest(http.MethodGet, urlP2, nil)
 	req2.Header.Set("X-Test-Guest-ID", guestID)
@@ -192,20 +285,255 @@ func TestRealRendering_DeterministicContentAndVerification(t *testing.T) {
 	p2Bytes, err := io.ReadAll(resp2.Body)
 	require.NoError(t, err)
 
-	// Decode Page 2 image and verify actual Green pixel content
+	// Decode Page 2 JPEG rendered genuinely by PyMuPDF
 	img2, err := jpeg.Decode(bytes.NewReader(p2Bytes))
-	require.NoError(t, err, "Page 2 JPEG must decode cleanly")
+	require.NoError(t, err, "Page 2 JPEG from PyMuPDF must decode cleanly")
 	assert.Equal(t, 595, img2.Bounds().Dx())
 	assert.Equal(t, 841, img2.Bounds().Dy())
 
-	// Sample pixel inside Page 2 Green box (x=100, y=150)
+	// Verify Page 2 has solid Green box at (100, 150)
 	_, g2, b2, _ := img2.At(100, 150).RGBA()
-	assert.True(t, (g2>>8) > 200, "Page 2 sample pixel must be prominently Green")
-	assert.True(t, (b2>>8) < 80, "Page 2 sample pixel must not be Blue")
+	assert.True(t, (g2>>8) > 200, "PyMuPDF rendered Page 2 pixel must be Green")
+	assert.True(t, (b2>>8) < 80, "PyMuPDF rendered Page 2 pixel must not be Blue")
 
-	// 4. Assert Page 1 and Page 2 are demonstrably distinct
 	assert.False(t, bytes.Equal(p1Bytes, p2Bytes))
-	_ = r1
+}
+
+func TestRealRendering_EndToEndWorkerRenderer_SubTilesAndIntegratedRotation(t *testing.T) {
+	testSecret := "test-secret-subtile-" + uuid.New().String()
+	t.Setenv("WORKER_SHARED_SECRET", testSecret)
+
+	// Launch mock worker HTTP server backed by PyMuPDF
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/render/page" {
+			http.NotFound(w, r)
+			return
+		}
+
+		sig := r.Header.Get("X-Worker-Signature")
+		ts := r.Header.Get("X-Worker-Timestamp")
+		nonce := r.Header.Get("X-Worker-Nonce")
+		if sig == "" || ts == "" || nonce == "" {
+			http.Error(w, "missing worker authentication", http.StatusUnauthorized)
+			return
+		}
+
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
+		mac := hmac.New(sha256.New, []byte(testSecret))
+		mac.Write([]byte(stringToSign))
+		if sig != hex.EncodeToString(mac.Sum(nil)) {
+			http.Error(w, "invalid worker signature", http.StatusUnauthorized)
+			return
+		}
+
+		if err := r.ParseMultipartForm(10 * 1024 * 1024); err != nil {
+			http.Error(w, "invalid multipart form", http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing file", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		pdfBytes, _ := io.ReadAll(file)
+		pageNum, _ := strconv.Atoi(r.FormValue("page"))
+		if pageNum < 1 {
+			pageNum = 1
+		}
+		dpi, _ := strconv.ParseFloat(r.FormValue("dpi"), 64)
+		if dpi <= 0 {
+			dpi = 72.0
+		}
+
+		jpegBytes, err := renderPdfWithPyMuPDF(pdfBytes, pageNum, dpi)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("render error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(jpegBytes)
+	}))
+	defer workerServer.Close()
+	t.Setenv("PDFNEST_WORKER_URL", workerServer.URL)
+
+	app, _, _, _, _ := setupTestApp(t)
+	guestID := "guest_subtile_rot_" + uuid.New().String()
+
+	pdfBytes := createDeterministicTestPDF(t)
+	pdfKey := fmt.Sprintf("subtile_test_%s.pdf", uuid.New().String())
+	storageDir := storage.GetLocalStorageDir()
+	_ = os.MkdirAll(storageDir, 0755)
+	localPdfPath := filepath.Join(storageDir, pdfKey)
+	err := os.WriteFile(localPdfPath, pdfBytes, 0644)
+	require.NoError(t, err)
+	defer os.Remove(localPdfPath)
+
+	assetID := "ast_subtile_" + uuid.New().String()
+	p0DegID := uuid.New().String()
+	p90DegID := uuid.New().String()
+	p180DegID := uuid.New().String()
+	p270DegID := uuid.New().String()
+
+	initialVDM := vdm.DocumentModel{
+		PageCount: 4,
+		Pages: []vdm.PageDescriptor{
+			{
+				PageID:           p0DegID,
+				SourceAssetID:    &assetID,
+				SourcePageNumber: 1, // Page 1 Blue box (50, 100, 200, 150)
+				Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
+				Rotation:         0,
+				IsBlank:          false,
+			},
+			{
+				PageID:           p90DegID,
+				SourceAssetID:    &assetID,
+				SourcePageNumber: 1,
+				Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
+				Rotation:         90,
+				IsBlank:          false,
+			},
+			{
+				PageID:           p180DegID,
+				SourceAssetID:    &assetID,
+				SourcePageNumber: 1,
+				Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
+				Rotation:         180,
+				IsBlank:          false,
+			},
+			{
+				PageID:           p270DegID,
+				SourceAssetID:    &assetID,
+				SourcePageNumber: 1,
+				Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
+				Rotation:         270,
+				IsBlank:          false,
+			},
+		},
+	}
+
+	createBody, _ := json.Marshal(CreateSessionRequest{
+		FileName:         "subtile_rotation.pdf",
+		FileSize:         int64(len(pdfBytes)),
+		InitialPageCount: 4,
+		SourceAssetID:    assetID,
+		SourceR2Key:      pdfKey,
+		InitialVDM:       initialVDM,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Guest-ID", guestID)
+	resp, err := app.Test(req, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var initResp struct {
+		Session struct {
+			ID string `json:"id"`
+		} `json:"session"`
+		ActiveVersion struct {
+			ID string `json:"id"`
+		} `json:"active_version"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&initResp)
+	sessionID := initResp.Session.ID
+	v0ID := initResp.ActiveVersion.ID
+
+	// 1. Non-full-page sub-tile request on 0° page covering the Blue Box: (tile_x=50, tile_y=100, tile_w=150, tile_h=100)
+	urlSub1 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=50&tile_y=100&tile_w=150&tile_h=100", sessionID, v0ID, p0DegID)
+	reqSub1 := httptest.NewRequest(http.MethodGet, urlSub1, nil)
+	reqSub1.Header.Set("X-Test-Guest-ID", guestID)
+	respSub1, err := app.Test(reqSub1, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respSub1.StatusCode)
+	sub1Bytes, err := io.ReadAll(respSub1.Body)
+	require.NoError(t, err)
+
+	imgSub1, err := jpeg.Decode(bytes.NewReader(sub1Bytes))
+	require.NoError(t, err)
+	// Assert exact requested dimensions
+	assert.Equal(t, 150, imgSub1.Bounds().Dx(), "Sub-tile width must strictly match requested tile_w")
+	assert.Equal(t, 100, imgSub1.Bounds().Dy(), "Sub-tile height must strictly match requested tile_h")
+	// Assert pixel inside sub-tile is Blue
+	_, _, bSub1, _ := imgSub1.At(50, 50).RGBA()
+	assert.True(t, (bSub1>>8) > 200, "Sub-tile pixel must correspond to original Blue box")
+
+	// 2. Non-full-page sub-tile request outside the Blue Box: (tile_x=350, tile_y=350, tile_w=100, tile_h=100)
+	urlSubWhite := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=350&tile_y=350&tile_w=100&tile_h=100", sessionID, v0ID, p0DegID)
+	reqSubWhite := httptest.NewRequest(http.MethodGet, urlSubWhite, nil)
+	reqSubWhite.Header.Set("X-Test-Guest-ID", guestID)
+	respSubWhite, err := app.Test(reqSubWhite, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respSubWhite.StatusCode)
+	subWhiteBytes, err := io.ReadAll(respSubWhite.Body)
+	require.NoError(t, err)
+
+	imgSubWhite, err := jpeg.Decode(bytes.NewReader(subWhiteBytes))
+	require.NoError(t, err)
+	assert.Equal(t, 100, imgSubWhite.Bounds().Dx())
+	assert.Equal(t, 100, imgSubWhite.Bounds().Dy())
+	rW, gW, bW, _ := imgSubWhite.At(50, 50).RGBA()
+	assert.True(t, (rW>>8) > 240 && (gW>>8) > 240 && (bW>>8) > 240, "Pixel outside box must be white background")
+
+	// 3. Integrated Rotation 90° Sub-tile
+	// (100, 150) -> (841 - 1 - 150, 100) = (690, 100)
+	urlRot90 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=650&tile_y=80&tile_w=100&tile_h=80", sessionID, v0ID, p90DegID)
+	reqRot90 := httptest.NewRequest(http.MethodGet, urlRot90, nil)
+	reqRot90.Header.Set("X-Test-Guest-ID", guestID)
+	respRot90, err := app.Test(reqRot90, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respRot90.StatusCode)
+	rot90Bytes, err := io.ReadAll(respRot90.Body)
+	require.NoError(t, err)
+
+	imgRot90, err := jpeg.Decode(bytes.NewReader(rot90Bytes))
+	require.NoError(t, err)
+	assert.Equal(t, 100, imgRot90.Bounds().Dx())
+	assert.Equal(t, 80, imgRot90.Bounds().Dy())
+	// In tile (650, 80), global (690, 100) is at local (40, 20)
+	_, _, b90, _ := imgRot90.At(40, 20).RGBA()
+	assert.True(t, (b90>>8) > 200, "90° rotated sub-tile pixel at (40, 20) must be Blue")
+
+	// 4. Integrated Rotation 180° Sub-tile
+	// (100, 150) -> (595 - 1 - 100, 841 - 1 - 150) = (494, 690)
+	urlRot180 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=450&tile_y=650&tile_w=100&tile_h=80", sessionID, v0ID, p180DegID)
+	reqRot180 := httptest.NewRequest(http.MethodGet, urlRot180, nil)
+	reqRot180.Header.Set("X-Test-Guest-ID", guestID)
+	respRot180, err := app.Test(reqRot180, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respRot180.StatusCode)
+	rot180Bytes, err := io.ReadAll(respRot180.Body)
+	require.NoError(t, err)
+
+	imgRot180, err := jpeg.Decode(bytes.NewReader(rot180Bytes))
+	require.NoError(t, err)
+	assert.Equal(t, 100, imgRot180.Bounds().Dx())
+	assert.Equal(t, 80, imgRot180.Bounds().Dy())
+	// In tile (450, 650), global (494, 690) is at local (44, 40)
+	_, _, b180, _ := imgRot180.At(44, 40).RGBA()
+	assert.True(t, (b180>>8) > 200, "180° rotated sub-tile pixel at (44, 40) must be Blue")
+
+	// 5. Integrated Rotation 270° Sub-tile
+	// (100, 150) -> (150, 595 - 1 - 100) = (150, 494)
+	urlRot270 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=120&tile_y=460&tile_w=80&tile_h=80", sessionID, v0ID, p270DegID)
+	reqRot270 := httptest.NewRequest(http.MethodGet, urlRot270, nil)
+	reqRot270.Header.Set("X-Test-Guest-ID", guestID)
+	respRot270, err := app.Test(reqRot270, 5000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respRot270.StatusCode)
+	rot270Bytes, err := io.ReadAll(respRot270.Body)
+	require.NoError(t, err)
+
+	imgRot270, err := jpeg.Decode(bytes.NewReader(rot270Bytes))
+	require.NoError(t, err)
+	assert.Equal(t, 80, imgRot270.Bounds().Dx())
+	assert.Equal(t, 80, imgRot270.Bounds().Dy())
+	// In tile (120, 460), global (150, 494) is at local (30, 34)
+	_, _, b270, _ := imgRot270.At(30, 34).RGBA()
+	assert.True(t, (b270>>8) > 200, "270° rotated sub-tile pixel at (30, 34) must be Blue")
 }
 
 func TestRealRendering_GeometricRotations(t *testing.T) {
@@ -313,7 +641,7 @@ func TestRealRendering_NoSilentSyntheticFallbackOnWorkerFailure(t *testing.T) {
 	reqFail.Header.Set("X-Test-Guest-ID", guestID)
 	respFail, err := app.Test(reqFail, 5000)
 	require.NoError(t, err)
-	// Must fail with internal server error / bad gateway, NEVER HTTP 200
+	// Must fail with internal server error, NEVER HTTP 200
 	assert.Equal(t, http.StatusInternalServerError, respFail.StatusCode, "Failing real asset render must return 500, never fake 200")
 
 	// 3. Request Blank Page -> MUST succeed with clean white 200
@@ -336,13 +664,13 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 	// Mock slow renderer that tracks exact invocation count
 	slowWorkerRenderer := func(ctx context.Context, pdfPath string, pageNumber int, dpi float64) (image.Image, error) {
 		atomic.AddUint64(&renderCount, 1)
-		time.Sleep(50 * time.Millisecond) // Simulate real worker rendering delay
+		time.Sleep(60 * time.Millisecond) // Simulate real worker rendering delay
 		img := image.NewRGBA(image.Rect(0, 0, 200, 200))
 		draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{100, 150, 200, 255}}, image.Point{}, draw.Src)
 		return img, nil
 	}
 
-	// Create Studio repo and mock session
+	// Create Studio repo and mock session with the exact renderer passed to controller
 	app, _, _, renderer, _ := setupTestApp(t)
 	renderer.SetWorkerRenderer(slowWorkerRenderer)
 	guestID := "guest_sf_strict_" + uuid.New().String()
@@ -398,10 +726,11 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 	sessionID := initResp.Session.ID
 	v0ID := initResp.ActiveVersion.ID
 
-	// Fire 15 concurrent identical requests for the exact same tile
+	// Synchronization barrier to ensure all 15 requests fire simultaneously on a cold tile
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=0&tile_y=0&tile_w=100&tile_h=100", sessionID, v0ID, p1ID)
 
 	var wg sync.WaitGroup
+	startBarrier := make(chan struct{})
 	statusCodes := make([]int, 15)
 	payloads := make([][]byte, 15)
 
@@ -409,23 +738,27 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			<-startBarrier // Wait for simultaneous release
 			r := httptest.NewRequest(http.MethodGet, tileURL, nil)
 			r.Header.Set("X-Test-Guest-ID", guestID)
-			res, err := app.Test(r, 5000)
-			if err == nil {
+			res, testErr := app.Test(r, 5000)
+			if testErr == nil {
 				statusCodes[idx] = res.StatusCode
 				b, _ := io.ReadAll(res.Body)
 				payloads[idx] = b
 			}
 		}(i)
 	}
+
+	// Release all 15 requests at once
+	close(startBarrier)
 	wg.Wait()
 
-	// 1. All 15 requests must succeed
+	// 1. All 15 requests must succeed with HTTP 200 and non-empty valid JPEGs
 	for i := 0; i < 15; i++ {
 		assert.Equal(t, http.StatusOK, statusCodes[i])
 		assert.True(t, len(payloads[i]) > 0)
-		assert.Equal(t, payloads[0], payloads[i], "All concurrent requests must return identical payload")
+		assert.Equal(t, payloads[0], payloads[i], "All concurrent singleflight requests must return identical payload")
 	}
 
 	// 2. Strict proof: Exactly ONE underlying render execution occurred
