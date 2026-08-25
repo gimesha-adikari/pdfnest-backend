@@ -43,6 +43,10 @@ log() {
     echo "[PDFNest] $*"
 }
 
+warning() {
+    echo "[PDFNest] WARNING: $*"
+}
+
 error() {
     echo ""
     echo "=========================================="
@@ -56,21 +60,28 @@ error() {
 # PostgreSQL configuration
 #############################################
 
-# Respect PostgreSQL environment variables if provided.
-PGHOST="${PGHOST:-}"
+# PDFNest development uses TCP PostgreSQL.
+#
+# The current development setup exposes the Docker PostgreSQL
+# container as:
+#
+#   localhost:5432 -> pdfnest-test-pg:5432
+#
+# Explicit PGHOST/PGPORT environment variables still override
+# these defaults.
+
+PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
 
+#############################################
+# PostgreSQL readiness
+#############################################
+
 pg_ready() {
-    if [ -n "$PGHOST" ]; then
-        pg_isready \
-            -h "$PGHOST" \
-            -p "$PGPORT" \
-            >/dev/null 2>&1
-    else
-        pg_isready \
-            -p "$PGPORT" \
-            >/dev/null 2>&1
-    fi
+    pg_isready \
+        -h "$PGHOST" \
+        -p "$PGPORT" \
+        >/dev/null 2>&1
 }
 
 #############################################
@@ -81,10 +92,41 @@ postgres_diagnostics() {
     error "PostgreSQL did not become ready."
 
     echo "PostgreSQL readiness check:"
-    if [ -n "$PGHOST" ]; then
-        pg_isready -h "$PGHOST" -p "$PGPORT" || true
+    pg_isready \
+        -h "$PGHOST" \
+        -p "$PGPORT" \
+        || true
+
+    echo ""
+    echo "------------------------------------------"
+    echo "PostgreSQL endpoint"
+    echo "------------------------------------------"
+    echo "Host: $PGHOST"
+    echo "Port: $PGPORT"
+
+    echo ""
+    echo "------------------------------------------"
+    echo "Listening on PostgreSQL port"
+    echo "------------------------------------------"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp 2>/dev/null |
+            grep -E ":${PGPORT}\b" ||
+            echo "Nothing is listening on port ${PGPORT}."
+    fi
+
+    echo ""
+    echo "------------------------------------------"
+    echo "Docker containers"
+    echo "------------------------------------------"
+
+    if command -v docker >/dev/null 2>&1; then
+        docker ps \
+            --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Ports}}' \
+            2>/dev/null ||
+            true
     else
-        pg_isready -p "$PGPORT" || true
+        echo "Docker is not installed or unavailable."
     fi
 
     echo ""
@@ -93,7 +135,11 @@ postgres_diagnostics() {
     echo "------------------------------------------"
 
     if command -v systemctl >/dev/null 2>&1; then
-        sudo systemctl status postgresql --no-pager || true
+        sudo systemctl status postgresql \
+            --no-pager \
+            -l \
+            2>/dev/null ||
+            true
     fi
 
     echo ""
@@ -109,11 +155,30 @@ postgres_diagnostics() {
 
     echo ""
     echo "------------------------------------------"
-    echo "Listening on PostgreSQL ports"
+    echo "PostgreSQL cluster service status"
     echo "------------------------------------------"
 
-    if command -v ss >/dev/null 2>&1; then
-        ss -ltnp 2>/dev/null | grep -E ':(5432|[0-9]{4,5})\b.*postgres' || true
+    if command -v systemctl >/dev/null 2>&1; then
+        if command -v pg_lsclusters >/dev/null 2>&1; then
+            while read -r version cluster port status owner datadir logfile; do
+                [ -n "${version:-}" ] || continue
+
+                if [ "$version" = "Ver" ]; then
+                    continue
+                fi
+
+                sudo systemctl status \
+                    "postgresql@${version}-${cluster}.service" \
+                    --no-pager \
+                    -l \
+                    2>/dev/null ||
+                    true
+            done < <(
+                pg_lsclusters 2>/dev/null |
+                tail -n +2 |
+                awk '{print $1, $2, $3, $4, $5, $6, $7}'
+            )
+        fi
     fi
 
     echo ""
@@ -124,20 +189,88 @@ postgres_diagnostics() {
     if command -v journalctl >/dev/null 2>&1; then
         sudo journalctl \
             -u postgresql \
-            -n 50 \
+            -u 'postgresql@*.service' \
+            -n 80 \
             --no-pager \
-            || true
+            2>/dev/null ||
+            true
     fi
 
     echo ""
 }
 
 #############################################
-# Start PostgreSQL cluster
+# Detect Docker PostgreSQL
+#############################################
+
+docker_postgres_available() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+
+    docker ps \
+        --format '{{.Names}} {{.Ports}}' \
+        2>/dev/null |
+        grep -Eq \
+            '(^|[[:space:]])pdfnest-test-pg([[:space:]]|$).*0\.0\.0\.0:'"${PGPORT}"'->5432|(^|[[:space:]])pdfnest-test-pg([[:space:]]|$).*'"${PGPORT}"'->5432'
+}
+
+#############################################
+# Start Docker PostgreSQL if it exists
+#############################################
+
+start_docker_postgresql() {
+    if ! command -v docker >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if ! sudo docker inspect pdfnest-test-pg >/dev/null 2>&1; then
+        return 1
+    fi
+
+    log "Found Docker PostgreSQL container: pdfnest-test-pg"
+
+    local container_status
+
+    container_status="$(
+        sudo docker inspect \
+            --format '{{.State.Status}}' \
+            pdfnest-test-pg \
+            2>/dev/null ||
+            true
+    )"
+
+    if [ "$container_status" = "running" ]; then
+        log "Docker PostgreSQL container is already running."
+    else
+        log "Starting Docker PostgreSQL container..."
+
+        if ! sudo docker start pdfnest-test-pg >/dev/null; then
+            warning "Could not start Docker container pdfnest-test-pg."
+            return 1
+        fi
+
+        log "Docker PostgreSQL container started."
+    fi
+
+    return 0
+}
+
+#############################################
+# Start PostgreSQL
 #############################################
 
 start_postgresql() {
-    log "Checking PostgreSQL..."
+    log "Checking PostgreSQL at ${PGHOST}:${PGPORT}..."
+
+    #########################################
+    # First check
+    #
+    # This is the most important check.
+    #
+    # If Docker PostgreSQL is already exposing
+    # localhost:5432, we immediately continue.
+    #########################################
 
     if pg_ready; then
         log "PostgreSQL is already running and ready."
@@ -145,32 +278,92 @@ start_postgresql() {
     fi
 
     log "PostgreSQL is not ready."
-    log "Starting PostgreSQL..."
 
     #########################################
-    # Debian / Ubuntu
+    # Docker PostgreSQL
+    #
+    # Prefer the known PDFNest development
+    # PostgreSQL container before touching the
+    # host PostgreSQL service.
+    #########################################
+
+    if start_docker_postgresql; then
+        log "Waiting for Docker PostgreSQL..."
+
+        for ((i = 1; i <= POSTGRES_TIMEOUT; i++)); do
+            if pg_ready; then
+                echo ""
+                log "PostgreSQL is ready at ${PGHOST}:${PGPORT}."
+                return 0
+            fi
+
+            printf "\r[PDFNest] PostgreSQL not ready... %2d/%-2d seconds" \
+                "$i" \
+                "$POSTGRES_TIMEOUT"
+
+            sleep 1
+        done
+
+        echo ""
+        warning "Docker PostgreSQL was started but did not become ready."
+    fi
+
+    #########################################
+    # Check again before system PostgreSQL
+    #########################################
+
+    if pg_ready; then
+        log "PostgreSQL is already available."
+        return 0
+    fi
+
+    #########################################
+    # Debian / Ubuntu PostgreSQL service
     #########################################
 
     if command -v systemctl >/dev/null 2>&1; then
+
+        log "Attempting to start system PostgreSQL service..."
+
         if sudo systemctl start postgresql; then
             log "PostgreSQL service start command completed."
         else
-            log "WARNING: systemctl could not start PostgreSQL."
+            warning "systemctl could not start PostgreSQL."
         fi
+
+        #####################################
+        # Check the actual configured endpoint
+        #
+        # Do NOT immediately start clusters.
+        # Docker may already have taken the port.
+        #####################################
+
+        if pg_ready; then
+            log "PostgreSQL is ready at ${PGHOST}:${PGPORT}."
+            return 0
+        fi
+
     elif command -v service >/dev/null 2>&1; then
+
+        log "Attempting to start PostgreSQL service..."
+
         if sudo service postgresql start; then
             log "PostgreSQL service start command completed."
         else
-            log "WARNING: service could not start PostgreSQL."
+            warning "service could not start PostgreSQL."
+        fi
+
+        if pg_ready; then
+            log "PostgreSQL is ready at ${PGHOST}:${PGPORT}."
+            return 0
         fi
     fi
 
     #########################################
     # Ubuntu/Debian cluster handling
     #
-    # Sometimes the PostgreSQL service is
-    # active while an individual cluster is
-    # still down.
+    # Only attempt this while the configured
+    # PostgreSQL endpoint remains unavailable.
     #########################################
 
     if command -v pg_lsclusters >/dev/null 2>&1 && \
@@ -179,23 +372,55 @@ start_postgresql() {
         log "Checking PostgreSQL clusters..."
 
         while read -r version cluster port status owner datadir logfile; do
-            # Skip empty lines.
+
             [ -n "${version:-}" ] || continue
 
-            # Skip header.
             if [ "$version" = "Ver" ]; then
                 continue
             fi
 
             log "Cluster detected: ${version}/${cluster} on port ${port} (${status})"
 
+            #####################################
+            # Never start another cluster if the
+            # configured endpoint is already ready.
+            #####################################
+
+            if pg_ready; then
+                log "PostgreSQL is already available at ${PGHOST}:${PGPORT}."
+                return 0
+            fi
+
+            #####################################
+            # Only start a cluster if its port
+            # matches the configured PostgreSQL port.
+            #
+            # This prevents accidentally starting
+            # an unrelated cluster.
+            #####################################
+
+            if [ "$port" != "$PGPORT" ]; then
+                log "Skipping ${version}/${cluster}; cluster uses port ${port}."
+                continue
+            fi
+
             if [ "$status" != "online" ]; then
+
                 log "Starting cluster ${version}/${cluster}..."
 
                 if sudo pg_ctlcluster "$version" "$cluster" start; then
                     log "Cluster ${version}/${cluster} start command completed."
                 else
-                    log "WARNING: Could not start cluster ${version}/${cluster}."
+                    warning "Could not start cluster ${version}/${cluster}."
+                fi
+
+                #################################
+                # Check immediately after start.
+                #################################
+
+                if pg_ready; then
+                    log "PostgreSQL is ready at ${PGHOST}:${PGPORT}."
+                    return 0
                 fi
             fi
 
@@ -207,10 +432,10 @@ start_postgresql() {
     fi
 
     #########################################
-    # Wait for PostgreSQL
+    # Final wait
     #########################################
 
-    log "Waiting for PostgreSQL..."
+    log "Waiting for PostgreSQL at ${PGHOST}:${PGPORT}..."
 
     for ((i = 1; i <= POSTGRES_TIMEOUT; i++)); do
 
@@ -249,7 +474,8 @@ stop_port_listener() {
             -t \
             -iTCP:"$port" \
             -sTCP:LISTEN \
-            2>/dev/null || true
+            2>/dev/null ||
+            true
     )"
 
     if [ -z "$pids" ]; then
@@ -334,12 +560,8 @@ echo "=========================================="
 echo ""
 echo "Project:  $ROOT_DIR"
 echo "Port:     $PORT"
+echo "PG Host:  $PGHOST"
 echo "PG Port:  $PGPORT"
-if [ -n "$PGHOST" ]; then
-    echo "PG Host:  $PGHOST"
-else
-    echo "PG Host:  default"
-fi
 echo ""
 
 #############################################
