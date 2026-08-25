@@ -16,7 +16,8 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	studioGroup.Get("/sessions/:id/history", ctrl.GetHistory)
 	studioGroup.Post("/sessions/:id/checkout", ctrl.Checkout)
 
-	// Phase 3C: Tile & Preview Endpoints
+	// Phase 3C & 3F: Tile & Preview Endpoints
 	studioGroup.Get("/sessions/:id/versions/:version_id/pages/:page_id/tile", ctrl.GetPageTile)
 	studioGroup.Get("/metrics", ctrl.GetMetrics)
+	studioGroup.Get("/preview/metrics", ctrl.GetMetrics)
 }

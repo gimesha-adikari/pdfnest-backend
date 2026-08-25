@@ -321,6 +321,11 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidBaseVersion), errors.Is(err, ErrConflict):
 		return c.Status(http.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrWorkerBusy):
+		c.Set("Retry-After", "2")
+		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
+	case errors.Is(err, ErrRenderTimeout):
+		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
 	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	default:

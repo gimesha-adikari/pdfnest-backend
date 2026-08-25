@@ -38,6 +38,8 @@ var (
 	ErrTileTooLarge      = errors.New("studio: tile dimension exceeds maximum allowed size (4096px)")
 	ErrVersionMismatch   = errors.New("studio: version does not belong to session document")
 	ErrRenderFailed      = errors.New("studio: real pdf page rendering failed")
+	ErrWorkerBusy        = errors.New("studio: render worker capacity saturated")
+	ErrRenderTimeout     = errors.New("studio: render processing timed out")
 )
 
 const (
@@ -48,15 +50,21 @@ const (
 	DefaultPageHeightPt = 841.89
 )
 
-// TileMetrics tracks render performance and cache observability.
+// TileMetrics tracks render performance, capacity, and cache observability.
 type TileMetrics struct {
-	TotalRequests     uint64 `json:"total_requests"`
-	CacheHits         uint64 `json:"cache_hits"`
-	CacheMisses       uint64 `json:"cache_misses"`
-	RenderErrors      uint64 `json:"render_errors"`
-	UnderlyingRenders uint64 `json:"underlying_renders"`
-	CachedBytes       int64  `json:"cached_bytes"`
-	CachedEntries     int    `json:"cached_entries"`
+	TotalRequests         uint64  `json:"total_requests"`
+	CacheHits             uint64  `json:"cache_hits"`
+	CacheMisses           uint64  `json:"cache_misses"`
+	RenderErrors          uint64  `json:"render_errors"`
+	UnderlyingRenders     uint64  `json:"underlying_renders"`
+	SingleflightCoalesced uint64  `json:"singleflight_coalesced"`
+	WorkerTimeouts        uint64  `json:"worker_timeouts"`
+	WorkerRejections      uint64  `json:"worker_rejections"`
+	CachedBytes           int64   `json:"cached_bytes"`
+	CachedEntries         int     `json:"cached_entries"`
+	TotalDurationMs       uint64  `json:"total_duration_ms"`
+	LastDurationMs        uint64  `json:"last_duration_ms"`
+	AvgDurationMs         float64 `json:"avg_duration_ms"`
 }
 
 type cacheElement struct {
@@ -173,14 +181,27 @@ func (c *TileCache) GetMetrics() TileMetrics {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	totalCompleted := atomic.LoadUint64(&c.metrics.UnderlyingRenders)
+	totalDur := atomic.LoadUint64(&c.metrics.TotalDurationMs)
+	var avgDur float64
+	if totalCompleted > 0 {
+		avgDur = float64(totalDur) / float64(totalCompleted)
+	}
+
 	return TileMetrics{
-		TotalRequests:     atomic.LoadUint64(&c.metrics.TotalRequests),
-		CacheHits:         atomic.LoadUint64(&c.metrics.CacheHits),
-		CacheMisses:       atomic.LoadUint64(&c.metrics.CacheMisses),
-		RenderErrors:      atomic.LoadUint64(&c.metrics.RenderErrors),
-		UnderlyingRenders: atomic.LoadUint64(&c.metrics.UnderlyingRenders),
-		CachedBytes:       c.currentBytes,
-		CachedEntries:     c.lruList.Len(),
+		TotalRequests:         atomic.LoadUint64(&c.metrics.TotalRequests),
+		CacheHits:             atomic.LoadUint64(&c.metrics.CacheHits),
+		CacheMisses:           atomic.LoadUint64(&c.metrics.CacheMisses),
+		RenderErrors:          atomic.LoadUint64(&c.metrics.RenderErrors),
+		UnderlyingRenders:     totalCompleted,
+		SingleflightCoalesced: atomic.LoadUint64(&c.metrics.SingleflightCoalesced),
+		WorkerTimeouts:        atomic.LoadUint64(&c.metrics.WorkerTimeouts),
+		WorkerRejections:      atomic.LoadUint64(&c.metrics.WorkerRejections),
+		CachedBytes:           c.currentBytes,
+		CachedEntries:         c.lruList.Len(),
+		TotalDurationMs:       totalDur,
+		LastDurationMs:        atomic.LoadUint64(&c.metrics.LastDurationMs),
+		AvgDurationMs:         avgDur,
 	}
 }
 
@@ -391,7 +412,7 @@ func (r *studioTileRenderer) RenderTile(
 	}
 
 	// 6. Singleflight Coalesced Rendering
-	val, err, _ := r.flightGrp.Do(cacheKey, func() (interface{}, error) {
+	val, err, shared := r.flightGrp.Do(cacheKey, func() (interface{}, error) {
 		// Double-check cache inside singleflight
 		if cached, hit := r.cache.Get(cacheKey); hit {
 			return cached, nil
@@ -399,7 +420,12 @@ func (r *studioTileRenderer) RenderTile(
 
 		atomic.AddUint64(&r.cache.metrics.UnderlyingRenders, 1)
 
+		startRender := time.Now()
 		renderedBytes, renderErr := r.rasterizePageTileReal(ctx, targetPage, pageIndex, req.Scale, tileX, tileY, tileW, tileH, docModel.PageNumbering)
+		elapsedMs := uint64(time.Since(startRender).Milliseconds())
+		atomic.AddUint64(&r.cache.metrics.TotalDurationMs, elapsedMs)
+		atomic.StoreUint64(&r.cache.metrics.LastDurationMs, elapsedMs)
+
 		if renderErr != nil {
 			atomic.AddUint64(&r.cache.metrics.RenderErrors, 1)
 			return nil, renderErr
@@ -408,6 +434,10 @@ func (r *studioTileRenderer) RenderTile(
 		r.cache.Put(cacheKey, renderedBytes)
 		return renderedBytes, nil
 	})
+
+	if shared {
+		atomic.AddUint64(&r.cache.metrics.SingleflightCoalesced, 1)
+	}
 
 	if err != nil {
 		return nil, err
@@ -450,6 +480,9 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 	dpi := 72.0 * scale
 	img, workerErr := r.workerFunc(ctx, pdfPath, page.SourcePageNumber, dpi)
 	if workerErr != nil || img == nil {
+		if errors.Is(workerErr, ErrWorkerBusy) || errors.Is(workerErr, ErrRenderTimeout) {
+			return nil, workerErr
+		}
 		return nil, fmt.Errorf("%w: worker page rasterization failed for page %d: %v", ErrRenderFailed, page.SourcePageNumber, workerErr)
 	}
 
@@ -506,9 +539,25 @@ func (r *studioTileRenderer) defaultRenderWithWorker(
 
 	resp, err := worker.Client.Do(req)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			atomic.AddUint64(&r.cache.metrics.WorkerTimeouts, 1)
+			return nil, fmt.Errorf("%w: worker request timeout: %v", ErrRenderTimeout, err)
+		}
 		return nil, fmt.Errorf("worker network error: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		body, _ := io.ReadAll(resp.Body)
+		atomic.AddUint64(&r.cache.metrics.WorkerRejections, 1)
+		return nil, fmt.Errorf("%w: worker capacity saturated (status %d): %s", ErrWorkerBusy, resp.StatusCode, string(body))
+	}
+
+	if resp.StatusCode == http.StatusGatewayTimeout {
+		body, _ := io.ReadAll(resp.Body)
+		atomic.AddUint64(&r.cache.metrics.WorkerTimeouts, 1)
+		return nil, fmt.Errorf("%w: worker timed out (504): %s", ErrRenderTimeout, string(body))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
