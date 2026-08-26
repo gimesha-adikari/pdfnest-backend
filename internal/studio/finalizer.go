@@ -3,6 +3,7 @@ package studio
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/structure"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -30,6 +32,9 @@ const studioExportRetention = 24 * time.Hour
 type finalizerPDFProcessor interface {
 	CropPDF(inputPath string, cropBoxDesc string, selectedPages []string) (string, error)
 	RotatePDF(inputPath string, rotations map[string]int) (string, error)
+	AddTextToPDF(inputPath string, elements []structure.TextElement) (string, error)
+	WatermarkPDFOnPages(inputPath string, text string, imagePath string, description string, selectedPages []string) (string, error)
+	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
 }
@@ -295,21 +300,48 @@ func (f *studioFinalizer) materialize(ctx context.Context, documentID uuid.UUID,
 	}
 	owned[assembledPath] = struct{}{}
 	currentPath := assembledPath
+	// CropBox is applied in the unrotated page space before deferred overlays,
+	// matching the preview compositor's native-coordinate pipeline.
 	for index, page := range modelState.Pages {
-		pageNumber := strconv.Itoa(index + 1)
-		if len(page.CropBox) == 4 {
-			nextPath, err := f.processor.CropPDF(currentPath, cropBoxDescription(page.CropBox), []string{pageNumber})
-			if err != nil {
-				return fail(fmt.Errorf("%w: crop page %d: %v", ErrFinalizationFailed, index+1, err))
-			}
-			owned[nextPath] = struct{}{}
-			if currentPath != nextPath {
-				_ = os.Remove(currentPath)
-				delete(owned, currentPath)
-			}
-			currentPath = nextPath
+		if len(page.CropBox) != 4 {
+			continue
 		}
+		pageNumber := strconv.Itoa(index + 1)
+		nextPath, err := f.processor.CropPDF(currentPath, cropBoxDescription(page.CropBox), []string{pageNumber})
+		if err != nil {
+			return fail(fmt.Errorf("%w: crop page %d: %v", ErrFinalizationFailed, index+1, err))
+		}
+		owned[nextPath] = struct{}{}
+		if currentPath != nextPath {
+			_ = os.Remove(currentPath)
+			delete(owned, currentPath)
+		}
+		currentPath = nextPath
+	}
+	watermarkPaths, watermarkCleanup, err := f.resolveWatermarkAssets(ctx, documentID, modelState)
+	if err != nil {
+		return fail(err)
+	}
+	defer watermarkCleanup()
+	currentPath, err = f.flattenDeferredOverlays(currentPath, modelState, watermarkPaths, owned)
+	if err != nil {
+		return fail(err)
+	}
+	if modelState.PageNumbering != nil && modelState.PageNumbering.Enabled {
+		nextPath, numberingErr := f.processor.AddPageNumbersPDF(currentPath, pageNumberingDescription(*modelState.PageNumbering))
+		if numberingErr != nil {
+			return fail(fmt.Errorf("%w: flatten page numbering: %v", ErrFinalizationFailed, numberingErr))
+		}
+		owned[nextPath] = struct{}{}
+		if currentPath != nextPath {
+			_ = os.Remove(currentPath)
+			delete(owned, currentPath)
+		}
+		currentPath = nextPath
+	}
+	for index, page := range modelState.Pages {
 		if page.Rotation != 0 {
+			pageNumber := strconv.Itoa(index + 1)
 			nextPath, err := f.processor.RotatePDF(currentPath, map[string]int{pageNumber: page.Rotation})
 			if err != nil {
 				return fail(fmt.Errorf("%w: rotate page %d: %v", ErrFinalizationFailed, index+1, err))
@@ -340,6 +372,154 @@ func (f *studioFinalizer) materialize(ctx context.Context, documentID uuid.UUID,
 	}
 
 	return currentPath, cleanup, nil
+}
+
+func (f *studioFinalizer) flattenDeferredOverlays(currentPath string, modelState *vdm.DocumentModel, watermarkPaths map[string]string, owned map[string]struct{}) (string, error) {
+	for pageIndex, page := range modelState.Pages {
+		if len(page.Overlays) == 0 {
+			continue
+		}
+		if page.Dimensions == nil || page.Dimensions.Width <= 0 || page.Dimensions.Height <= 0 {
+			return "", fmt.Errorf("%w: overlay page %d has invalid dimensions", ErrFinalizationFailed, pageIndex+1)
+		}
+		for _, overlay := range page.Overlays {
+			pageNumber := strconv.Itoa(pageIndex + 1)
+			var nextPath string
+			var err error
+			switch overlay.Type {
+			case string(vdm.OverlayTypeText):
+				if len(overlay.Rect) < 2 || strings.TrimSpace(overlay.Text) == "" || overlay.FontSize <= 0 {
+					return "", fmt.Errorf("%w: invalid text overlay %q", ErrFinalizationFailed, overlay.ID)
+				}
+				fontSize := int(math.Round(overlay.FontSize))
+				if fontSize < 1 {
+					fontSize = 1
+				}
+				topLeftY := page.Dimensions.Height - overlay.Rect[1] - overlay.FontSize
+				textColor := overlay.Color
+				if textColor == "" {
+					textColor = "#000000"
+				}
+				nextPath, err = f.processor.AddTextToPDF(currentPath, []structure.TextElement{{
+					ID: overlay.ID, Text: overlay.Text, X: overlay.Rect[0], Y: topLeftY,
+					Page: pageIndex + 1, FontSize: fontSize, Color: textColor,
+				}})
+			case string(vdm.OverlayTypeWatermark):
+				imagePath := ""
+				if overlay.AssetID != "" {
+					imagePath = watermarkPaths[overlay.AssetID]
+					if imagePath == "" {
+						return "", fmt.Errorf("%w: watermark asset %q was not resolved", ErrFinalizationFailed, overlay.AssetID)
+					}
+				}
+				if imagePath == "" && strings.TrimSpace(overlay.Text) == "" {
+					return "", fmt.Errorf("%w: invalid watermark overlay %q", ErrFinalizationFailed, overlay.ID)
+				}
+				nextPath, err = f.processor.WatermarkPDFOnPages(currentPath, overlay.Text, imagePath, watermarkDescription(overlay), []string{pageNumber})
+			default:
+				return "", fmt.Errorf("%w: overlay type %q is not implemented by the finalizer", ErrFinalizationFailed, overlay.Type)
+			}
+			if err != nil {
+				return "", fmt.Errorf("%w: flatten overlay %q: %v", ErrFinalizationFailed, overlay.ID, err)
+			}
+			owned[nextPath] = struct{}{}
+			if currentPath != nextPath {
+				_ = os.Remove(currentPath)
+				delete(owned, currentPath)
+			}
+			currentPath = nextPath
+		}
+	}
+	return currentPath, nil
+}
+
+func (f *studioFinalizer) resolveWatermarkAssets(ctx context.Context, documentID uuid.UUID, modelState *vdm.DocumentModel) (map[string]string, func(), error) {
+	paths := make(map[string]string)
+	cleanups := make([]func(), 0)
+	cleanup := func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+	for _, page := range modelState.Pages {
+		for _, overlay := range page.Overlays {
+			if overlay.Type != string(vdm.OverlayTypeWatermark) || overlay.AssetID == "" {
+				continue
+			}
+			if _, ok := paths[overlay.AssetID]; ok {
+				continue
+			}
+			asset, err := f.repo.GetAsset(ctx, overlay.AssetID)
+			if err != nil {
+				cleanup()
+				return nil, func() {}, err
+			}
+			if asset.DocumentID != documentID || asset.AssetType != "watermark_image" || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
+				cleanup()
+				return nil, func() {}, ErrUnauthorized
+			}
+			suffix := ".jpg"
+			if asset.MimeType == "image/png" {
+				suffix = ".png"
+			}
+			path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-watermark", suffix)
+			if err != nil {
+				cleanup()
+				return nil, func() {}, fmt.Errorf("%w: resolve watermark asset: %v", ErrFinalizationFailed, err)
+			}
+			paths[overlay.AssetID] = path
+			cleanups = append(cleanups, pathCleanup)
+		}
+	}
+	return paths, cleanup, nil
+}
+
+func watermarkDescription(overlay vdm.Overlay) string {
+	font := overlay.Font
+	if font == "" {
+		font = "Helvetica"
+	}
+	position := overlay.Position
+	if position == "cc" {
+		position = "c"
+	} else if position == "cl" {
+		position = "l"
+	} else if position == "cr" {
+		position = "r"
+	}
+	scale := overlay.FontSize / 50
+	if overlay.AssetID != "" {
+		scale = overlay.FontSize / 600
+	}
+	return fmt.Sprintf("font:%s, pos:%s, scale:%g, rot:%d, op:%g", font, position, scale, -overlay.Rotation, overlay.Opacity)
+}
+
+func pageNumberingDescription(rule vdm.PageNumberingRule) string {
+	font := rule.FontFamily
+	if font == "" {
+		font = "Helvetica"
+	}
+	position := rule.Position
+	if position == "" {
+		position = "bc"
+	}
+	fontSize := rule.FontSize
+	if fontSize <= 0 {
+		fontSize = 12
+	}
+	offset := map[string]string{
+		"bl": "20 20",
+		"bc": "0 20",
+		"br": "-20 20",
+		"tl": "20 -20",
+		"tc": "0 -20",
+		"tr": "-20 -20",
+	}[position]
+	description := fmt.Sprintf("font:%s, scale:%.2f abs, pos:%s, rot:0", font, fontSize/25, position)
+	if offset != "" {
+		description += ", offset: " + offset
+	}
+	return description
 }
 
 func (f *studioFinalizer) resolveSourceAssets(ctx context.Context, documentID uuid.UUID, modelState *vdm.DocumentModel) (map[string]string, func(), error) {
@@ -502,6 +682,41 @@ func cropBoxDescription(cropBox []float64) string {
 	// explicit native PDF rectangle, so preserve its [llx lly urx ury]
 	// semantics with PDF-array notation.
 	return fmt.Sprintf("[%.8f %.8f %.8f %.8f]", cropBox[0], cropBox[1], cropBox[2], cropBox[3])
+}
+
+func overlayTextElements(modelState *vdm.DocumentModel) ([]structure.TextElement, error) {
+	if modelState == nil {
+		return nil, fmt.Errorf("%w: missing VDM for overlay finalization", ErrFinalizationFailed)
+	}
+	elements := make([]structure.TextElement, 0)
+	for pageIndex, page := range modelState.Pages {
+		if len(page.Overlays) == 0 {
+			continue
+		}
+		if page.Dimensions == nil || page.Dimensions.Width <= 0 || page.Dimensions.Height <= 0 {
+			return nil, fmt.Errorf("%w: overlay page %d has invalid dimensions", ErrFinalizationFailed, pageIndex+1)
+		}
+		for _, overlay := range page.Overlays {
+			if overlay.Type != string(vdm.OverlayTypeText) {
+				return nil, fmt.Errorf("%w: overlay type %q is not implemented by the foundation finalizer", ErrFinalizationFailed, overlay.Type)
+			}
+			if len(overlay.Rect) < 2 || strings.TrimSpace(overlay.Text) == "" || overlay.FontSize <= 0 {
+				return nil, fmt.Errorf("%w: invalid text overlay %q", ErrFinalizationFailed, overlay.ID)
+			}
+			fontSize := int(math.Round(overlay.FontSize))
+			if fontSize < 1 {
+				fontSize = 1
+			}
+			// structure.AddTextToPDF accepts its legacy top-left Y input. Convert
+			// the shared lower-left native coordinate to that boundary here.
+			topLeftY := page.Dimensions.Height - overlay.Rect[1] - overlay.FontSize
+			elements = append(elements, structure.TextElement{
+				ID: overlay.ID, Text: overlay.Text, X: overlay.Rect[0], Y: topLeftY,
+				Page: pageIndex + 1, FontSize: fontSize, Color: overlay.Color,
+			})
+		}
+	}
+	return elements, nil
 }
 
 func canonicalMetadata(metadata map[string]string) map[string]string {

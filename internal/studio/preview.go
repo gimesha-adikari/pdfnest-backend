@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/draw"
 	"image/jpeg"
+	_ "image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -429,7 +430,7 @@ func (r *studioTileRenderer) RenderTile(
 		atomic.AddUint64(&r.cache.metrics.UnderlyingRenders, 1)
 
 		startRender := time.Now()
-		renderedBytes, renderErr := r.rasterizePageTileReal(ctx, targetPage, pageIndex, req.Scale, tileX, tileY, tileW, tileH, docModel.PageNumbering)
+		renderedBytes, renderErr := r.rasterizePageTileReal(ctx, targetPage, pageIndex, docModel.PageCount, sess.DocumentID.String(), req.Scale, tileX, tileY, tileW, tileH, docModel.PageNumbering)
 		elapsedMs := uint64(time.Since(startRender).Milliseconds())
 		atomic.AddUint64(&r.cache.metrics.TotalDurationMs, elapsedMs)
 		atomic.StoreUint64(&r.cache.metrics.LastDurationMs, elapsedMs)
@@ -458,47 +459,60 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 	ctx context.Context,
 	page *vdm.PageDescriptor,
 	pageNumber int,
+	totalPages int,
+	documentID string,
 	scale float64,
 	tileX, tileY, tileW, tileH int,
 	numbering *vdm.PageNumberingRule,
 ) ([]byte, error) {
-	// A. Explicit Blank Page Rendering
+	var img image.Image
+	// A. Explicit Blank Page Rendering or mandatory source rasterization.
 	if page.IsBlank || page.SourceAssetID == nil || *page.SourceAssetID == "" {
-		img := image.NewRGBA(image.Rect(0, 0, tileW, tileH))
-		draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{255, 255, 255, 255}}, image.Point{}, draw.Src)
-		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 85}); err != nil {
-			return nil, fmt.Errorf("%w: failed to encode blank page JPEG: %v", ErrRenderFailed, err)
+		widthPt, heightPt := DefaultPageWidthPt, DefaultPageHeightPt
+		if page.Dimensions != nil && page.Dimensions.Width > 0 && page.Dimensions.Height > 0 {
+			widthPt, heightPt = page.Dimensions.Width, page.Dimensions.Height
 		}
-		return buf.Bytes(), nil
-	}
-
-	// B. Mandatory Real Source Asset PDF Rendering
-	asset, err := r.repo.GetAsset(ctx, *page.SourceAssetID)
-	if err != nil || asset == nil {
-		return nil, fmt.Errorf("%w: failed to load source asset '%s': %v", ErrRenderFailed, *page.SourceAssetID, err)
-	}
-
-	pdfPath, cleanup, resErr := storage.ResolveArchive(ctx, asset.R2Key)
-	if resErr != nil || pdfPath == "" {
-		return nil, fmt.Errorf("%w: failed to resolve source pdf from storage '%s': %v", ErrRenderFailed, asset.R2Key, resErr)
-	}
-	defer cleanup()
-
-	dpi := 72.0 * scale
-	img, workerErr := r.workerFunc(ctx, pdfPath, page.SourcePageNumber, dpi)
-	if workerErr != nil || img == nil {
-		if errors.Is(workerErr, ErrWorkerBusy) || errors.Is(workerErr, ErrRenderTimeout) {
-			return nil, workerErr
+		blank := image.NewRGBA(image.Rect(0, 0, maxInt(1, int(widthPt*scale)), maxInt(1, int(heightPt*scale))))
+		draw.Draw(blank, blank.Bounds(), &image.Uniform{C: color.RGBA{255, 255, 255, 255}}, image.Point{}, draw.Src)
+		img = blank
+	} else {
+		// B. Mandatory Real Source Asset PDF Rendering
+		asset, err := r.repo.GetAsset(ctx, *page.SourceAssetID)
+		if err != nil || asset == nil {
+			return nil, fmt.Errorf("%w: failed to load source asset '%s': %v", ErrRenderFailed, *page.SourceAssetID, err)
 		}
-		return nil, fmt.Errorf("%w: worker page rasterization failed for page %d: %v", ErrRenderFailed, page.SourcePageNumber, workerErr)
+
+		pdfPath, cleanup, resErr := storage.ResolveArchive(ctx, asset.R2Key)
+		if resErr != nil || pdfPath == "" {
+			return nil, fmt.Errorf("%w: failed to resolve source pdf from storage '%s': %v", ErrRenderFailed, asset.R2Key, resErr)
+		}
+		defer cleanup()
+
+		dpi := 72.0 * scale
+		var workerErr error
+		img, workerErr = r.workerFunc(ctx, pdfPath, page.SourcePageNumber, dpi)
+		if workerErr != nil || img == nil {
+			if errors.Is(workerErr, ErrWorkerBusy) || errors.Is(workerErr, ErrRenderTimeout) {
+				return nil, workerErr
+			}
+			return nil, fmt.Errorf("%w: worker page rasterization failed for page %d: %v", ErrRenderFailed, page.SourcePageNumber, workerErr)
+		}
 	}
+
+	assets, assetCleanup, err := r.resolveOverlayImages(ctx, documentID, page)
+	if err != nil {
+		return nil, err
+	}
+	defer assetCleanup()
 
 	// Crop in unrotated PDF page coordinates, then apply the VDM rotation. This
-	// preserves the CropBox convention for every allowed page rotation.
+	// preserves the CropBox convention for every allowed page rotation. Deferred
+	// overlays are composed in the same native coordinate space before rotation.
 	if len(page.CropBox) > 0 && page.Dimensions != nil {
 		img = CropImageToPageBox(img, page.Dimensions.Width, page.Dimensions.Height, page.CropBox)
 	}
+	img = ComposePageOverlaysWithAssets(img, page, scale, assets)
+	img = ComposePageNumbering(img, page, pageNumber, totalPages, numbering, scale)
 	rotated := RotateImage(img, page.Rotation)
 	// Crop requested tile
 	cropped := CropTile(rotated, tileX, tileY, tileW, tileH)
@@ -508,6 +522,55 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 		return nil, fmt.Errorf("%w: failed to encode rendered tile JPEG: %v", ErrRenderFailed, err)
 	}
 	return buf.Bytes(), nil
+}
+
+func (r *studioTileRenderer) resolveOverlayImages(ctx context.Context, documentID string, page *vdm.PageDescriptor) (map[string]image.Image, func(), error) {
+	assets := make(map[string]image.Image)
+	cleanups := make([]func(), 0)
+	cleanup := func() {
+		for _, fn := range cleanups {
+			fn()
+		}
+	}
+	for _, overlay := range page.Overlays {
+		if overlay.Type != string(vdm.OverlayTypeWatermark) || overlay.AssetID == "" {
+			continue
+		}
+		asset, err := r.repo.GetAsset(ctx, overlay.AssetID)
+		if err != nil {
+			cleanup()
+			return nil, func() {}, err
+		}
+		if asset == nil || asset.DocumentID.String() != documentID || asset.AssetType != "watermark_image" || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
+			cleanup()
+			return nil, func() {}, ErrUnauthorized
+		}
+		suffix := ".jpg"
+		if asset.MimeType == "image/png" {
+			suffix = ".png"
+		}
+		path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-watermark-preview", suffix)
+		if err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("%w: resolve watermark image: %v", ErrRenderFailed, err)
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			pathCleanup()
+			cleanup()
+			return nil, func() {}, fmt.Errorf("%w: open watermark image: %v", ErrRenderFailed, err)
+		}
+		decoded, _, err := image.Decode(file)
+		_ = file.Close()
+		if err != nil {
+			pathCleanup()
+			cleanup()
+			return nil, func() {}, fmt.Errorf("%w: decode watermark image: %v", ErrRenderFailed, err)
+		}
+		assets[overlay.AssetID] = decoded
+		cleanups = append(cleanups, pathCleanup)
+	}
+	return assets, cleanup, nil
 }
 
 func (r *studioTileRenderer) defaultRenderWithWorker(

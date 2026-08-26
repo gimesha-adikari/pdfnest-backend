@@ -6,6 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -23,8 +26,10 @@ import (
 )
 
 const (
-	studioUploadMaxBytesDefault = int64(200 * 1024 * 1024)
-	studioUploadPageLimit       = 1000
+	studioUploadMaxBytesDefault      = int64(200 * 1024 * 1024)
+	studioUploadPageLimit            = 1000
+	studioWatermarkImageMaxBytes     = int64(20 * 1024 * 1024)
+	studioWatermarkImageMaxDimension = 10000
 )
 
 // SourceUploadInput is the staged source file accepted by the Studio document
@@ -182,6 +187,40 @@ func pdfHasEncryptionMarker(path string) (bool, error) {
 
 func studioUploadMaxBytes() int64 {
 	return int64(uploads.GetEnvInt("MAX_STUDIO_UPLOAD_BYTES", int(studioUploadMaxBytesDefault)))
+}
+
+func validateStudioWatermarkImage(path string) (int64, string, error) {
+	if path == "" {
+		return 0, "", ErrInvalidOverlay
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() <= 0 || info.Size() > studioWatermarkImageMaxBytes {
+		return 0, "", ErrInvalidOverlay
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, "", ErrInvalidOverlay
+	}
+	defer file.Close()
+	config, format, err := image.DecodeConfig(file)
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > studioWatermarkImageMaxDimension || config.Height > studioWatermarkImageMaxDimension {
+		return 0, "", ErrInvalidOverlay
+	}
+	switch format {
+	case "png":
+		return info.Size(), "image/png", nil
+	case "jpeg":
+		return info.Size(), "image/jpeg", nil
+	default:
+		return 0, "", ErrInvalidOverlay
+	}
+}
+
+func imageStorageSuffix(mimeType string) string {
+	if mimeType == "image/png" {
+		return ".png"
+	}
+	return ".jpg"
 }
 
 func sourceInspectionError(err error) error {

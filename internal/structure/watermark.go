@@ -11,6 +11,13 @@ import (
 )
 
 func (s *structureService) WatermarkPDF(inputPath string, text string, imagePath string, description string) (string, error) {
+	return s.WatermarkPDFOnPages(inputPath, text, imagePath, description, nil)
+}
+
+// WatermarkPDFOnPages is the reusable pdfcpu leaf used by Studio V2. A nil
+// page selection retains the legacy global behavior; an explicit selection
+// keeps page-local VDM overlays page-local during finalization.
+func (s *structureService) WatermarkPDFOnPages(inputPath string, text string, imagePath string, description string, selectedPages []string) (string, error) {
 	tempDir := os.TempDir()
 	outputFile := "watermarked-" + uuid.New().String() + ".pdf"
 	outputPath := filepath.Join(tempDir, outputFile)
@@ -31,7 +38,7 @@ func (s *structureService) WatermarkPDF(inputPath string, text string, imagePath
 
 	wm.ScaleAbs = true
 
-	err = api.AddWatermarksFile(inputPath, outputPath, nil, wm, config)
+	err = api.AddWatermarksFile(inputPath, outputPath, selectedPages, wm, config)
 	if err != nil {
 		return "", err
 	}

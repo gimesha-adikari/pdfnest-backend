@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 	"pdfnest-backend/internal/uploads"
 )
@@ -59,18 +60,26 @@ func (ctrl *Controller) CreateSecondaryAsset(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
 	}
-	upload, err := uploads.MustPDFFile(c, "file")
+	upload, err := uploads.MustFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	asset, err := ctrl.service.CreateSecondaryAsset(c.Context(), sessionID, ident, SourceUploadInput{
-		Path:         upload.Path,
-		OriginalName: upload.Header.Filename,
-		ContentType:  upload.Header.Header.Get("Content-Type"),
-	})
+	input := SourceUploadInput{Path: upload.Path, OriginalName: upload.Header.Filename, ContentType: upload.Header.Header.Get("Content-Type")}
+	var asset *models.StudioAsset
+	if c.FormValue("asset_kind") == "watermark_image" {
+		asset, err = ctrl.service.CreateWatermarkAsset(c.Context(), sessionID, ident, input)
+	} else {
+		asset, err = ctrl.service.CreateSecondaryAsset(c.Context(), sessionID, ident, input)
+	}
 	if err != nil {
 		return ctrl.mapError(c, err)
+	}
+	if c.FormValue("asset_kind") == "watermark_image" {
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"asset": fiber.Map{
+			"id": asset.ID, "document_id": asset.DocumentID, "asset_type": asset.AssetType,
+			"byte_size": asset.ByteSize, "mime_type": asset.MimeType,
+		}})
 	}
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"asset": asset})
 }
@@ -486,7 +495,7 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
 	case errors.Is(err, ErrRenderTimeout):
 		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
-	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable):
+	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidOverlay), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidSourcePDF), errors.Is(err, ErrEncryptedSourcePDF), errors.Is(err, ErrSourcePageLimit):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})

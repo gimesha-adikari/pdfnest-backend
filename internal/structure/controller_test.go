@@ -59,6 +59,10 @@ func (m *mockStructureService) WatermarkPDF(inputPath string, text string, image
 	return "", nil
 }
 
+func (m *mockStructureService) WatermarkPDFOnPages(inputPath string, text string, imagePath string, description string, selectedPages []string) (string, error) {
+	return "", nil
+}
+
 func (m *mockStructureService) AddPageNumbersPDF(inputPath string, description string) (string, error) {
 	return "", nil
 }
@@ -326,4 +330,3 @@ func TestCrop_BrowserPayload(t *testing.T) {
 		t.Fatalf("expected HTTP 200 for string pages payload, got %d: %s", resp2.StatusCode, string(respBody))
 	}
 }
-

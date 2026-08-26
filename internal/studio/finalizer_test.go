@@ -20,6 +20,7 @@ import (
 
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/structure"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -54,6 +55,63 @@ func (p *finalizerTestProcessor) RotatePDF(inputPath string, rotations map[strin
 		current = output
 	}
 	return current, nil
+}
+
+func (p *finalizerTestProcessor) AddTextToPDF(inputPath string, _ []structure.TextElement) (string, error) {
+	output := filepath.Join(os.TempDir(), "studio-finalizer-test-text-"+uuid.NewString()+".pdf")
+	in, err := os.Open(inputPath)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.Create(output)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		return "", err
+	}
+	return output, nil
+}
+
+func (p *finalizerTestProcessor) WatermarkPDFOnPages(inputPath string, _ string, _ string, _ string, _ []string) (string, error) {
+	output := filepath.Join(os.TempDir(), "studio-finalizer-test-watermark-"+uuid.NewString()+".pdf")
+	in, err := os.Open(inputPath)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.Create(output)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return "", err
+	}
+	return output, out.Close()
+}
+
+func (p *finalizerTestProcessor) AddPageNumbersPDF(inputPath string, _ string) (string, error) {
+	output := filepath.Join(os.TempDir(), "studio-finalizer-test-page-numbers-"+uuid.NewString()+".pdf")
+	in, err := os.Open(inputPath)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	out, err := os.Create(output)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return "", err
+	}
+	return output, out.Close()
 }
 
 func (p *finalizerTestProcessor) UpdateMetadataPDF(inputPath string, metadata map[string]string, _ string) (string, error) {

@@ -30,6 +30,8 @@ var (
 	ErrBlankDimensions                     = errors.New("blank page dimensions cannot be derived from the document")
 	ErrInvalidCropBox                      = errors.New("studio crop box is invalid for the selected page")
 	ErrInvalidMetadata                     = errors.New("studio metadata contains invalid characters")
+	ErrInvalidPageNumbering                = errors.New("studio page numbering parameters are invalid")
+	ErrInvalidOverlay                      = errors.New("studio overlay parameters are invalid")
 	ErrExportNotFound                      = errors.New("studio export not found")
 	ErrExportExpired                       = errors.New("studio export has expired")
 	ErrFinalizationFailed                  = errors.New("studio finalization failed")

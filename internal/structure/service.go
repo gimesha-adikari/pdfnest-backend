@@ -7,6 +7,7 @@ type Service interface {
 	DeletePDFPages(inputPath string, pagesToDelete []string) (string, error)
 	ReorderPDFPages(inputPath string, sequence []string) (string, error)
 	WatermarkPDF(inputPath string, text string, imagePath string, description string) (string, error)
+	WatermarkPDFOnPages(inputPath string, text string, imagePath string, description string, selectedPages []string) (string, error)
 	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
