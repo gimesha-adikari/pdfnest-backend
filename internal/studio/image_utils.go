@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 )
 
 // RotateImage rotates an image by 0, 90, 180, or 270 degrees clockwise.
@@ -44,6 +45,46 @@ func RotateImage(src image.Image, rotation int) image.Image {
 	default:
 		return src
 	}
+}
+
+// CropImageToPageBox crops an image rendered in the page's unrotated native
+// coordinate system. CropBox uses a PDF lower-left origin, while raster image
+// coordinates use a top-left origin; the y-axis conversion happens here.
+func CropImageToPageBox(src image.Image, pageWidthPt, pageHeightPt float64, cropBox []float64) image.Image {
+	if src == nil || len(cropBox) != 4 || pageWidthPt <= 0 || pageHeightPt <= 0 {
+		return src
+	}
+
+	bounds := src.Bounds()
+	scaleX := float64(bounds.Dx()) / pageWidthPt
+	scaleY := float64(bounds.Dy()) / pageHeightPt
+	left := int(math.Round(cropBox[0] * scaleX))
+	top := int(math.Round((pageHeightPt - cropBox[3]) * scaleY))
+	right := int(math.Round(cropBox[2] * scaleX))
+	bottom := int(math.Round((pageHeightPt - cropBox[1]) * scaleY))
+
+	left = maxInt(0, minInt(left, bounds.Dx()-1))
+	top = maxInt(0, minInt(top, bounds.Dy()-1))
+	right = maxInt(left+1, minInt(right, bounds.Dx()))
+	bottom = maxInt(top+1, minInt(bottom, bounds.Dy()))
+	if right <= left || bottom <= top {
+		return src
+	}
+	return CropTile(src, left, top, right-left, bottom-top)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // CropTile extracts a sub-rectangle (tileX, tileY, tileW, tileH) from src.

@@ -167,8 +167,9 @@ func main() {
 
 	studioRepo := studio.NewRepository(config.DB)
 	studioService := studio.NewService(studioRepo)
+	studioCoordinator := studio.NewOperationCoordinator(studioRepo)
 	studioRenderer := studio.NewTileRenderer(studioRepo)
-	studioController := studio.NewController(studioService, studioRenderer)
+	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer)
 	studio.RegisterRoutes(toolGroup, studioController)
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring

@@ -11,19 +11,50 @@ import (
 
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/studio/vdm"
+	"pdfnest-backend/internal/uploads"
 )
 
 // Controller handles HTTP requests for Studio V2 endpoints.
 type Controller struct {
-	service  Service
-	renderer TileRenderer
+	service     Service
+	coordinator OperationCoordinator
+	renderer    TileRenderer
+}
+
+// CreateSessionFromUpload initializes a Studio session from an actual PDF.
+// It deliberately accepts no client-provided page metadata or VDM model.
+func (ctrl *Controller) CreateSessionFromUpload(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	upload, err := uploads.MustPDFFile(c, "file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	doc, sess, ver, err := ctrl.service.CreateDocumentFromSourceUpload(c.Context(), ident, SourceUploadInput{
+		Path:         upload.Path,
+		OriginalName: upload.Header.Filename,
+		ContentType:  upload.Header.Header.Get("Content-Type"),
+	})
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+
+	var parsedVDM interface{}
+	_ = json.Unmarshal(ver.VirtualModel, &parsedVDM)
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"session":        sess,
+		"document":       doc,
+		"active_version": ver,
+		"vdm":            parsedVDM,
+	})
 }
 
 // NewController initializes a new Studio V2 controller.
-func NewController(service Service, renderer TileRenderer) *Controller {
+func NewController(service Service, coordinator OperationCoordinator, renderer TileRenderer) *Controller {
 	return &Controller{
-		service:  service,
-		renderer: renderer,
+		service:     service,
+		coordinator: coordinator,
+		renderer:    renderer,
 	}
 }
 
@@ -146,6 +177,34 @@ func (ctrl *Controller) ApplyOperation(c *fiber.Ctx) error {
 	var parsedVDM interface{}
 	_ = json.Unmarshal(res.Version.VirtualModel, &parsedVDM)
 
+	return c.JSON(fiber.Map{
+		"version":              res.Version,
+		"operation":            res.Operation,
+		"is_idempotent_replay": res.IsIdempotentReplay,
+		"vdm":                  parsedVDM,
+	})
+}
+
+// ExecuteCommand applies a constrained, server-derived VDM mutation.
+func (ctrl *Controller) ExecuteCommand(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+
+	var req ExecuteCommandRequest
+	if err := decodeStrictParameters(c.Body(), &req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid command payload"})
+	}
+
+	res, err := ctrl.coordinator.Execute(c.Context(), sessionID, ident, req)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+
+	var parsedVDM interface{}
+	_ = json.Unmarshal(res.Version.VirtualModel, &parsedVDM)
 	return c.JSON(fiber.Map{
 		"version":              res.Version,
 		"operation":            res.Operation,
@@ -319,15 +378,19 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrSessionExpired):
 		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
-	case errors.Is(err, ErrInvalidBaseVersion), errors.Is(err, ErrConflict):
+	case errors.Is(err, ErrInvalidBaseVersion), errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
 		return c.Status(http.StatusConflict).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrWorkerBusy):
 		c.Set("Retry-After", "2")
 		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
 	case errors.Is(err, ErrRenderTimeout):
 		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
-	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch):
+	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrInvalidSourcePDF), errors.Is(err, ErrEncryptedSourcePDF), errors.Is(err, ErrSourcePageLimit):
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrSourceTooLarge):
+		return c.Status(http.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": err.Error()})
 	default:
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

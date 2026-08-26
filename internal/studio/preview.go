@@ -344,6 +344,14 @@ func (r *studioTileRenderer) RenderTile(
 		widthPt = targetPage.Dimensions.Width
 		heightPt = targetPage.Dimensions.Height
 	}
+	if len(targetPage.CropBox) > 0 {
+		if err := validateCropBox(targetPage, targetPage.CropBox); err != nil {
+			atomic.AddUint64(&r.cache.metrics.RenderErrors, 1)
+			return nil, fmt.Errorf("%w: %v", ErrRenderFailed, err)
+		}
+		widthPt = targetPage.CropBox[2] - targetPage.CropBox[0]
+		heightPt = targetPage.CropBox[3] - targetPage.CropBox[1]
+	}
 
 	// Effective dimensions accounting for rotation (90/270 deg swaps width/height)
 	effWidthPt := widthPt
@@ -486,7 +494,11 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 		return nil, fmt.Errorf("%w: worker page rasterization failed for page %d: %v", ErrRenderFailed, page.SourcePageNumber, workerErr)
 	}
 
-	// Apply VDM rotation
+	// Crop in unrotated PDF page coordinates, then apply the VDM rotation. This
+	// preserves the CropBox convention for every allowed page rotation.
+	if len(page.CropBox) > 0 && page.Dimensions != nil {
+		img = CropImageToPageBox(img, page.Dimensions.Width, page.Dimensions.Height, page.CropBox)
+	}
 	rotated := RotateImage(img, page.Rotation)
 	// Crop requested tile
 	cropped := CropTile(rotated, tileX, tileY, tileW, tileH)

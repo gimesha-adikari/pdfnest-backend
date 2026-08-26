@@ -84,6 +84,21 @@ func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, strin
 	return written, sha256Hex, nil
 }
 
+// DeleteLocalObject removes a canonical object from the local development
+// store. It is used only to roll back a failed database registration after a
+// source file was safely persisted.
+func DeleteLocalObject(key string) error {
+	sanitizedKey, err := sanitizeObjectKey(key)
+	if err != nil {
+		return fmt.Errorf("invalid storage key: %w", err)
+	}
+	path := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // ObjectExists verifies whether a canonical storage key exists in local storage or R2.
 func ObjectExists(ctx context.Context, key string) bool {
 	sanitizedKey, err := sanitizeObjectKey(key)

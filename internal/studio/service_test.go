@@ -20,6 +20,11 @@ import (
 )
 
 func getTestService(t *testing.T) Service {
+	service, _ := getTestServiceAndRepository(t)
+	return service
+}
+
+func getTestServiceAndRepository(t *testing.T) (Service, Repository) {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
@@ -44,7 +49,7 @@ func getTestService(t *testing.T) Service {
 	require.NoError(t, err)
 
 	repo := NewRepository(db)
-	return NewService(repo)
+	return NewService(repo), repo
 }
 
 func TestService_CreateDocumentAndGetSession(t *testing.T) {

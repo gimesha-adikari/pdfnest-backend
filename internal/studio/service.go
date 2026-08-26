@@ -36,6 +36,7 @@ type ApplyOperationResult struct {
 // Service defines domain orchestration methods for Studio V2.
 type Service interface {
 	CreateDocument(ctx context.Context, ident identity.Identity, fileName string, fileSize int64, initialPageCount int, sourceAssetID string, sourceR2Key string, initialVDM vdm.DocumentModel) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
+	CreateDocumentFromSourceUpload(ctx context.Context, ident identity.Identity, input SourceUploadInput) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
 	GetSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioSession, *models.StudioDocument, *models.StudioVersion, error)
 	ApplyOperation(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req ApplyOperationRequest) (*ApplyOperationResult, error)
 	Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
@@ -62,7 +63,7 @@ func HashGuestToken(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *studioService) validateSessionAccess(sess *models.StudioSession, ident identity.Identity) error {
+func validateSessionAccess(sess *models.StudioSession, ident identity.Identity) error {
 	now := time.Now().UTC()
 	if now.After(sess.ExpiresAt) {
 		return ErrSessionExpired
@@ -175,7 +176,7 @@ func (s *studioService) GetSession(ctx context.Context, sessionID uuid.UUID, ide
 		return nil, nil, nil, err
 	}
 
-	if err := s.validateSessionAccess(sess, ident); err != nil {
+	if err := validateSessionAccess(sess, ident); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -207,102 +208,17 @@ func (s *studioService) ApplyOperation(
 		return nil, err
 	}
 
-	newVDMBytes, err := req.NewVirtualModel.ToJSON()
-	if err != nil {
-		return nil, err
-	}
-
-	var result ApplyOperationResult
-
-	err = s.repo.WithTransaction(ctx, func(txRepo Repository, tx *gorm.DB) error {
-		// 1. Acquire Session Row Lock (Serializes concurrent requests on same session)
-		sess, err := txRepo.LockSession(ctx, sessionID)
-		if err != nil {
-			return err
-		}
-
-		// Validate ownership & expiration under lock
-		if err := s.validateSessionAccess(sess, ident); err != nil {
-			return err
-		}
-
-		// 2. Idempotency Lookup (Fast return for retried requests)
-		existingOp, existingVer, err := txRepo.FindOperationByIdempotencyKey(ctx, sess.DocumentID, req.IdempotencyKey)
-		if err != nil {
-			return err
-		}
-		if existingOp != nil && existingVer != nil {
-			result = ApplyOperationResult{
-				Version:            existingVer,
-				Operation:          existingOp,
-				IsIdempotentReplay: true,
-			}
-			return nil
-		}
-
-		// 3. Base Version Validation (Optimistic Concurrency Control)
-		if sess.ActiveVersionID != req.BaseVersionID {
-			return ErrInvalidBaseVersion
-		}
-
-		baseVer, err := txRepo.GetVersion(ctx, req.BaseVersionID)
-		if err != nil {
-			return err
-		}
-
-		// 4. Create StudioVersion Record
-		newVerID := uuid.New()
-		now := time.Now().UTC()
-		nextVersionNum := baseVer.VersionNumber + 1
-
-		newVer := &models.StudioVersion{
-			ID:              newVerID,
-			DocumentID:      sess.DocumentID,
-			ParentVersionID: &req.BaseVersionID,
-			VersionNumber:   nextVersionNum,
-			Status:          "ready",
-			OperationType:   req.OperationName,
-			VirtualModel:    models.JSON(newVDMBytes),
-			IsMaterialized:  req.IsMaterialized,
-			CreatedAt:       now,
-		}
-
-		var targetPagesJSON models.JSON
-		if len(req.TargetPageIDs) > 0 {
-			tpBytes, _ := json.Marshal(req.TargetPageIDs)
-			targetPagesJSON = models.JSON(tpBytes)
-		}
-
-		// 5. Create StudioOperation Record
-		opID := uuid.New()
-		op := &models.StudioOperation{
-			ID:             opID,
-			DocumentID:     sess.DocumentID,
-			VersionID:      newVerID,
-			IdempotencyKey: req.IdempotencyKey,
-			OperationName:  req.OperationName,
-			Parameters:     models.JSON(req.Parameters),
-			TargetPageIDs:  targetPagesJSON,
-			CreatedAt:      now,
-		}
-
-		// 6. Atomically persist version, operation, update active pointer & parent preferred child
-		if err := txRepo.CreateVersionAndOperation(ctx, newVer, op, sessionID, &req.BaseVersionID); err != nil {
-			return err
-		}
-
-		result = ApplyOperationResult{
-			Version:            newVer,
-			Operation:          op,
-			IsIdempotentReplay: false,
-		}
-		return nil
+	return persistOperation(ctx, s.repo, sessionID, ident, operationMutation{
+		BaseVersionID:  req.BaseVersionID,
+		IdempotencyKey: req.IdempotencyKey,
+		OperationName:  req.OperationName,
+		Parameters:     req.Parameters,
+		TargetPageIDs:  req.TargetPageIDs,
+		IsMaterialized: req.IsMaterialized,
+	}, func(_ *vdm.DocumentModel) (*vdm.DocumentModel, error) {
+		model := req.NewVirtualModel
+		return &model, nil
 	})
-
-	if err != nil {
-		return nil, err
-	}
-	return &result, nil
 }
 
 func (s *studioService) Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error) {
@@ -314,7 +230,7 @@ func (s *studioService) Undo(ctx context.Context, sessionID uuid.UUID, ident ide
 			return err
 		}
 
-		if err := s.validateSessionAccess(sess, ident); err != nil {
+		if err := validateSessionAccess(sess, ident); err != nil {
 			return err
 		}
 
@@ -355,7 +271,7 @@ func (s *studioService) Redo(ctx context.Context, sessionID uuid.UUID, ident ide
 			return err
 		}
 
-		if err := s.validateSessionAccess(sess, ident); err != nil {
+		if err := validateSessionAccess(sess, ident); err != nil {
 			return err
 		}
 
@@ -400,7 +316,7 @@ func (s *studioService) CheckoutVersion(ctx context.Context, sessionID uuid.UUID
 			return err
 		}
 
-		if err := s.validateSessionAccess(sess, ident); err != nil {
+		if err := validateSessionAccess(sess, ident); err != nil {
 			return err
 		}
 
@@ -438,7 +354,7 @@ func (s *studioService) GetVersionHistory(ctx context.Context, sessionID uuid.UU
 		return nil, nil, err
 	}
 
-	if err := s.validateSessionAccess(sess, ident); err != nil {
+	if err := validateSessionAccess(sess, ident); err != nil {
 		return nil, nil, err
 	}
 
@@ -532,7 +448,7 @@ func (s *studioService) CreateExport(
 		return nil, err
 	}
 
-	if err := s.validateSessionAccess(sess, ident); err != nil {
+	if err := validateSessionAccess(sess, ident); err != nil {
 		return nil, err
 	}
 

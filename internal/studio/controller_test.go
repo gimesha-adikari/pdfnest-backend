@@ -2,11 +2,15 @@ package studio
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"gorm.io/gorm"
 
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -44,8 +49,9 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 
 	repo := NewRepository(db)
 	service := NewService(repo)
+	coordinator := NewOperationCoordinator(repo)
 	renderer := NewTileRenderer(repo)
-	controller := NewController(service, renderer)
+	controller := NewController(service, coordinator, renderer)
 
 	app := fiber.New()
 
@@ -65,6 +71,155 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 	RegisterRoutes(app.Group("/api"), controller)
 
 	return app, repo, service, renderer, db
+}
+
+func TestController_ExecuteCommandRejectsCallerSuppliedVDM(t *testing.T) {
+	app, _, service, _, _ := setupTestApp(t)
+	guestID := "command_http_guest_" + uuid.NewString()
+	ident := identity.Identity{ID: guestID, Type: identity.TypeGuest}
+	assetID := "ast_http_command_" + uuid.NewString()
+	pageID := "page_http_" + uuid.NewString()
+	initial := vdm.DocumentModel{
+		DocumentID: "doc_http_command_" + uuid.NewString(),
+		PageCount:  1,
+		Pages: []vdm.PageDescriptor{{
+			PageID: pageID, SourceAssetID: &assetID, SourcePageNumber: 1,
+			Dimensions: &vdm.Dimensions{Width: 612, Height: 792}, Rotation: 0, Overlays: []vdm.Overlay{},
+		}},
+	}
+	_, session, version, err := service.CreateDocument(
+		context.Background(), ident, "typed-command.pdf", 1024, 1, assetID,
+		"studio/sources/"+uuid.NewString()+".pdf", initial,
+	)
+	require.NoError(t, err)
+
+	malicious := map[string]interface{}{
+		"base_version_id": version.ID,
+		"idempotency_key": "smuggle_" + uuid.NewString(),
+		"operation":       CommandRotatePage,
+		"parameters": map[string]interface{}{
+			"page_ids": []string{pageID}, "delta_degrees": 90,
+		},
+		"new_virtual_model": map[string]interface{}{
+			"document_id": initial.DocumentID, "page_count": 0, "pages": []interface{}{},
+		},
+	}
+	maliciousBody, err := json.Marshal(malicious)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/commands", bytes.NewReader(maliciousBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Guest-ID", guestID)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+	legitimate := commandRequest(t, version.ID, "rotate_http_"+uuid.NewString(), CommandRotatePage, RotatePageParameters{
+		PageIDs: []string{pageID}, DeltaDegrees: 90,
+	})
+	legitimateBody, err := json.Marshal(legitimate)
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/commands", bytes.NewReader(legitimateBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-Guest-ID", guestID)
+	resp, err = app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var payload struct {
+		VDM vdm.DocumentModel `json:"vdm"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	require.Len(t, payload.VDM.Pages, 1)
+	assert.Equal(t, 90, payload.VDM.Pages[0].Rotation)
+}
+
+func TestController_CreateSessionFromUpload_DerivesRealPDFState(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	app, repo, _, _, _ := setupTestApp(t)
+	guestID := "guest_upload_" + uuid.NewString()
+	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "rendering", "corpus", "standard_a4_10p.pdf")
+	fixture, err := os.Open(fixturePath)
+	require.NoError(t, err, "real ten-page fixture must be available")
+	defer fixture.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "standard_a4_10p.pdf")
+	require.NoError(t, err)
+	_, err = io.Copy(part, fixture)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/from-upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Test-Guest-ID", guestID)
+	resp, err := app.Test(req, 10_000)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var created struct {
+		Session struct {
+			ID              string `json:"id"`
+			ActiveVersionID string `json:"active_version_id"`
+		} `json:"session"`
+		Document struct {
+			ID               string `json:"id"`
+			OriginalFileName string `json:"original_filename"`
+			InitialPageCount int    `json:"initial_page_count"`
+		} `json:"document"`
+		ActiveVersion struct {
+			ID             string `json:"id"`
+			VersionNumber  int    `json:"version_number"`
+			OperationType  string `json:"operation_type"`
+			IsMaterialized bool   `json:"is_materialized"`
+		} `json:"active_version"`
+		VDM vdm.DocumentModel `json:"vdm"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&created))
+	assert.Equal(t, "standard_a4_10p.pdf", created.Document.OriginalFileName)
+	assert.Equal(t, 10, created.Document.InitialPageCount)
+	assert.Equal(t, 0, created.ActiveVersion.VersionNumber)
+	assert.Equal(t, "initial_upload", created.ActiveVersion.OperationType)
+	assert.True(t, created.ActiveVersion.IsMaterialized)
+	assert.Equal(t, created.Session.ActiveVersionID, created.ActiveVersion.ID)
+	assert.Equal(t, 10, created.VDM.PageCount)
+	require.Len(t, created.VDM.Pages, 10)
+
+	assetID := *created.VDM.Pages[0].SourceAssetID
+	for index, page := range created.VDM.Pages {
+		require.NotNil(t, page.SourceAssetID)
+		assert.Equal(t, assetID, *page.SourceAssetID)
+		assert.Equal(t, index+1, page.SourcePageNumber)
+		assert.False(t, page.IsBlank)
+		assert.Equal(t, 0, page.Rotation)
+		require.NotNil(t, page.Dimensions)
+		assert.Greater(t, page.Dimensions.Width, 0.0)
+		assert.Greater(t, page.Dimensions.Height, 0.0)
+	}
+
+	asset, err := repo.GetAsset(context.Background(), assetID)
+	require.NoError(t, err)
+	assert.Equal(t, created.Document.ID, asset.DocumentID.String())
+	assert.Equal(t, "source_pdf", asset.AssetType)
+	assert.Equal(t, "application/pdf", asset.MimeType)
+	assert.True(t, storage.ObjectExists(context.Background(), asset.R2Key))
+
+	// The initialized session is bound to the guest that performed the upload.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/studio/v1/sessions/"+created.Session.ID, nil)
+	getReq.Header.Set("X-Test-Guest-ID", guestID)
+	getResp, err := app.Test(getReq, 5_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, getResp.StatusCode)
+	getResp.Body.Close()
+
+	otherReq := httptest.NewRequest(http.MethodGet, "/api/studio/v1/sessions/"+created.Session.ID, nil)
+	otherReq.Header.Set("X-Test-Guest-ID", "other_"+uuid.NewString())
+	otherResp, err := app.Test(otherReq, 5_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, otherResp.StatusCode)
+	otherResp.Body.Close()
 }
 
 func TestController_CompleteLifecycle(t *testing.T) {
