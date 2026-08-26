@@ -44,6 +44,7 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 		&models.StudioOperation{},
 		&models.StudioSession{},
 		&models.StudioExport{},
+		&models.StudioEditorState{},
 	)
 	require.NoError(t, err)
 

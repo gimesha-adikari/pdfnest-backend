@@ -36,6 +36,7 @@ func getLiveDB(t *testing.T) *gorm.DB {
 		&StudioOperation{},
 		&StudioSession{},
 		&StudioExport{},
+		&StudioEditorState{},
 	)
 	require.NoError(t, err, "AutoMigrate failed on live PostgreSQL")
 	return db
@@ -53,6 +54,7 @@ func Test1_ActualDatabaseConstraintsAndIndexes(t *testing.T) {
 		"studio_operations",
 		"studio_sessions",
 		"studio_exports",
+		"studio_editor_states",
 	}
 
 	for _, table := range expectedTables {
