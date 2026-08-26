@@ -1,15 +1,19 @@
 package studio
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
@@ -39,27 +43,9 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 	ident identity.Identity,
 	input SourceUploadInput,
 ) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error) {
-	if input.Path == "" {
-		return nil, nil, nil, ErrInvalidSourcePDF
-	}
-
-	info, err := os.Stat(input.Path)
-	if err != nil || info.IsDir() || info.Size() <= 0 {
-		return nil, nil, nil, ErrInvalidSourcePDF
-	}
-	if info.Size() > studioUploadMaxBytes() {
-		return nil, nil, nil, ErrSourceTooLarge
-	}
-	if err := uploads.ValidatePDFHeader(input.Path); err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %v", ErrInvalidSourcePDF, err)
-	}
-
-	pageCount, err := uploads.CheckPDFPageLimit(input.Path, "MAX_PAGES_GENERAL", studioUploadPageLimit)
+	fileSize, pageCount, err := validateStudioPDFUpload(input.Path)
 	if err != nil {
-		if errors.Is(err, uploads.ErrPageLimitExceeded) {
-			return nil, nil, nil, fmt.Errorf("%w: %v", ErrSourcePageLimit, err)
-		}
-		return nil, nil, nil, sourceInspectionError(err)
+		return nil, nil, nil, err
 	}
 	pageDims, err := api.PageDimsFile(input.Path)
 	if err != nil || len(pageDims) != pageCount {
@@ -92,12 +78,106 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 	if fileName == "." || fileName == "" {
 		fileName = "document.pdf"
 	}
-	doc, sess, ver, err := s.CreateDocument(ctx, ident, fileName, info.Size(), pageCount, assetID, key, initialVDM)
+	doc, sess, ver, err := s.CreateDocument(ctx, ident, fileName, fileSize, pageCount, assetID, key, initialVDM)
 	if err != nil {
 		cleanupStudioSource(ctx, key)
 		return nil, nil, nil, err
 	}
 	return doc, sess, ver, nil
+}
+
+// validateStudioPDFUpload is shared by initial-document and secondary-asset
+// ingestion. It preserves Batch 0's header/page-count checks and Studio's
+// size, page-limit, and encrypted/unreadable error mapping.
+func validateStudioPDFUpload(path string) (int64, int, error) {
+	if path == "" {
+		return 0, 0, ErrInvalidSourcePDF
+	}
+
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() <= 0 {
+		return 0, 0, ErrInvalidSourcePDF
+	}
+	if info.Size() > studioUploadMaxBytes() {
+		return 0, 0, ErrSourceTooLarge
+	}
+	if err := uploads.ValidatePDFHeader(path); err != nil {
+		return 0, 0, fmt.Errorf("%w: %v", ErrInvalidSourcePDF, err)
+	}
+
+	pageCount, err := uploads.CheckPDFPageLimit(path, "MAX_PAGES_GENERAL", studioUploadPageLimit)
+	if err != nil {
+		if errors.Is(err, uploads.ErrPageLimitExceeded) {
+			return 0, 0, fmt.Errorf("%w: %v", ErrSourcePageLimit, err)
+		}
+		return 0, 0, sourceInspectionError(err)
+	}
+	if err := rejectEncryptedStudioPDF(path); err != nil {
+		return 0, 0, err
+	}
+	// PageCountFile can inspect some encrypted PDFs without a password. Match
+	// initial Studio upload behavior by requiring a readable page geometry pass
+	// before registering either a source document or a secondary asset.
+	if _, err := api.PageDimsFile(path); err != nil {
+		return 0, 0, sourceInspectionError(err)
+	}
+	return info.Size(), pageCount, nil
+}
+
+func rejectEncryptedStudioPDF(path string) error {
+	encrypted, err := pdfHasEncryptionMarker(path)
+	if err != nil {
+		return sourceInspectionError(err)
+	}
+	if encrypted {
+		return ErrEncryptedSourcePDF
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return sourceInspectionError(err)
+	}
+	defer file.Close()
+
+	info, err := api.PDFInfo(file, filepath.Base(path), nil, false, model.NewDefaultConfiguration())
+	if err != nil {
+		return sourceInspectionError(err)
+	}
+	if info != nil && info.Encrypted {
+		return ErrEncryptedSourcePDF
+	}
+	return nil
+}
+
+func pdfHasEncryptionMarker(path string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+
+	const marker = "/Encrypt"
+	reader := bufio.NewReader(file)
+	buffer := make([]byte, 32*1024)
+	carry := make([]byte, 0, len(marker)-1)
+	for {
+		read, readErr := reader.Read(buffer)
+		chunk := append(carry, buffer[:read]...)
+		if bytes.Contains(chunk, []byte(marker)) {
+			return true, nil
+		}
+		if len(chunk) >= len(marker)-1 {
+			carry = append(carry[:0], chunk[len(chunk)-(len(marker)-1):]...)
+		} else {
+			carry = append(carry[:0], chunk...)
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				return false, nil
+			}
+			return false, readErr
+		}
+	}
 }
 
 func studioUploadMaxBytes() int64 {

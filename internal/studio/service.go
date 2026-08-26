@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -37,6 +39,7 @@ type ApplyOperationResult struct {
 type Service interface {
 	CreateDocument(ctx context.Context, ident identity.Identity, fileName string, fileSize int64, initialPageCount int, sourceAssetID string, sourceR2Key string, initialVDM vdm.DocumentModel) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
 	CreateDocumentFromSourceUpload(ctx context.Context, ident identity.Identity, input SourceUploadInput) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
+	CreateSecondaryAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	GetSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioSession, *models.StudioDocument, *models.StudioVersion, error)
 	ApplyOperation(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req ApplyOperationRequest) (*ApplyOperationResult, error)
 	Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
@@ -192,6 +195,39 @@ func (s *studioService) GetSession(ctx context.Context, sessionID uuid.UUID, ide
 
 	_ = s.repo.TouchSession(ctx, sess.ID)
 	return sess, doc, ver, nil
+}
+
+// CreateSecondaryAsset validates and persists a document-owned PDF without
+// creating a Studio session or version. The session access check happens
+// before storage registration, and failed registration rolls the object back.
+func (s *studioService) CreateSecondaryAsset(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	ident identity.Identity,
+	input SourceUploadInput,
+) (*models.StudioAsset, error) {
+	_, doc, _, err := s.GetSession(ctx, sessionID, ident)
+	if err != nil {
+		return nil, err
+	}
+
+	fileSize, _, err := validateStudioPDFUpload(input.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	assetID := "studio-merge-source-" + uuid.NewString()
+	key := storage.BuildKey("studio/merge-sources", ".pdf")
+	if err := persistStudioSource(ctx, input.Path, key, "application/pdf"); err != nil {
+		return nil, fmt.Errorf("persist Studio secondary asset: %w", err)
+	}
+
+	asset, err := s.RegisterAsset(ctx, doc.ID, assetID, "merge_source", key, fileSize, "application/pdf")
+	if err != nil {
+		cleanupStudioSource(ctx, key)
+		return nil, err
+	}
+	return asset, nil
 }
 
 func (s *studioService) ApplyOperation(

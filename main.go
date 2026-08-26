@@ -169,7 +169,16 @@ func main() {
 	studioService := studio.NewService(studioRepo)
 	studioCoordinator := studio.NewOperationCoordinator(studioRepo)
 	studioRenderer := studio.NewTileRenderer(studioRepo)
-	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer)
+	studioFinalizer := studio.NewFinalizer(studioRepo, structureService)
+	studioMaterializer := studio.NewMaterializationCoordinator(studioRepo, studioFinalizer, studio.MaterializationProcessors{
+		Merge:     structureService.MergePDFs,
+		Split:     structureService.SplitPDF,
+		Compress:  optimizeService.OptimizePDF,
+		Grayscale: optimize.ConvertToGrayscale,
+		Repair:    structure.RepairPdf,
+		Redact:    securityService.RedactPageText,
+	})
+	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer, studioFinalizer, studioMaterializer)
 	studio.RegisterRoutes(toolGroup, studioController)
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring

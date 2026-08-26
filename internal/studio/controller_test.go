@@ -51,7 +51,7 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 	service := NewService(repo)
 	coordinator := NewOperationCoordinator(repo)
 	renderer := NewTileRenderer(repo)
-	controller := NewController(service, coordinator, renderer)
+	controller := NewController(service, coordinator, renderer, nil, nil)
 
 	app := fiber.New()
 
@@ -220,6 +220,109 @@ func TestController_CreateSessionFromUpload_DerivesRealPDFState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusForbidden, otherResp.StatusCode)
 	otherResp.Body.Close()
+}
+
+func TestController_CreateSecondaryAsset_IsOwnedWithoutCreatingVersion(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	app, repo, service, _, _ := setupTestApp(t)
+	guestID := "guest_merge_asset_" + uuid.NewString()
+	assetID := "studio-source-" + uuid.NewString()
+	pageID := "page-" + uuid.NewString()
+	initial := vdm.DocumentModel{
+		DocumentID: "doc-" + uuid.NewString(),
+		PageCount:  1,
+		Pages: []vdm.PageDescriptor{{
+			PageID: pageID, SourceAssetID: &assetID, SourcePageNumber: 1,
+			Dimensions: &vdm.Dimensions{Width: 612, Height: 792}, Overlays: []vdm.Overlay{},
+		}},
+	}
+	_, session, version, err := service.CreateDocument(context.Background(), identity.Identity{ID: guestID, Type: identity.TypeGuest}, "main.pdf", 1, 1, assetID, "missing-source-key", initial)
+	require.NoError(t, err)
+
+	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "fixtures", "small_text.pdf")
+	fixtureBytes, err := os.ReadFile(fixturePath)
+	require.NoError(t, err)
+	makeUpload := func(fileBytes []byte, filename string) (*bytes.Buffer, string) {
+		var uploadBody bytes.Buffer
+		uploadWriter := multipart.NewWriter(&uploadBody)
+		part, createErr := uploadWriter.CreateFormFile("file", filename)
+		require.NoError(t, createErr)
+		_, copyErr := part.Write(fileBytes)
+		require.NoError(t, copyErr)
+		require.NoError(t, uploadWriter.Close())
+		return &uploadBody, uploadWriter.FormDataContentType()
+	}
+	body, contentType := makeUpload(fixtureBytes, "secondary.pdf")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/assets", body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Test-Guest-ID", guestID)
+	resp, err := app.Test(req, 10_000)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var payload struct {
+		Asset models.StudioAsset `json:"asset"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	assert.Equal(t, session.DocumentID, payload.Asset.DocumentID)
+	assert.Equal(t, "merge_source", payload.Asset.AssetType)
+	assert.Equal(t, "application/pdf", payload.Asset.MimeType)
+	assert.True(t, storage.ObjectExists(context.Background(), payload.Asset.R2Key))
+	assert.Equal(t, version.ID, session.ActiveVersionID, "secondary upload must not create a new version")
+	stored, err := repo.GetAsset(context.Background(), payload.Asset.ID)
+	require.NoError(t, err)
+	assert.Equal(t, payload.Asset.DocumentID, stored.DocumentID)
+
+	otherBody, otherContentType := makeUpload(fixtureBytes, "secondary.pdf")
+	otherReq := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/assets", otherBody)
+	otherReq.Header.Set("Content-Type", otherContentType)
+	otherReq.Header.Set("X-Test-Guest-ID", "other_"+uuid.NewString())
+	otherResp, err := app.Test(otherReq, 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, otherResp.StatusCode)
+	otherResp.Body.Close()
+
+	invalid := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/assets", bytes.NewBufferString("not-a-pdf"))
+	invalid.Header.Set("Content-Type", "application/pdf")
+	invalid.Header.Set("X-Test-Guest-ID", guestID)
+	invalidResp, err := app.Test(invalid, 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, invalidResp.StatusCode)
+	invalidResp.Body.Close()
+
+	t.Setenv("MAX_STUDIO_UPLOAD_BYTES", "1")
+	oversizedBody, oversizedContentType := makeUpload(fixtureBytes, "oversized.pdf")
+	oversizedReq := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/assets", oversizedBody)
+	oversizedReq.Header.Set("Content-Type", oversizedContentType)
+	oversizedReq.Header.Set("X-Test-Guest-ID", guestID)
+	oversizedResp, err := app.Test(oversizedReq, 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, oversizedResp.StatusCode)
+	oversizedResp.Body.Close()
+	t.Setenv("MAX_STUDIO_UPLOAD_BYTES", "")
+
+	encryptedPath := filepath.Join("..", "..", "..", "scratch", "test_corpus_v2", "encrypted.pdf")
+	encryptedBytes, err := os.ReadFile(encryptedPath)
+	require.NoError(t, err)
+	encryptedBody, encryptedContentType := makeUpload(encryptedBytes, "encrypted.pdf")
+	encryptedReq := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions/"+session.ID.String()+"/assets", encryptedBody)
+	encryptedReq.Header.Set("Content-Type", encryptedContentType)
+	encryptedReq.Header.Set("X-Test-Guest-ID", guestID)
+	encryptedResp, err := app.Test(encryptedReq, 10_000)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, encryptedResp.StatusCode)
+	encryptedResp.Body.Close()
+
+	cleanupKey := storage.BuildKey("studio/merge-sources", ".pdf")
+	cleanupFile, err := os.Open(fixturePath)
+	require.NoError(t, err)
+	_, _, err = storage.SaveLocalStream(context.Background(), cleanupKey, cleanupFile)
+	cleanupFile.Close()
+	require.NoError(t, err)
+	assert.True(t, storage.ObjectExists(context.Background(), cleanupKey))
+	cleanupStudioSource(context.Background(), cleanupKey)
+	assert.False(t, storage.ObjectExists(context.Background(), cleanupKey))
 }
 
 func TestController_CompleteLifecycle(t *testing.T) {

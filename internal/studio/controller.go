@@ -16,9 +16,11 @@ import (
 
 // Controller handles HTTP requests for Studio V2 endpoints.
 type Controller struct {
-	service     Service
-	coordinator OperationCoordinator
-	renderer    TileRenderer
+	service      Service
+	coordinator  OperationCoordinator
+	renderer     TileRenderer
+	finalizer    StudioFinalizer
+	materializer StudioMaterializationCoordinator
 }
 
 // CreateSessionFromUpload initializes a Studio session from an actual PDF.
@@ -49,12 +51,38 @@ func (ctrl *Controller) CreateSessionFromUpload(c *fiber.Ctx) error {
 	})
 }
 
+// CreateSecondaryAsset stores an additional PDF owned by the current Studio
+// document. It intentionally creates neither a session nor a version.
+func (ctrl *Controller) CreateSecondaryAsset(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	upload, err := uploads.MustPDFFile(c, "file")
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	asset, err := ctrl.service.CreateSecondaryAsset(c.Context(), sessionID, ident, SourceUploadInput{
+		Path:         upload.Path,
+		OriginalName: upload.Header.Filename,
+		ContentType:  upload.Header.Header.Get("Content-Type"),
+	})
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"asset": asset})
+}
+
 // NewController initializes a new Studio V2 controller.
-func NewController(service Service, coordinator OperationCoordinator, renderer TileRenderer) *Controller {
+func NewController(service Service, coordinator OperationCoordinator, renderer TileRenderer, finalizer StudioFinalizer, materializer StudioMaterializationCoordinator) *Controller {
 	return &Controller{
-		service:     service,
-		coordinator: coordinator,
-		renderer:    renderer,
+		service:      service,
+		coordinator:  coordinator,
+		renderer:     renderer,
+		finalizer:    finalizer,
+		materializer: materializer,
 	}
 }
 
@@ -312,6 +340,77 @@ func (ctrl *Controller) Checkout(c *fiber.Ctx) error {
 	})
 }
 
+// FinalizeExport materializes the session's currently active VDM and returns
+// a secure, session-scoped download reference. The controller stays thin: all
+// source resolution, composition, validation, and persistence live in the
+// StudioFinalizer boundary.
+func (ctrl *Controller) FinalizeExport(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	if ctrl.finalizer == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "studio finalizer is not configured"})
+	}
+
+	result, err := ctrl.finalizer.Finalize(c.Context(), sessionID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{
+		"export":        result.Export,
+		"file_name":     result.FileName,
+		"download_path": "/api/studio/v1/sessions/" + sessionID.String() + "/exports/" + result.Export.ID.String() + "/download",
+	})
+}
+
+// DownloadExport streams an owned, unexpired Studio export as an attachment.
+func (ctrl *Controller) DownloadExport(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	exportID, err := uuid.Parse(c.Params("export_id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid export id"})
+	}
+	if ctrl.finalizer == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "studio finalizer is not configured"})
+	}
+
+	download, err := ctrl.finalizer.ResolveDownload(c.Context(), sessionID, exportID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	defer download.Cleanup()
+	return c.Download(download.Path, download.FileName)
+}
+
+// Materialize creates a new immutable materialized Studio version from the
+// active version. It intentionally has a separate route from Export because
+// internal processing must not create a user-visible StudioExport record.
+func (ctrl *Controller) Materialize(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	if ctrl.materializer == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "studio materialization coordinator is not configured"})
+	}
+	var req MaterializationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid materialization request"})
+	}
+	result, err := ctrl.materializer.Execute(c.Context(), sessionID, ident, req)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(result)
+}
+
 // GetPageTile renders and streams a viewport-aware JPEG tile for a specific page and version.
 func (ctrl *Controller) GetPageTile(c *fiber.Ctx) error {
 	ident := identity.MustFromContext(c)
@@ -372,12 +471,14 @@ func (ctrl *Controller) GetMetrics(c *fiber.Ctx) error {
 
 func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 	switch {
-	case errors.Is(err, ErrDocumentNotFound), errors.Is(err, ErrSessionNotFound), errors.Is(err, ErrVersionNotFound), errors.Is(err, ErrPageNotFound):
+	case errors.Is(err, ErrDocumentNotFound), errors.Is(err, ErrSessionNotFound), errors.Is(err, ErrVersionNotFound), errors.Is(err, ErrPageNotFound), errors.Is(err, ErrAssetNotFound), errors.Is(err, ErrExportNotFound):
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrUnauthorized):
 		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrSessionExpired):
 		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrExportExpired):
+		return c.Status(http.StatusGone).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidBaseVersion), errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
 		return c.Status(http.StatusConflict).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrWorkerBusy):
@@ -385,7 +486,7 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
 	case errors.Is(err, ErrRenderTimeout):
 		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
-	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch):
+	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidSourcePDF), errors.Is(err, ErrEncryptedSourcePDF), errors.Is(err, ErrSourcePageLimit):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})

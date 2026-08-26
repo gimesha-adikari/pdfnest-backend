@@ -134,10 +134,12 @@ func ObjectExists(ctx context.Context, key string) bool {
 	return false
 }
 
-// ResolveArchive resolves a storage key to an absolute local filesystem path for extraction.
-// If the archive is stored in R2, it is downloaded to a secure temporary file.
-// Returns the absolute path, a cleanup function (which removes temporary files if any), and an error.
-func ResolveArchive(ctx context.Context, key string) (string, func(), error) {
+// ResolveObject resolves a storage key to an absolute local filesystem path.
+// If the object is stored in R2, it is downloaded to a secure temporary file.
+// The returned cleanup removes only that temporary download, never a local
+// storage object. Callers therefore use the same safe resolution path for
+// source assets and downloadable outputs.
+func ResolveObject(ctx context.Context, key, prefix, suffix string) (string, func(), error) {
 	sanitizedKey, err := sanitizeObjectKey(key)
 	if err != nil {
 		// Fallback check if it is a raw filepath
@@ -165,7 +167,7 @@ func ResolveArchive(ctx context.Context, key string) (string, func(), error) {
 	// 3. Check R2 if configured
 	store, err := Default()
 	if err == nil && store != nil {
-		tmpPath, dlErr := store.DownloadToTemp(sanitizedKey, "pdfnest-archive", ".zip")
+		tmpPath, dlErr := store.DownloadToTemp(sanitizedKey, prefix, suffix)
 		if dlErr == nil {
 			cleanup := func() {
 				_ = os.Remove(tmpPath)
@@ -175,4 +177,10 @@ func ResolveArchive(ctx context.Context, key string) (string, func(), error) {
 	}
 
 	return "", nil, fmt.Errorf("%w: object key '%s' could not be found locally or in remote storage", ErrObjectNotFound, key)
+}
+
+// ResolveArchive is retained for archive consumers. New callers should use
+// ResolveObject with an accurate temporary-file suffix.
+func ResolveArchive(ctx context.Context, key string) (string, func(), error) {
+	return ResolveObject(ctx, key, "pdfnest-archive", ".zip")
 }

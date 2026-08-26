@@ -242,6 +242,9 @@ func (r *gormRepository) GetExport(ctx context.Context, exportID uuid.UUID) (*mo
 	var export models.StudioExport
 	err := r.db.WithContext(ctx).First(&export, "id = ?", exportID).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrExportNotFound
+		}
 		return nil, err
 	}
 	return &export, nil
