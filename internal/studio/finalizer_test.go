@@ -78,6 +78,23 @@ func (p *finalizerTestProcessor) AddTextToPDF(inputPath string, _ []structure.Te
 	return output, nil
 }
 
+func (p *finalizerTestProcessor) SignPDF(inputPath string, signaturePath string, outputPath string, stampsJSON string) error {
+	in, err := os.Open(inputPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 func (p *finalizerTestProcessor) WatermarkPDFOnPages(inputPath string, _ string, _ string, _ string, _ []string) (string, error) {
 	output := filepath.Join(os.TempDir(), "studio-finalizer-test-watermark-"+uuid.NewString()+".pdf")
 	in, err := os.Open(inputPath)

@@ -178,7 +178,8 @@ func main() {
 		Repair:    structure.RepairPdf,
 		Redact:    securityService.RedactPageText,
 	})
-	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer, studioFinalizer, studioMaterializer)
+	studioJobs := studio.NewJobCoordinator(studioRepo, studioFinalizer, editService, markupService)
+	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer, studioFinalizer, studioMaterializer, studioJobs)
 	studio.RegisterRoutes(toolGroup, studioController)
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring

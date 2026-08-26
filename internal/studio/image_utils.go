@@ -150,7 +150,7 @@ func ComposePageOverlaysWithAssets(src image.Image, page *vdm.PageDescriptor, sc
 	dst := image.NewRGBA(image.Rect(0, 0, src.Bounds().Dx(), src.Bounds().Dy()))
 	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Src)
 	for _, overlay := range page.Overlays {
-		if overlay.Type != string(vdm.OverlayTypeText) && overlay.Type != string(vdm.OverlayTypeWatermark) {
+		if overlay.Type != string(vdm.OverlayTypeText) && overlay.Type != string(vdm.OverlayTypeWatermark) && overlay.Type != string(vdm.OverlayTypeSignature) {
 			continue
 		}
 		if len(overlay.Rect) < 2 {
@@ -164,7 +164,7 @@ func ComposePageOverlaysWithAssets(src image.Image, page *vdm.PageDescriptor, sc
 		if len(overlay.Rect) >= 4 {
 			widthPt, heightPt = overlay.Rect[2], overlay.Rect[3]
 		}
-		if overlay.Type == string(vdm.OverlayTypeWatermark) && overlay.AssetID != "" {
+		if (overlay.Type == string(vdm.OverlayTypeWatermark) || overlay.Type == string(vdm.OverlayTypeSignature)) && overlay.AssetID != "" {
 			widthPt, heightPt = math.Max(widthPt, fontSize*1.5), math.Max(heightPt, fontSize*1.5)
 		}
 		if widthPt <= 0 {

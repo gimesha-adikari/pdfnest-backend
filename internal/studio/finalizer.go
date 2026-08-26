@@ -2,6 +2,7 @@ package studio
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -33,6 +34,7 @@ type finalizerPDFProcessor interface {
 	CropPDF(inputPath string, cropBoxDesc string, selectedPages []string) (string, error)
 	RotatePDF(inputPath string, rotations map[string]int) (string, error)
 	AddTextToPDF(inputPath string, elements []structure.TextElement) (string, error)
+	SignPDF(inputPath string, signaturePath string, outputPath string, stampsJSON string) error
 	WatermarkPDFOnPages(inputPath string, text string, imagePath string, description string, selectedPages []string) (string, error)
 	AddPageNumbersPDF(inputPath string, description string) (string, error)
 	UpdateMetadataPDF(inputPath string, metadata map[string]string, password string) (string, error)
@@ -81,6 +83,14 @@ type StudioFinalizer interface {
 // synchronous materializing tools. It never creates a user-visible export.
 type StudioVersionMaterializer interface {
 	MaterializeVersion(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*MaterializedVersion, error)
+}
+
+// StudioVersionMaterializerByID is used by detached asynchronous branches.
+// It materializes a persisted version without changing the session's active
+// version or creating an export.
+type StudioVersionMaterializerByID interface {
+	StudioVersionMaterializer
+	MaterializeVersionByID(ctx context.Context, sessionID, versionID uuid.UUID, ident identity.Identity) (*MaterializedVersion, error)
 }
 
 type studioFinalizer struct {
@@ -135,6 +145,39 @@ func (f *studioFinalizer) MaterializeVersion(ctx context.Context, sessionID uuid
 		Path:             path,
 		Cleanup:          cleanup,
 	}, nil
+}
+
+func (f *studioFinalizer) MaterializeVersionByID(ctx context.Context, sessionID, versionID uuid.UUID, ident identity.Identity) (*MaterializedVersion, error) {
+	if f.processor == nil {
+		return nil, fmt.Errorf("%w: PDF processor is not configured", ErrFinalizationFailed)
+	}
+	sess, err := f.repo.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateSessionAccess(sess, ident); err != nil {
+		return nil, err
+	}
+	version, err := f.repo.GetVersion(ctx, versionID)
+	if err != nil {
+		return nil, err
+	}
+	if version.DocumentID != sess.DocumentID {
+		return nil, ErrInvalidBranchTarget
+	}
+	doc, err := f.repo.GetDocument(ctx, sess.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+	model, err := vdm.FromJSON(version.VirtualModel)
+	if err != nil {
+		return nil, fmt.Errorf("%w: version VDM: %v", ErrFinalizationFailed, err)
+	}
+	path, cleanup, err := f.materialize(ctx, doc.ID, model)
+	if err != nil {
+		return nil, err
+	}
+	return &MaterializedVersion{SessionExpiresAt: sess.ExpiresAt, Session: sess, Document: doc, Version: version, Model: model, Path: path, Cleanup: cleanup}, nil
 }
 
 func (f *studioFinalizer) ResolveDownload(ctx context.Context, sessionID, exportID uuid.UUID, ident identity.Identity) (*ExportDownload, error) {
@@ -416,6 +459,22 @@ func (f *studioFinalizer) flattenDeferredOverlays(currentPath string, modelState
 					return "", fmt.Errorf("%w: invalid watermark overlay %q", ErrFinalizationFailed, overlay.ID)
 				}
 				nextPath, err = f.processor.WatermarkPDFOnPages(currentPath, overlay.Text, imagePath, watermarkDescription(overlay), []string{pageNumber})
+			case string(vdm.OverlayTypeSignature):
+				signaturePath := watermarkPaths[overlay.AssetID]
+				if signaturePath == "" || len(overlay.Rect) != 4 {
+					return "", fmt.Errorf("%w: signature asset or rectangle is missing for overlay %q", ErrFinalizationFailed, overlay.ID)
+				}
+				stampY := page.Dimensions.Height - overlay.Rect[1] - overlay.Rect[3]
+				stamps, marshalErr := json.Marshal([]map[string]any{{
+					"page": pageIndex + 1,
+					"x":    overlay.Rect[0], "y": stampY,
+					"width": overlay.Rect[2], "height": overlay.Rect[3],
+				}})
+				if marshalErr != nil {
+					return "", fmt.Errorf("%w: encode signature stamp %q: %v", ErrFinalizationFailed, overlay.ID, marshalErr)
+				}
+				nextPath = filepath.Join(filepath.Dir(currentPath), "signature-"+uuid.NewString()+".pdf")
+				err = f.processor.SignPDF(currentPath, signaturePath, nextPath, string(stamps))
 			default:
 				return "", fmt.Errorf("%w: overlay type %q is not implemented by the finalizer", ErrFinalizationFailed, overlay.Type)
 			}
@@ -443,7 +502,7 @@ func (f *studioFinalizer) resolveWatermarkAssets(ctx context.Context, documentID
 	}
 	for _, page := range modelState.Pages {
 		for _, overlay := range page.Overlays {
-			if overlay.Type != string(vdm.OverlayTypeWatermark) || overlay.AssetID == "" {
+			if (overlay.Type != string(vdm.OverlayTypeWatermark) && overlay.Type != string(vdm.OverlayTypeSignature)) || overlay.AssetID == "" {
 				continue
 			}
 			if _, ok := paths[overlay.AssetID]; ok {
@@ -454,7 +513,13 @@ func (f *studioFinalizer) resolveWatermarkAssets(ctx context.Context, documentID
 				cleanup()
 				return nil, func() {}, err
 			}
-			if asset.DocumentID != documentID || asset.AssetType != "watermark_image" || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
+			expectedType := "watermark_image"
+			namespace := "pdfnest-studio-watermark"
+			if overlay.Type == string(vdm.OverlayTypeSignature) {
+				expectedType = "signature_image"
+				namespace = "pdfnest-studio-signature"
+			}
+			if asset.DocumentID != documentID || asset.AssetType != expectedType || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
 				cleanup()
 				return nil, func() {}, ErrUnauthorized
 			}
@@ -462,7 +527,7 @@ func (f *studioFinalizer) resolveWatermarkAssets(ctx context.Context, documentID
 			if asset.MimeType == "image/png" {
 				suffix = ".png"
 			}
-			path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-watermark", suffix)
+			path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, namespace, suffix)
 			if err != nil {
 				cleanup()
 				return nil, func() {}, fmt.Errorf("%w: resolve watermark asset: %v", ErrFinalizationFailed, err)

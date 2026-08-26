@@ -202,6 +202,8 @@ func ConnectDB() {
 		&studioModels.StudioSnapshot{},
 		&studioModels.StudioVersion{},
 		&studioModels.StudioOperation{},
+		&studioModels.StudioJob{},
+		&studioModels.StudioEditorState{},
 		&studioModels.StudioSession{},
 		&studioModels.StudioExport{},
 	)

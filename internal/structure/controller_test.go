@@ -96,6 +96,10 @@ func (m *mockStructureService) AddTextToPDF(inputPath string, elements []TextEle
 	return "", nil
 }
 
+func (m *mockStructureService) SignPDF(inputPath string, signaturePath string, outputPath string, stampsJSON string) error {
+	return nil
+}
+
 func (m *mockStructureService) AnalyzePDF(inputPath, filePassword string) (*PDFAnalysis, error) {
 	return &PDFAnalysis{PageCount: 1}, nil
 }

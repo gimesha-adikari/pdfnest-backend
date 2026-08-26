@@ -40,4 +40,8 @@ var (
 	ErrMaterializationFailed               = errors.New("studio materialization failed")
 	ErrInvalidMaterializedOutput           = errors.New("studio materialization produced an invalid PDF")
 	ErrMaterializationProcessorUnavailable = errors.New("studio materialization processor is unavailable")
+	ErrJobNotFound                         = errors.New("studio job not found")
+	ErrInvalidJob                          = errors.New("invalid studio job parameters")
+	ErrJobReconciliationFailed             = errors.New("studio job reconciliation failed")
+	ErrEditorStateNotFound                 = errors.New("studio editor state not found")
 )

@@ -290,6 +290,40 @@ func TestOperationCoordinator_CropRejectsInvalidGeometry(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidCommand)
 }
 
+func TestOperationCoordinator_SignatureOverlayOwnsAssetAndPreservesIDOnUpdate(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	ctx := context.Background()
+	_, doc, _, err := fixture.service.GetSession(ctx, fixture.sessionID, fixture.identity)
+	require.NoError(t, err)
+	assetID := "signature-asset-" + uuid.NewString()
+	_, err = fixture.service.RegisterAsset(ctx, doc.ID, assetID, "signature_image", "studio/signature-assets/"+uuid.NewString()+".png", 128, "image/png")
+	require.NoError(t, err)
+
+	added, err := fixture.coordinator.Execute(ctx, fixture.sessionID, fixture.identity, commandRequest(t, fixture.versionID, "signature-add-"+uuid.NewString(), CommandAddSignatureOverlay, AddSignatureOverlayParameters{
+		PageID: fixture.pageIDs[0], AssetID: assetID, X: 40, Y: 50, Width: 180, Height: 60,
+	}))
+	require.NoError(t, err)
+	derived := resultVDM(t, added)
+	require.Len(t, derived.Pages[0].Overlays, 2)
+	signature := derived.Pages[0].Overlays[1]
+	assert.Equal(t, string(vdm.OverlayTypeSignature), signature.Type)
+	assert.Equal(t, assetID, signature.AssetID)
+
+	updated, err := fixture.coordinator.Execute(ctx, fixture.sessionID, fixture.identity, commandRequest(t, added.Version.ID, "signature-update-"+uuid.NewString(), CommandUpdateSignatureOverlay, UpdateSignatureOverlayParameters{
+		PageID: fixture.pageIDs[0], OverlayID: signature.ID, AssetID: assetID, X: 80, Y: 90, Width: 120, Height: 40,
+	}))
+	require.NoError(t, err)
+	updatedVDM := resultVDM(t, updated)
+	assert.Equal(t, signature.ID, updatedVDM.Pages[0].Overlays[1].ID)
+	assert.Equal(t, []float64{80, 90, 120, 40}, updatedVDM.Pages[0].Overlays[1].Rect)
+	assert.Equal(t, derived.Pages[0].Overlays[0], updatedVDM.Pages[0].Overlays[0])
+
+	_, err = fixture.coordinator.Execute(ctx, fixture.sessionID, fixture.identity, commandRequest(t, fixture.versionID, "signature-foreign-"+uuid.NewString(), CommandAddSignatureOverlay, AddSignatureOverlayParameters{
+		PageID: fixture.pageIDs[0], AssetID: "guessed-signature", X: 1, Y: 1, Width: 10, Height: 10,
+	}))
+	assert.Error(t, err)
+}
+
 func TestOperationCoordinator_UpdateMetadataDerivesStateAndSupportsReloadUndoRedo(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	ctx := context.Background()

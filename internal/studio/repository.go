@@ -21,6 +21,7 @@ type Repository interface {
 	LockSession(ctx context.Context, sessionID uuid.UUID) (*models.StudioSession, error)
 	FindOperationByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioOperation, *models.StudioVersion, error)
 	CreateVersionAndOperation(ctx context.Context, ver *models.StudioVersion, op *models.StudioOperation, sessID uuid.UUID, parentVerID *uuid.UUID) error
+	CreateDetachedVersionAndOperation(ctx context.Context, ver *models.StudioVersion, op *models.StudioOperation) error
 	UpdateSessionActiveVersion(ctx context.Context, sessID uuid.UUID, verID uuid.UUID) error
 	UpdateVersionPreferredChild(ctx context.Context, parentVerID uuid.UUID, childVerID uuid.UUID) error
 	GetVersionHistory(ctx context.Context, docID uuid.UUID) ([]models.StudioVersion, []models.StudioOperation, error)
@@ -31,6 +32,13 @@ type Repository interface {
 	CreateExport(ctx context.Context, export *models.StudioExport) error
 	GetExport(ctx context.Context, exportID uuid.UUID) (*models.StudioExport, error)
 	TouchSession(ctx context.Context, sessID uuid.UUID) error
+	CreateJob(ctx context.Context, job *models.StudioJob) error
+	GetJob(ctx context.Context, jobID uuid.UUID) (*models.StudioJob, error)
+	FindJobByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioJob, error)
+	SaveJob(ctx context.Context, job *models.StudioJob) error
+	CreateEditorState(ctx context.Context, state *models.StudioEditorState) error
+	GetEditorState(ctx context.Context, id uuid.UUID) (*models.StudioEditorState, error)
+	GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error)
 }
 
 type gormRepository struct {
@@ -174,6 +182,13 @@ func (r *gormRepository) CreateVersionAndOperation(
 	return nil
 }
 
+func (r *gormRepository) CreateDetachedVersionAndOperation(ctx context.Context, ver *models.StudioVersion, op *models.StudioOperation) error {
+	if err := r.db.WithContext(ctx).Create(ver).Error; err != nil {
+		return err
+	}
+	return r.db.WithContext(ctx).Create(op).Error
+}
+
 func (r *gormRepository) UpdateSessionActiveVersion(ctx context.Context, sessID uuid.UUID, verID uuid.UUID) error {
 	return r.db.WithContext(ctx).Model(&models.StudioSession{}).
 		Where("id = ?", sessID).
@@ -254,4 +269,58 @@ func (r *gormRepository) TouchSession(ctx context.Context, sessID uuid.UUID) err
 	return r.db.WithContext(ctx).Model(&models.StudioSession{}).
 		Where("id = ?", sessID).
 		Update("last_accessed_at", time.Now().UTC()).Error
+}
+
+func (r *gormRepository) CreateJob(ctx context.Context, job *models.StudioJob) error {
+	return r.db.WithContext(ctx).Create(job).Error
+}
+
+func (r *gormRepository) GetJob(ctx context.Context, jobID uuid.UUID) (*models.StudioJob, error) {
+	var job models.StudioJob
+	if err := r.db.WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (r *gormRepository) FindJobByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioJob, error) {
+	var job models.StudioJob
+	if err := r.db.WithContext(ctx).Where("document_id = ? AND idempotency_key = ?", docID, key).First(&job).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (r *gormRepository) SaveJob(ctx context.Context, job *models.StudioJob) error {
+	return r.db.WithContext(ctx).Save(job).Error
+}
+
+func (r *gormRepository) CreateEditorState(ctx context.Context, state *models.StudioEditorState) error {
+	return r.db.WithContext(ctx).Create(state).Error
+}
+func (r *gormRepository) GetEditorState(ctx context.Context, id uuid.UUID) (*models.StudioEditorState, error) {
+	var state models.StudioEditorState
+	if err := r.db.WithContext(ctx).First(&state, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrEditorStateNotFound
+		}
+		return nil, err
+	}
+	return &state, nil
+}
+func (r *gormRepository) GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error) {
+	var state models.StudioEditorState
+	if err := r.db.WithContext(ctx).Where("extract_job_id = ?", jobID).First(&state).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &state, nil
 }

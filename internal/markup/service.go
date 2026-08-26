@@ -3,10 +3,11 @@ package markup
 import "net/http"
 
 type Service interface {
-	HighlightPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error)
-	UnderlinePDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error)
-	StrikeoutPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error)
-	GetJobStatus(jobID string) (*workerJobRecord, error)
+	HighlightPDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error)
+	UnderlinePDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error)
+	StrikeoutPDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error)
+	GetJobStatus(jobID string) (*WorkerJobRecord, error)
+	CancelJob(jobID string) (*WorkerJobRecord, error)
 	GetJobDownload(jobID string) (*http.Response, error)
 }
 

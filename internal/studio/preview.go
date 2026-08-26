@@ -533,7 +533,7 @@ func (r *studioTileRenderer) resolveOverlayImages(ctx context.Context, documentI
 		}
 	}
 	for _, overlay := range page.Overlays {
-		if overlay.Type != string(vdm.OverlayTypeWatermark) || overlay.AssetID == "" {
+		if (overlay.Type != string(vdm.OverlayTypeWatermark) && overlay.Type != string(vdm.OverlayTypeSignature)) || overlay.AssetID == "" {
 			continue
 		}
 		asset, err := r.repo.GetAsset(ctx, overlay.AssetID)
@@ -541,7 +541,13 @@ func (r *studioTileRenderer) resolveOverlayImages(ctx context.Context, documentI
 			cleanup()
 			return nil, func() {}, err
 		}
-		if asset == nil || asset.DocumentID.String() != documentID || asset.AssetType != "watermark_image" || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
+		expectedType := "watermark_image"
+		namespace := "pdfnest-studio-watermark-preview"
+		if overlay.Type == string(vdm.OverlayTypeSignature) {
+			expectedType = "signature_image"
+			namespace = "pdfnest-studio-signature-preview"
+		}
+		if asset == nil || asset.DocumentID.String() != documentID || asset.AssetType != expectedType || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
 			cleanup()
 			return nil, func() {}, ErrUnauthorized
 		}
@@ -549,7 +555,7 @@ func (r *studioTileRenderer) resolveOverlayImages(ctx context.Context, documentI
 		if asset.MimeType == "image/png" {
 			suffix = ".png"
 		}
-		path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-watermark-preview", suffix)
+		path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, namespace, suffix)
 		if err != nil {
 			cleanup()
 			return nil, func() {}, fmt.Errorf("%w: resolve watermark image: %v", ErrRenderFailed, err)

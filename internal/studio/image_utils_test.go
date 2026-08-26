@@ -98,6 +98,32 @@ func TestComposePageOverlaysRendersWatermarkImageWithOpacityAndRotation(t *testi
 	assert.Greater(t, countNonWhitePixels(composed), 0)
 }
 
+func TestComposePageOverlaysRendersSignatureAssetInNativeRect(t *testing.T) {
+	page := &vdm.PageDescriptor{
+		Dimensions: &vdm.Dimensions{Width: 200, Height: 200},
+		Overlays: []vdm.Overlay{{
+			ID: "signature-1", Type: string(vdm.OverlayTypeSignature), AssetID: "sig-asset",
+			Rect: []float64{40, 60, 80, 40},
+		}},
+	}
+	src := image.NewRGBA(image.Rect(0, 0, 200, 200))
+	draw.Draw(src, src.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
+	asset := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	draw.Draw(asset, asset.Bounds(), &image.Uniform{C: color.RGBA{B: 255, A: 255}}, image.Point{}, draw.Src)
+	composed := ComposePageOverlaysWithAssets(src, page, 1, map[string]image.Image{"sig-asset": asset})
+	assert.Greater(t, countNonWhitePixels(composed), 0)
+	bluePixels := 0
+	for y := 0; y < composed.Bounds().Dy(); y++ {
+		for x := 0; x < composed.Bounds().Dx(); x++ {
+			r, g, b, _ := composed.At(x, y).RGBA()
+			if b > 50000 && r < 10000 && g < 10000 {
+				bluePixels++
+			}
+		}
+	}
+	assert.Greater(t, bluePixels, 0)
+}
+
 func TestComposePageNumberingFollowsCurrentOrderAndCropRotation(t *testing.T) {
 	page := &vdm.PageDescriptor{
 		Dimensions: &vdm.Dimensions{Width: 600, Height: 800},

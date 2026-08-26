@@ -82,3 +82,7 @@ func SignPdfMulti(
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
+
+func (s *structureService) SignPDF(inputPath string, signaturePath string, outputPath string, stampsJSON string) error {
+	return SignPdfMulti(inputPath, signaturePath, outputPath, stampsJSON)
+}

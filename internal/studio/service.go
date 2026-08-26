@@ -41,6 +41,7 @@ type Service interface {
 	CreateDocumentFromSourceUpload(ctx context.Context, ident identity.Identity, input SourceUploadInput) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
 	CreateSecondaryAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	CreateWatermarkAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
+	CreateSignatureAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	GetSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioSession, *models.StudioDocument, *models.StudioVersion, error)
 	ApplyOperation(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req ApplyOperationRequest) (*ApplyOperationResult, error)
 	Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
@@ -255,6 +256,36 @@ func (s *studioService) CreateWatermarkAsset(
 		return nil, fmt.Errorf("persist Studio watermark asset: %w", err)
 	}
 	asset, err := s.RegisterAsset(ctx, doc.ID, assetID, "watermark_image", key, fileSize, mimeType)
+	if err != nil {
+		cleanupStudioSource(ctx, key)
+		return nil, err
+	}
+	return asset, nil
+}
+
+// CreateSignatureAsset validates and persists a document-owned PNG/JPEG
+// signature raster. The browser receives only the catalog ID.
+func (s *studioService) CreateSignatureAsset(
+	ctx context.Context,
+	sessionID uuid.UUID,
+	ident identity.Identity,
+	input SourceUploadInput,
+) (*models.StudioAsset, error) {
+	_, doc, _, err := s.GetSession(ctx, sessionID, ident)
+	if err != nil {
+		return nil, err
+	}
+
+	fileSize, mimeType, err := validateStudioWatermarkImage(input.Path)
+	if err != nil {
+		return nil, err
+	}
+	assetID := "studio-signature-image-" + uuid.NewString()
+	key := storage.BuildKey("studio/signature-assets", imageStorageSuffix(mimeType))
+	if err := persistStudioSource(ctx, input.Path, key, mimeType); err != nil {
+		return nil, fmt.Errorf("persist Studio signature asset: %w", err)
+	}
+	asset, err := s.RegisterAsset(ctx, doc.ID, assetID, "signature_image", key, fileSize, mimeType)
 	if err != nil {
 		cleanupStudioSource(ctx, key)
 		return nil, err

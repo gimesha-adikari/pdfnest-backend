@@ -21,6 +21,10 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	studioGroup.Get("/sessions/:id/history", ctrl.GetHistory)
 	studioGroup.Post("/sessions/:id/checkout", ctrl.Checkout)
 	studioGroup.Post("/sessions/:id/materializations", ctrl.Materialize)
+	studioGroup.Post("/sessions/:id/jobs", ctrl.SubmitJob)
+	studioGroup.Get("/sessions/:id/jobs/:job_id", ctrl.GetJob)
+	studioGroup.Post("/sessions/:id/jobs/:job_id/cancel", ctrl.CancelJob)
+	studioGroup.Get("/sessions/:id/editor/:editor_state_id", ctrl.GetEditorState)
 	studioGroup.Post("/sessions/:id/export", ctrl.FinalizeExport)
 	studioGroup.Get("/sessions/:id/exports/:export_id/download", ctrl.DownloadExport)
 

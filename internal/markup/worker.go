@@ -21,7 +21,7 @@ type markupRequest struct {
 	SourceName string `json:"source_name,omitempty"`
 }
 
-func postJSON(url string, payload any) (*workerJobSubmission, error) {
+func postJSON(url string, payload any) (*WorkerJobSubmission, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode request json: %w", err)
@@ -44,7 +44,7 @@ func postJSON(url string, payload any) (*workerJobSubmission, error) {
 		return nil, fmt.Errorf("worker request failed: status=%s body=%s", resp.Status, strings.TrimSpace(string(b)))
 	}
 
-	var submission workerJobSubmission
+	var submission WorkerJobSubmission
 	if err := json.NewDecoder(resp.Body).Decode(&submission); err != nil {
 		return nil, fmt.Errorf("failed to decode job submission response: %w", err)
 	}
@@ -80,7 +80,7 @@ func getJSON[T any](url string, timeout time.Duration) (*T, error) {
 	return &out, nil
 }
 
-func (s *service) HighlightPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+func (s *service) HighlightPDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/markup/highlight", markupRequest{
 		SourceKey:  sourceKey,
 		PayloadKey: payloadKey,
@@ -88,7 +88,7 @@ func (s *service) HighlightPDF(sourceKey string, payloadKey string, sourceName s
 	})
 }
 
-func (s *service) UnderlinePDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+func (s *service) UnderlinePDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/markup/underline", markupRequest{
 		SourceKey:  sourceKey,
 		PayloadKey: payloadKey,
@@ -96,7 +96,7 @@ func (s *service) UnderlinePDF(sourceKey string, payloadKey string, sourceName s
 	})
 }
 
-func (s *service) StrikeoutPDF(sourceKey string, payloadKey string, sourceName string) (*workerJobSubmission, error) {
+func (s *service) StrikeoutPDF(sourceKey string, payloadKey string, sourceName string) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/markup/strikeout", markupRequest{
 		SourceKey:  sourceKey,
 		PayloadKey: payloadKey,
@@ -104,8 +104,29 @@ func (s *service) StrikeoutPDF(sourceKey string, payloadKey string, sourceName s
 	})
 }
 
-func (s *service) GetJobStatus(jobID string) (*workerJobRecord, error) {
-	return getJSON[workerJobRecord](workerBaseURL()+"/api/v1/jobs/"+jobID, 30*time.Second)
+func (s *service) GetJobStatus(jobID string) (*WorkerJobRecord, error) {
+	return getJSON[WorkerJobRecord](workerBaseURL()+"/api/v1/jobs/"+jobID, 30*time.Second)
+}
+
+func (s *service) CancelJob(jobID string) (*WorkerJobRecord, error) {
+	req, err := http.NewRequest(http.MethodPost, workerBaseURL()+"/api/v1/jobs/"+jobID+"/cancel", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build cancellation request: %w", err)
+	}
+	resp, err := worker.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cancel job: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("job cancellation failed: status=%s body=%s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var job WorkerJobRecord
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, fmt.Errorf("failed to decode cancellation response: %w", err)
+	}
+	return &job, nil
 }
 
 func (s *service) GetJobDownload(jobID string) (*http.Response, error) {

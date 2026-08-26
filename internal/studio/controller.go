@@ -22,6 +22,7 @@ type Controller struct {
 	renderer     TileRenderer
 	finalizer    StudioFinalizer
 	materializer StudioMaterializationCoordinator
+	jobs         StudioJobCoordinator
 }
 
 // CreateSessionFromUpload initializes a Studio session from an actual PDF.
@@ -69,13 +70,15 @@ func (ctrl *Controller) CreateSecondaryAsset(c *fiber.Ctx) error {
 	var asset *models.StudioAsset
 	if c.FormValue("asset_kind") == "watermark_image" {
 		asset, err = ctrl.service.CreateWatermarkAsset(c.Context(), sessionID, ident, input)
+	} else if c.FormValue("asset_kind") == "signature_image" {
+		asset, err = ctrl.service.CreateSignatureAsset(c.Context(), sessionID, ident, input)
 	} else {
 		asset, err = ctrl.service.CreateSecondaryAsset(c.Context(), sessionID, ident, input)
 	}
 	if err != nil {
 		return ctrl.mapError(c, err)
 	}
-	if c.FormValue("asset_kind") == "watermark_image" {
+	if c.FormValue("asset_kind") == "watermark_image" || c.FormValue("asset_kind") == "signature_image" {
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"asset": fiber.Map{
 			"id": asset.ID, "document_id": asset.DocumentID, "asset_type": asset.AssetType,
 			"byte_size": asset.ByteSize, "mime_type": asset.MimeType,
@@ -85,14 +88,99 @@ func (ctrl *Controller) CreateSecondaryAsset(c *fiber.Ctx) error {
 }
 
 // NewController initializes a new Studio V2 controller.
-func NewController(service Service, coordinator OperationCoordinator, renderer TileRenderer, finalizer StudioFinalizer, materializer StudioMaterializationCoordinator) *Controller {
+func NewController(service Service, coordinator OperationCoordinator, renderer TileRenderer, finalizer StudioFinalizer, materializer StudioMaterializationCoordinator, jobs ...StudioJobCoordinator) *Controller {
+	var jobCoordinator StudioJobCoordinator
+	if len(jobs) > 0 {
+		jobCoordinator = jobs[0]
+	}
 	return &Controller{
 		service:      service,
 		coordinator:  coordinator,
 		renderer:     renderer,
 		finalizer:    finalizer,
 		materializer: materializer,
+		jobs:         jobCoordinator,
 	}
+}
+
+func (ctrl *Controller) SubmitJob(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	if ctrl.jobs == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "studio job coordinator is not configured"})
+	}
+	var req StudioJobRequest
+	if err := decodeStrictParameters(c.Body(), &req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid job request"})
+	}
+	result, err := ctrl.jobs.Submit(c.Context(), sessionID, ident, req)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.Status(http.StatusAccepted).JSON(result)
+}
+
+func (ctrl *Controller) GetJob(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	jobID, err := uuid.Parse(c.Params("job_id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid job id"})
+	}
+	if ctrl.jobs == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "studio job coordinator is not configured"})
+	}
+	job, err := ctrl.jobs.Get(c.Context(), sessionID, jobID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{"job": job})
+}
+
+func (ctrl *Controller) CancelJob(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	jobID, err := uuid.Parse(c.Params("job_id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid job id"})
+	}
+	if ctrl.jobs == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "studio job coordinator is not configured"})
+	}
+	job, err := ctrl.jobs.Cancel(c.Context(), sessionID, jobID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{"job": job})
+}
+
+func (ctrl *Controller) GetEditorState(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	stateID, err := uuid.Parse(c.Params("editor_state_id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid editor state id"})
+	}
+	if ctrl.jobs == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "studio job coordinator is not configured"})
+	}
+	state, err := ctrl.jobs.GetEditorState(c.Context(), sessionID, stateID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{"editor_state": state})
 }
 
 // CreateSessionRequest encapsulates document creation parameters.
@@ -368,7 +456,12 @@ func (ctrl *Controller) FinalizeExport(c *fiber.Ctx) error {
 		return ctrl.mapError(c, err)
 	}
 	return c.JSON(fiber.Map{
-		"export":        result.Export,
+		"export": fiber.Map{
+			"id": result.Export.ID, "document_id": result.Export.DocumentID,
+			"version_id": result.Export.VersionID, "export_format": result.Export.ExportFormat,
+			"byte_size": result.Export.ByteSize, "expires_at": result.Export.ExpiresAt,
+			"created_at": result.Export.CreatedAt,
+		},
 		"file_name":     result.FileName,
 		"download_path": "/api/studio/v1/sessions/" + sessionID.String() + "/exports/" + result.Export.ID.String() + "/download",
 	})
@@ -480,7 +573,7 @@ func (ctrl *Controller) GetMetrics(c *fiber.Ctx) error {
 
 func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 	switch {
-	case errors.Is(err, ErrDocumentNotFound), errors.Is(err, ErrSessionNotFound), errors.Is(err, ErrVersionNotFound), errors.Is(err, ErrPageNotFound), errors.Is(err, ErrAssetNotFound), errors.Is(err, ErrExportNotFound):
+	case errors.Is(err, ErrDocumentNotFound), errors.Is(err, ErrSessionNotFound), errors.Is(err, ErrVersionNotFound), errors.Is(err, ErrPageNotFound), errors.Is(err, ErrAssetNotFound), errors.Is(err, ErrExportNotFound), errors.Is(err, ErrJobNotFound):
 		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrUnauthorized):
 		return c.Status(http.StatusForbidden).JSON(fiber.Map{"error": err.Error()})
@@ -495,7 +588,7 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
 	case errors.Is(err, ErrRenderTimeout):
 		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
-	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidOverlay), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable):
+	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidOverlay), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable), errors.Is(err, ErrInvalidJob):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidSourcePDF), errors.Is(err, ErrEncryptedSourcePDF), errors.Is(err, ErrSourcePageLimit):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})

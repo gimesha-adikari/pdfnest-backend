@@ -125,6 +125,47 @@ type StudioOperation struct {
 	Version  *StudioVersion  `gorm:"foreignKey:VersionID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"-"`
 }
 
+// StudioJob is Studio's durable view of an asynchronous worker operation. It
+// links worker jobs to an immutable base version without treating worker state
+// as another version-DAG or queue schema.
+type StudioJob struct {
+	ID              uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	DocumentID      uuid.UUID  `gorm:"type:uuid;index;uniqueIndex:idx_studio_job_idempotency;not null" json:"document_id"`
+	SessionID       uuid.UUID  `gorm:"type:uuid;index;not null" json:"session_id"`
+	BaseVersionID   uuid.UUID  `gorm:"type:uuid;index;not null" json:"base_version_id"`
+	ResultVersionID *uuid.UUID `gorm:"type:uuid;index" json:"result_version_id,omitempty"`
+	EditorStateID   *uuid.UUID `gorm:"type:uuid;index" json:"editor_state_id,omitempty"`
+	WorkerJobID     string     `gorm:"type:varchar(128);uniqueIndex" json:"worker_job_id"`
+	JobType         string     `gorm:"type:varchar(64);not null" json:"job_type"`
+	Status          string     `gorm:"type:varchar(32);not null" json:"status"`
+	Progress        int        `gorm:"not null;default:0" json:"progress"`
+	Message         string     `gorm:"type:text" json:"message"`
+	Error           string     `gorm:"type:text" json:"error,omitempty"`
+	IdempotencyKey  string     `gorm:"type:varchar(128);uniqueIndex:idx_studio_job_idempotency;not null" json:"idempotency_key"`
+	Parameters      JSON       `gorm:"type:jsonb;not null" json:"parameters"`
+	// Result is internal reconciliation metadata. It may contain worker/R2
+	// artifact keys and must never be returned through the Studio job API.
+	Result       JSON       `gorm:"type:jsonb" json:"-"`
+	SourceKey    string     `gorm:"type:varchar(512)" json:"-"`
+	PayloadKey   string     `gorm:"type:varchar(512)" json:"-"`
+	ReconciledAt *time.Time `json:"reconciled_at,omitempty"`
+	CreatedAt    time.Time  `gorm:"index;not null" json:"created_at"`
+	UpdatedAt    time.Time  `gorm:"index;not null" json:"updated_at"`
+}
+
+// StudioEditorState is the immutable, validated layout baseline produced by an
+// editor_extract job.  It is deliberately separate from StudioAsset: it is
+// structured editor data, not a PDF artifact or a version checkpoint.
+type StudioEditorState struct {
+	ID            uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	DocumentID    uuid.UUID `gorm:"type:uuid;index;not null" json:"document_id"`
+	SessionID     uuid.UUID `gorm:"type:uuid;index;not null" json:"session_id"`
+	BaseVersionID uuid.UUID `gorm:"type:uuid;index;not null" json:"base_version_id"`
+	ExtractJobID  uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"extract_job_id"`
+	Layout        JSON      `gorm:"type:jsonb;not null" json:"layout"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 // StudioSession tracks an active editing workspace session for a user or anonymous guest.
 type StudioSession struct {
 	ID              uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`

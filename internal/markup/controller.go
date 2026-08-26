@@ -115,7 +115,7 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 		})
 	}
 
-	var submission *workerJobSubmission
+	var submission *WorkerJobSubmission
 
 	switch action {
 	case ActionHighlight:
@@ -205,7 +205,7 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		return err
 	}
 
-	go func(record *workerJobRecord) {
+	go func(record *WorkerJobRecord) {
 		store, err := storage.Default()
 		if err != nil || record == nil {
 			return

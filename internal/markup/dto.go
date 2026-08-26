@@ -38,13 +38,13 @@ type JobSubmissionResponse struct {
 	QueueName string `json:"queue_name"`
 }
 
-type workerJobSubmission struct {
+type WorkerJobSubmission struct {
 	JobID     string `json:"job_id"`
 	Status    string `json:"status"`
 	QueueName string `json:"queue_name"`
 }
 
-type workerJobRecord struct {
+type WorkerJobRecord struct {
 	ID              string         `json:"id"`
 	JobType         string         `json:"job_type"`
 	Status          string         `json:"status"`

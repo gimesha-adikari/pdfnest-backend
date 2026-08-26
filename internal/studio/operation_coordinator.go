@@ -20,18 +20,20 @@ import (
 type CommandName string
 
 const (
-	CommandRotatePage          CommandName = "rotate_page"
-	CommandDeletePages         CommandName = "delete_pages"
-	CommandReorderPages        CommandName = "reorder_pages"
-	CommandDuplicatePages      CommandName = "duplicate_pages"
-	CommandInsertBlankPages    CommandName = "insert_blank_pages"
-	CommandCropPage            CommandName = "crop_page"
-	CommandUpdateMetadata      CommandName = "update_metadata"
-	CommandUpdatePageNumbering CommandName = "update_page_numbering"
-	CommandAddTextOverlay      CommandName = "add_text_overlay"
-	CommandUpdateTextOverlay   CommandName = "update_text_overlay"
-	CommandAddWatermark        CommandName = "add_watermark"
-	CommandDeleteOverlay       CommandName = "delete_overlay"
+	CommandRotatePage             CommandName = "rotate_page"
+	CommandDeletePages            CommandName = "delete_pages"
+	CommandReorderPages           CommandName = "reorder_pages"
+	CommandDuplicatePages         CommandName = "duplicate_pages"
+	CommandInsertBlankPages       CommandName = "insert_blank_pages"
+	CommandCropPage               CommandName = "crop_page"
+	CommandUpdateMetadata         CommandName = "update_metadata"
+	CommandUpdatePageNumbering    CommandName = "update_page_numbering"
+	CommandAddTextOverlay         CommandName = "add_text_overlay"
+	CommandUpdateTextOverlay      CommandName = "update_text_overlay"
+	CommandAddSignatureOverlay    CommandName = "add_signature_overlay"
+	CommandUpdateSignatureOverlay CommandName = "update_signature_overlay"
+	CommandAddWatermark           CommandName = "add_watermark"
+	CommandDeleteOverlay          CommandName = "delete_overlay"
 )
 
 const (
@@ -117,6 +119,25 @@ type UpdateTextOverlayParameters struct {
 	Y         float64 `json:"y"`
 	FontSize  float64 `json:"font_size"`
 	Color     string  `json:"color"`
+}
+
+type AddSignatureOverlayParameters struct {
+	PageID  string  `json:"page_id"`
+	AssetID string  `json:"asset_id"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Width   float64 `json:"width"`
+	Height  float64 `json:"height"`
+}
+
+type UpdateSignatureOverlayParameters struct {
+	PageID    string  `json:"page_id"`
+	OverlayID string  `json:"overlay_id"`
+	AssetID   string  `json:"asset_id"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Width     float64 `json:"width"`
+	Height    float64 `json:"height"`
 }
 
 // AddWatermarkParameters mirrors the V1 watermark controls while keeping the
@@ -455,6 +476,73 @@ func (c *studioOperationCoordinator) Execute(
 			return base, nil
 		})
 
+	case CommandAddSignatureOverlay:
+		var params AddSignatureOverlayParameters
+		if err := decodeStrictParameters(req.Parameters, &params); err != nil {
+			return nil, ErrInvalidCommand
+		}
+		if err := validateSignatureOverlayParameters(&params); err != nil {
+			return nil, err
+		}
+		mutation.Parameters, _ = json.Marshal(params)
+		mutation.TargetPageIDs = []string{params.PageID}
+		return persistOperation(ctx, c.repo, sessionID, ident, mutation, func(base *vdm.DocumentModel) (*vdm.DocumentModel, error) {
+			index, err := requirePages(base, []string{params.PageID})
+			if err != nil {
+				return nil, err
+			}
+			page := &base.Pages[index[params.PageID]]
+			if err := validateSignatureOverlayPlacement(page, params.X, params.Y, params.Width, params.Height); err != nil {
+				return nil, err
+			}
+			if err := validateOwnedSignatureAsset(ctx, c.repo, sessionID, params.AssetID); err != nil {
+				return nil, err
+			}
+			page.Overlays = append(page.Overlays, vdm.Overlay{
+				ID: uuid.NewString(), Type: string(vdm.OverlayTypeSignature), AssetID: params.AssetID,
+				Rect: []float64{params.X, params.Y, params.Width, params.Height},
+			})
+			return base, nil
+		})
+
+	case CommandUpdateSignatureOverlay:
+		var params UpdateSignatureOverlayParameters
+		if err := decodeStrictParameters(req.Parameters, &params); err != nil {
+			return nil, ErrInvalidCommand
+		}
+		addParams := &AddSignatureOverlayParameters{PageID: params.PageID, AssetID: params.AssetID, X: params.X, Y: params.Y, Width: params.Width, Height: params.Height}
+		if err := validateSignatureOverlayParameters(addParams); err != nil {
+			return nil, err
+		}
+		mutation.Parameters, _ = json.Marshal(params)
+		mutation.TargetPageIDs = []string{params.PageID}
+		return persistOperation(ctx, c.repo, sessionID, ident, mutation, func(base *vdm.DocumentModel) (*vdm.DocumentModel, error) {
+			index, err := requirePages(base, []string{params.PageID})
+			if err != nil {
+				return nil, err
+			}
+			if err := validateOwnedSignatureAsset(ctx, c.repo, sessionID, params.AssetID); err != nil {
+				return nil, err
+			}
+			page := &base.Pages[index[params.PageID]]
+			if err := validateSignatureOverlayPlacement(page, params.X, params.Y, params.Width, params.Height); err != nil {
+				return nil, err
+			}
+			for overlayIndex := range page.Overlays {
+				overlay := &page.Overlays[overlayIndex]
+				if overlay.ID != params.OverlayID {
+					continue
+				}
+				if overlay.Type != string(vdm.OverlayTypeSignature) {
+					return nil, ErrInvalidOverlay
+				}
+				overlay.AssetID = params.AssetID
+				overlay.Rect = []float64{params.X, params.Y, params.Width, params.Height}
+				return base, nil
+			}
+			return nil, ErrInvalidOverlay
+		})
+
 	case CommandAddWatermark:
 		var params AddWatermarkParameters
 		if err := decodeStrictParameters(req.Parameters, &params); err != nil {
@@ -692,6 +780,46 @@ func validateWatermarkParameters(params *AddWatermarkParameters) error {
 	default:
 		return ErrInvalidOverlay
 	}
+}
+
+func validateSignatureOverlayParameters(params *AddSignatureOverlayParameters) error {
+	if params == nil || params.PageID == "" || params.AssetID == "" {
+		return ErrInvalidOverlay
+	}
+	for _, value := range []float64{params.X, params.Y, params.Width, params.Height} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return ErrInvalidOverlay
+		}
+	}
+	if params.Width <= 0 || params.Height <= 0 || params.Width > 2000 || params.Height > 2000 {
+		return ErrInvalidOverlay
+	}
+	return nil
+}
+
+func validateSignatureOverlayPlacement(page *vdm.PageDescriptor, x, y, width, height float64) error {
+	if page == nil || page.Dimensions == nil || page.Dimensions.Width <= 0 || page.Dimensions.Height <= 0 {
+		return ErrInvalidOverlay
+	}
+	if x < 0 || y < 0 || x+width > page.Dimensions.Width || y+height > page.Dimensions.Height {
+		return ErrInvalidOverlay
+	}
+	return nil
+}
+
+func validateOwnedSignatureAsset(ctx context.Context, repo Repository, sessionID uuid.UUID, assetID string) error {
+	sess, err := repo.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	asset, err := repo.GetAsset(ctx, assetID)
+	if err != nil {
+		return err
+	}
+	if sess == nil || asset == nil || asset.DocumentID != sess.DocumentID || asset.AssetType != "signature_image" || (asset.MimeType != "image/png" && asset.MimeType != "image/jpeg") {
+		return ErrUnauthorized
+	}
+	return nil
 }
 
 func deriveWatermarkRect(page *vdm.PageDescriptor, params *AddWatermarkParameters) []float64 {
