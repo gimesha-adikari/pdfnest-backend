@@ -6,13 +6,11 @@ WORKDIR /src
 
 COPY go.mod go.sum ./
 
-RUN --mount=type=cache,id=go-mod-cache,target=/go/pkg/mod \
-    go mod download
+RUN go mod download
 
 COPY . .
 
-RUN --mount=type=cache,id=go-build-cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -o /out/server .
 
 FROM debian:bookworm-slim
