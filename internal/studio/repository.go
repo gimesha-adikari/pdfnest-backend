@@ -39,6 +39,7 @@ type Repository interface {
 	CreateEditorState(ctx context.Context, state *models.StudioEditorState) error
 	GetEditorState(ctx context.Context, id uuid.UUID) (*models.StudioEditorState, error)
 	GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error)
+	DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]string, error)
 }
 
 type gormRepository struct {
@@ -323,4 +324,89 @@ func (r *gormRepository) GetEditorStateByExtractJob(ctx context.Context, jobID u
 		return nil, err
 	}
 	return &state, nil
+}
+
+// DeleteSessionWorkspace removes the database-owned Studio workspace in FK-safe
+// order. Storage keys are returned for best-effort object cleanup after commit;
+// no client-provided document or storage identifier is accepted.
+func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]string, error) {
+	var keys []string
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var assets []models.StudioAsset
+		if err := tx.Where("document_id = ?", documentID).Find(&assets).Error; err != nil {
+			return err
+		}
+		for _, asset := range assets {
+			if asset.R2Key != "" {
+				keys = append(keys, asset.R2Key)
+			}
+		}
+
+		var jobs []models.StudioJob
+		if err := tx.Where("document_id = ? OR session_id = ?", documentID, sessionID).Find(&jobs).Error; err != nil {
+			return err
+		}
+		for _, job := range jobs {
+			if job.SourceKey != "" {
+				keys = append(keys, job.SourceKey)
+			}
+			if job.PayloadKey != "" {
+				keys = append(keys, job.PayloadKey)
+			}
+		}
+
+		var exports []models.StudioExport
+		if err := tx.Where("document_id = ?", documentID).Find(&exports).Error; err != nil {
+			return err
+		}
+		for _, export := range exports {
+			if export.R2Key != "" {
+				keys = append(keys, export.R2Key)
+			}
+		}
+
+		// The session's active-version FK is RESTRICT, so remove the session
+		// before its document/version graph. Unscoped is intentional: discard
+		// is a hard workspace deletion, not a recoverable edit.
+		if err := tx.Unscoped().Where("id = ?", sessionID).Delete(&models.StudioSession{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("document_id = ? OR session_id = ?", documentID, sessionID).Delete(&models.StudioEditorState{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("document_id = ? OR session_id = ?", documentID, sessionID).Delete(&models.StudioJob{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.StudioExport{}).Error; err != nil {
+			return err
+		}
+
+		var versions []models.StudioVersion
+		if err := tx.Select("id").Where("document_id = ?", documentID).Find(&versions).Error; err != nil {
+			return err
+		}
+		versionIDs := make([]uuid.UUID, 0, len(versions))
+		for _, version := range versions {
+			versionIDs = append(versionIDs, version.ID)
+		}
+		if len(versionIDs) > 0 {
+			if err := tx.Where("version_id IN ?", versionIDs).Delete(&models.StudioSnapshot{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.StudioOperation{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.StudioVersion{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("document_id = ?", documentID).Delete(&models.StudioAsset{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id = ?", documentID).Delete(&models.StudioDocument{}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	return keys, err
 }

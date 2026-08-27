@@ -13,6 +13,7 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	studioGroup.Post("/sessions", ctrl.CreateSession)
 	studioGroup.Post("/sessions/from-upload", uploads.Prepare(), ctrl.CreateSessionFromUpload)
 	studioGroup.Get("/sessions/:id", ctrl.GetSession)
+	studioGroup.Delete("/sessions/:id", ctrl.DeleteSession)
 	studioGroup.Get("/sessions/:id/markup-analysis", ctrl.GetMarkupAnalysis)
 	studioGroup.Post("/sessions/:id/assets", uploads.Prepare(), ctrl.CreateSecondaryAsset)
 	studioGroup.Post("/sessions/:id/operations", ctrl.ApplyOperation)

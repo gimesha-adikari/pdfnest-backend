@@ -43,6 +43,7 @@ type Service interface {
 	CreateWatermarkAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	CreateSignatureAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	GetSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioSession, *models.StudioDocument, *models.StudioVersion, error)
+	DeleteSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) error
 	ApplyOperation(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req ApplyOperationRequest) (*ApplyOperationResult, error)
 	Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
 	Redo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
@@ -210,6 +211,38 @@ func (s *studioService) GetSession(ctx context.Context, sessionID uuid.UUID, ide
 
 	_ = s.repo.TouchSession(ctx, sess.ID)
 	return sess, doc, ver, nil
+}
+
+// DeleteSession discards the complete Studio document workspace owned by the
+// authenticated user. Database rows are deleted transactionally; the storage
+// layer then performs best-effort cleanup for catalogued and job staging keys.
+func (s *studioService) DeleteSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) error {
+	if !ident.IsUser() {
+		return ErrUnauthorized
+	}
+	sess, err := s.repo.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := validateSessionAccess(sess, ident); err != nil {
+		return err
+	}
+	keys, err := s.repo.DeleteSessionWorkspace(ctx, sessionID, sess.DocumentID)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleanupStudioObject(ctx, key)
+	}
+	return nil
 }
 
 // CreateSecondaryAsset validates and persists a document-owned PDF without

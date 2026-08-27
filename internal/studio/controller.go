@@ -303,6 +303,23 @@ func (ctrl *Controller) GetSession(c *fiber.Ctx) error {
 	})
 }
 
+// DeleteSession permanently discards the authenticated user's complete Studio
+// workspace. The controller derives all document/resource scope server-side.
+func (ctrl *Controller) DeleteSession(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	if !ident.IsUser() {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "authenticated Studio access is required"})
+	}
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	if err := ctrl.service.DeleteSession(c.Context(), sessionID, ident); err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{"deleted": true})
+}
+
 // ApplyOperation dispatches a VDM transformation under optimistic concurrency control.
 func (ctrl *Controller) ApplyOperation(c *fiber.Ctx) error {
 	ident := identity.MustFromContext(c)
