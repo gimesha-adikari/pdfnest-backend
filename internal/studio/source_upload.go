@@ -10,6 +10,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +68,7 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 		DocumentID: uuid.NewString(),
 		PageCount:  pageCount,
 		Pages:      make([]vdm.PageDescriptor, 0, pageCount),
+		Metadata:   hydrateSourceMetadata(s.metadataReader, input.Path),
 	}
 	for index, dim := range pageDims {
 		initialVDM.Pages = append(initialVDM.Pages, vdm.PageDescriptor{
@@ -89,6 +91,37 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 		return nil, nil, nil, err
 	}
 	return doc, sess, ver, nil
+}
+
+var sourceMetadataKeys = map[string]string{
+	"title": "Title", "author": "Author", "subject": "Subject", "keywords": "Keywords",
+}
+
+// hydrateSourceMetadata applies the upload-time failure policy: a valid PDF
+// remains usable with empty visible metadata when the optional read fails.
+// The diagnostic intentionally contains no metadata values.
+func hydrateSourceMetadata(reader MetadataReader, inputPath string) map[string]string {
+	metadata := canonicalSourceMetadata(nil)
+	if reader == nil {
+		return metadata
+	}
+	raw, err := reader.GetMetadataPDF(inputPath, "")
+	if err != nil {
+		log.Printf("Studio source metadata hydration unavailable")
+		return metadata
+	}
+	return canonicalSourceMetadata(raw)
+}
+
+func canonicalSourceMetadata(raw map[string]string) map[string]string {
+	metadata := map[string]string{"Title": "", "Author": "", "Subject": "", "Keywords": ""}
+	for key, value := range raw {
+		canonical, ok := sourceMetadataKeys[strings.ToLower(strings.TrimSpace(key))]
+		if ok {
+			metadata[canonical] = strings.TrimSpace(value)
+		}
+	}
+	return metadata
 }
 
 // validateStudioPDFUpload is shared by initial-document and secondary-asset

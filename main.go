@@ -166,7 +166,7 @@ func main() {
 	analyzerApi.RegisterRoutes(toolGroup, analyzerController)
 
 	studioRepo := studio.NewRepository(config.DB)
-	studioService := studio.NewService(studioRepo)
+	studioService := studio.NewServiceWithMetadataReader(studioRepo, structureService)
 	studioCoordinator := studio.NewOperationCoordinator(studioRepo)
 	studioRenderer := studio.NewTileRenderer(studioRepo)
 	studioFinalizer := studio.NewFinalizer(studioRepo, structureService)
@@ -180,6 +180,7 @@ func main() {
 	})
 	studioJobs := studio.NewJobCoordinator(studioRepo, studioFinalizer, editService, markupService)
 	studioController := studio.NewController(studioService, studioCoordinator, studioRenderer, studioFinalizer, studioMaterializer, studioJobs)
+	studioController.SetMarkupAnalysisProvider(studio.NewMarkupAnalysisProvider(studioRepo, structureService))
 	studio.RegisterRoutes(toolGroup, studioController)
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring

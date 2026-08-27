@@ -2,9 +2,11 @@ package studio
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
 	"pdfnest-backend/internal/studio/models"
@@ -14,6 +16,25 @@ func TestStudioJobNamesAreClosed(t *testing.T) {
 	assert.True(t, validStudioJob(StudioJobMarkupHighlight))
 	assert.True(t, validStudioJob(StudioJobEditCompile))
 	assert.False(t, validStudioJob("arbitrary_worker_command"))
+}
+
+func TestStudioMarkupModesExposeOnlyPublicModes(t *testing.T) {
+	assert.True(t, validStudioMarkupMode(StudioMarkupModeManual))
+	assert.True(t, validStudioMarkupMode(StudioMarkupModeSmart))
+	assert.True(t, validStudioMarkupMode(StudioMarkupModeOCR))
+	assert.False(t, validStudioMarkupMode("text"), "worker-internal text mode must not cross the Studio boundary")
+	assert.False(t, validStudioMarkupMode("unexpected"))
+}
+
+func TestStudioStagePayloadRejectsWorkerInternalMarkupMode(t *testing.T) {
+	coordinator := &studioJobCoordinator{}
+	_, err := coordinator.stagePayload(
+		context.Background(),
+		StudioJobMarkupHighlight,
+		[]byte(`{"boxes":[{"x":1,"y":2,"width":10,"height":10,"page":1}],"mode":"text"}`),
+		uuid.New(),
+	)
+	assert.ErrorIs(t, err, ErrInvalidJob)
 }
 
 func TestWorkerStatusMirrorsExistingWorkerLifecycle(t *testing.T) {

@@ -17,12 +17,13 @@ import (
 
 // Controller handles HTTP requests for Studio V2 endpoints.
 type Controller struct {
-	service      Service
-	coordinator  OperationCoordinator
-	renderer     TileRenderer
-	finalizer    StudioFinalizer
-	materializer StudioMaterializationCoordinator
-	jobs         StudioJobCoordinator
+	service        Service
+	coordinator    OperationCoordinator
+	renderer       TileRenderer
+	finalizer      StudioFinalizer
+	materializer   StudioMaterializationCoordinator
+	jobs           StudioJobCoordinator
+	markupAnalysis MarkupAnalysisProvider
 }
 
 // CreateSessionFromUpload initializes a Studio session from an actual PDF.
@@ -101,6 +102,28 @@ func NewController(service Service, coordinator OperationCoordinator, renderer T
 		materializer: materializer,
 		jobs:         jobCoordinator,
 	}
+}
+
+// SetMarkupAnalysisProvider wires the read-only, session-owned analysis
+// adapter without changing the existing controller constructor contract.
+func (ctrl *Controller) SetMarkupAnalysisProvider(provider MarkupAnalysisProvider) {
+	ctrl.markupAnalysis = provider
+}
+
+func (ctrl *Controller) GetMarkupAnalysis(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	if ctrl.markupAnalysis == nil {
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "studio markup analysis is not configured"})
+	}
+	analysis, err := ctrl.markupAnalysis.AnalyzeMarkup(c.Context(), sessionID, ident)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(analysis)
 }
 
 func (ctrl *Controller) SubmitJob(c *fiber.Ctx) error {

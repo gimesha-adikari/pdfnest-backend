@@ -54,12 +54,25 @@ type Service interface {
 }
 
 type studioService struct {
-	repo Repository
+	repo           Repository
+	metadataReader MetadataReader
+}
+
+// MetadataReader reads the source PDF's metadata through the existing
+// structure/worker adapter. Studio only hydrates the four fields it exposes.
+type MetadataReader interface {
+	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
 }
 
 // NewService initializes a Studio V2 domain service.
 func NewService(repo Repository) Service {
 	return &studioService{repo: repo}
+}
+
+// NewServiceWithMetadataReader configures source-upload metadata hydration
+// without changing the existing Studio service contract.
+func NewServiceWithMetadataReader(repo Repository, reader MetadataReader) Service {
+	return &studioService{repo: repo, metadataReader: reader}
 }
 
 // HashGuestToken computes a SHA-256 digest for guest identity tokens.

@@ -41,6 +41,10 @@ type finalizerPDFProcessor interface {
 	GetMetadataPDF(inputPath string, password string) (map[string]string, error)
 }
 
+type sourceMetadataPreservingProcessor interface {
+	PreserveMetadataPDF(inputPath string, metadataSourcePath string) (string, error)
+}
+
 // FinalizationResult contains only public export metadata. The resolved
 // storage path stays inside the finalizer and is never returned to clients.
 type FinalizationResult struct {
@@ -361,6 +365,7 @@ func (f *studioFinalizer) materialize(ctx context.Context, documentID uuid.UUID,
 		}
 		currentPath = nextPath
 	}
+	metadataSourcePath := anchorPath
 	watermarkPaths, watermarkCleanup, err := f.resolveWatermarkAssets(ctx, documentID, modelState)
 	if err != nil {
 		return fail(err)
@@ -396,6 +401,18 @@ func (f *studioFinalizer) materialize(ctx context.Context, documentID uuid.UUID,
 			}
 			currentPath = nextPath
 		}
+	}
+	if processor, ok := f.processor.(sourceMetadataPreservingProcessor); ok {
+		nextPath, err := processor.PreserveMetadataPDF(currentPath, metadataSourcePath)
+		if err != nil {
+			return fail(fmt.Errorf("%w: preserve source metadata: %v", ErrFinalizationFailed, err))
+		}
+		owned[nextPath] = struct{}{}
+		if currentPath != nextPath {
+			_ = os.Remove(currentPath)
+			delete(owned, currentPath)
+		}
+		currentPath = nextPath
 	}
 
 	if len(modelState.Metadata) > 0 {

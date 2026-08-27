@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -48,7 +49,18 @@ type MaterializationResult struct {
 	Operation          *models.StudioOperation `json:"operation"`
 	Asset              *models.StudioAsset     `json:"asset"`
 	VDM                *vdm.DocumentModel      `json:"vdm"`
+	Metrics            *CompressionMetrics     `json:"metrics,omitempty"`
 	IsIdempotentReplay bool                    `json:"is_idempotent_replay"`
+}
+
+// CompressionMetrics are measured from the exact active materialized input
+// and the validated output file. They deliberately do not include an
+// optimistic percentage or processor-reported estimate.
+type CompressionMetrics struct {
+	InputBytes       int64   `json:"input_bytes"`
+	OutputBytes      int64   `json:"output_bytes"`
+	SavedBytes       int64   `json:"saved_bytes"`
+	ReductionPercent float64 `json:"reduction_percent"`
 }
 
 type CompressParameters struct {
@@ -56,7 +68,34 @@ type CompressParameters struct {
 }
 
 type MergeParameters struct {
-	SourceAssetIDs []string `json:"source_asset_ids"`
+	SourceAssetIDs          []string `json:"source_asset_ids"`
+	CurrentDocumentPosition *int     `json:"current_document_position,omitempty"`
+}
+
+const maxStudioMergeAssets = 32
+
+func validateMergeParameters(params MergeParameters) (int, error) {
+	if len(params.SourceAssetIDs) == 0 || len(params.SourceAssetIDs) > maxStudioMergeAssets {
+		return 0, ErrInvalidMaterialization
+	}
+	position := len(params.SourceAssetIDs)
+	if params.CurrentDocumentPosition != nil {
+		position = *params.CurrentDocumentPosition
+	}
+	if position < 0 || position > len(params.SourceAssetIDs) {
+		return 0, ErrInvalidMaterialization
+	}
+	seen := make(map[string]struct{}, len(params.SourceAssetIDs))
+	for _, assetID := range params.SourceAssetIDs {
+		if assetID == "" {
+			return 0, ErrInvalidMaterialization
+		}
+		if _, exists := seen[assetID]; exists {
+			return 0, ErrInvalidMaterialization
+		}
+		seen[assetID] = struct{}{}
+	}
+	return position, nil
 }
 
 type SplitParameters struct {
@@ -64,8 +103,54 @@ type SplitParameters struct {
 }
 
 type RedactParameters struct {
-	Keywords []string `json:"keywords"`
-	Boxes    string   `json:"boxes"`
+	Keywords []string    `json:"keywords"`
+	Boxes    []RedactBox `json:"boxes"`
+}
+
+// RedactBox is the trusted Studio-to-worker contract. Coordinates are
+// normalized top-left coordinates in the visible, crop-relative page space;
+// the worker converts them into its unrotated PDF context before applying
+// permanent redactions.
+type RedactBox struct {
+	ID     string  `json:"id"`
+	PageID string  `json:"page_id"`
+	Page   int     `json:"page"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+const maxStudioRedactBoxes = 256
+
+func validateRedactParameters(params RedactParameters, model *vdm.DocumentModel) error {
+	if len(params.Boxes) > maxStudioRedactBoxes {
+		return fmt.Errorf("too many redaction boxes")
+	}
+	seen := make(map[string]struct{}, len(params.Boxes))
+	for _, box := range params.Boxes {
+		if box.ID == "" || box.PageID == "" || box.Page < 1 || box.Page > len(model.Pages) {
+			return fmt.Errorf("redaction box has an invalid page identity")
+		}
+		if _, exists := seen[box.ID]; exists {
+			return fmt.Errorf("redaction box ID is duplicated")
+		}
+		seen[box.ID] = struct{}{}
+		page := model.Pages[box.Page-1]
+		if page.PageID != box.PageID {
+			return fmt.Errorf("redaction box page does not belong to the current Studio version")
+		}
+		values := []float64{box.X, box.Y, box.Width, box.Height}
+		for _, value := range values {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return fmt.Errorf("redaction box geometry must be finite")
+			}
+		}
+		if box.X < 0 || box.Y < 0 || box.Width <= 0 || box.Height <= 0 || box.X+box.Width > 1 || box.Y+box.Height > 1 {
+			return fmt.Errorf("redaction box must stay within the page")
+		}
+	}
+	return nil
 }
 
 // MaterializationProcessors are narrow adapters around the existing internal
@@ -126,6 +211,13 @@ func (c *studioMaterializationCoordinator) Execute(ctx context.Context, sessionI
 	if current.Version.ID != req.BaseVersionID {
 		return nil, ErrInvalidBaseVersion
 	}
+	inputInfo, err := os.Stat(current.Path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: stat active materialized input: %v", ErrMaterializationFailed, err)
+	}
+	if inputInfo.IsDir() || inputInfo.Size() < 0 {
+		return nil, fmt.Errorf("%w: active materialized input is not a valid file", ErrMaterializationFailed)
+	}
 
 	workDir, err := os.MkdirTemp("", "pdfnest-studio-materialize-*")
 	if err != nil {
@@ -170,6 +262,9 @@ func (c *studioMaterializationCoordinator) Execute(ctx context.Context, sessionI
 	if err != nil {
 		return nil, err
 	}
+	if req.Operation == MaterializeCompress && result.Metrics == nil {
+		result.Metrics = calculateCompressionMetrics(inputInfo.Size(), info.Size())
+	}
 	registered = !result.IsIdempotentReplay
 	return result, nil
 }
@@ -194,7 +289,30 @@ func (c *studioMaterializationCoordinator) findReplay(ctx context.Context, docum
 	if err != nil {
 		return nil, err
 	}
-	return &MaterializationResult{Version: version, Operation: op, Asset: asset, VDM: modelState, IsIdempotentReplay: true}, nil
+	result := &MaterializationResult{Version: version, Operation: op, Asset: asset, VDM: modelState, IsIdempotentReplay: true}
+	if req.Operation == MaterializeCompress {
+		result.Metrics = c.replayCompressionMetrics(ctx, req, asset)
+	}
+	return result, nil
+}
+
+func (c *studioMaterializationCoordinator) replayCompressionMetrics(ctx context.Context, req MaterializationRequest, outputAsset *models.StudioAsset) *CompressionMetrics {
+	if outputAsset == nil || outputAsset.ByteSize < 0 {
+		return nil
+	}
+	base, err := c.repo.GetVersion(ctx, req.BaseVersionID)
+	if err != nil || base.SnapshotID == nil || *base.SnapshotID == uuid.Nil {
+		return nil
+	}
+	inputSnapshot, err := c.repo.GetSnapshot(ctx, *base.SnapshotID)
+	if err != nil {
+		return nil
+	}
+	inputAsset, err := c.repo.GetAsset(ctx, inputSnapshot.AssetID)
+	if err != nil {
+		return nil
+	}
+	return calculateCompressionMetrics(inputAsset.ByteSize, outputAsset.ByteSize)
 }
 
 func (c *studioMaterializationCoordinator) persistResult(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req MaterializationRequest, current *MaterializedVersion, derivedModel *vdm.DocumentModel, key string, byteSize int64, pageCount int) (*MaterializationResult, error) {
@@ -308,6 +426,9 @@ func (c *studioMaterializationCoordinator) runProcessor(ctx context.Context, cur
 		if level == "" {
 			level = "medium"
 		}
+		if !validCompressionLevel(level) {
+			return "", ErrInvalidMaterialization
+		}
 		if c.processors.Compress == nil {
 			return "", ErrMaterializationProcessorUnavailable
 		}
@@ -344,13 +465,17 @@ func (c *studioMaterializationCoordinator) runProcessor(ctx context.Context, cur
 		return output, nil
 	case MaterializeRedact:
 		var params RedactParameters
-		if err := decodeStrictParameters(raw, &params); err != nil || (len(params.Keywords) == 0 && (strings.TrimSpace(params.Boxes) == "" || strings.TrimSpace(params.Boxes) == "[]")) {
+		if len(raw) > 64*1024 || decodeStrictParameters(raw, &params) != nil || (len(params.Keywords) == 0 && len(params.Boxes) == 0) || validateRedactParameters(params, current.Model) != nil {
 			return "", ErrInvalidMaterialization
 		}
 		if c.processors.Redact == nil {
 			return "", ErrMaterializationProcessorUnavailable
 		}
-		fileName, err := c.processors.Redact(current.Path, workDir, params.Keywords, params.Boxes)
+		workerBoxes, err := json.Marshal(params.Boxes)
+		if err != nil {
+			return "", ErrInvalidMaterialization
+		}
+		fileName, err := c.processors.Redact(current.Path, workDir, params.Keywords, string(workerBoxes))
 		if err != nil {
 			return "", fmt.Errorf("%w: redact: %v", ErrMaterializationFailed, err)
 		}
@@ -393,13 +518,18 @@ func (c *studioMaterializationCoordinator) runProcessor(ctx context.Context, cur
 		return output, nil
 	case MaterializeMerge:
 		var params MergeParameters
-		if err := decodeStrictParameters(raw, &params); err != nil || len(params.SourceAssetIDs) == 0 {
+		if err := decodeStrictParameters(raw, &params); err != nil {
+			return "", ErrInvalidMaterialization
+		}
+		currentPosition, err := validateMergeParameters(params)
+		if err != nil {
 			return "", ErrInvalidMaterialization
 		}
 		if c.processors.Merge == nil {
 			return "", ErrMaterializationProcessorUnavailable
 		}
-		inputs := []string{current.Path}
+		inputs := make([]string, 0, len(params.SourceAssetIDs)+1)
+		assetPaths := make([]string, 0, len(params.SourceAssetIDs))
 		cleanups := make([]func(), 0, len(params.SourceAssetIDs))
 		defer func() {
 			for _, cleanup := range cleanups {
@@ -414,17 +544,18 @@ func (c *studioMaterializationCoordinator) runProcessor(ctx context.Context, cur
 			if asset.DocumentID != current.Document.ID {
 				return "", ErrUnauthorized
 			}
-			if asset.ID == current.Asset.ID {
-				continue
+			if asset.AssetType != "merge_source" {
+				return "", ErrInvalidMaterialization
 			}
 			path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-merge", ".pdf")
 			if err != nil {
 				return "", err
 			}
 			cleanups = append(cleanups, cleanup)
-			inputs = append(inputs, path)
+			assetPaths = append(assetPaths, path)
 		}
-		if len(inputs) < 2 {
+		inputs = orderedMergeInputs(assetPaths, current.Path, currentPosition)
+		if len(inputs) != len(params.SourceAssetIDs)+1 {
 			return "", ErrInvalidMaterialization
 		}
 		output, err := c.processors.Merge(inputs)
@@ -435,6 +566,20 @@ func (c *studioMaterializationCoordinator) runProcessor(ctx context.Context, cur
 	default:
 		return "", ErrInvalidMaterialization
 	}
+}
+
+func orderedMergeInputs(assets []string, current string, currentPosition int) []string {
+	result := make([]string, 0, len(assets)+1)
+	for index, asset := range assets {
+		if index == currentPosition {
+			result = append(result, current)
+		}
+		result = append(result, asset)
+	}
+	if currentPosition == len(assets) {
+		result = append(result, current)
+	}
+	return result
 }
 
 func deriveMaterializedVDM(base *vdm.DocumentModel, outputPath string, pageCount int) (*vdm.DocumentModel, error) {
@@ -498,6 +643,36 @@ func validMaterializationName(name MaterializationName) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func validCompressionLevel(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
+func calculateCompressionMetrics(inputBytes, outputBytes int64) *CompressionMetrics {
+	if inputBytes < 0 {
+		inputBytes = 0
+	}
+	if outputBytes < 0 {
+		outputBytes = 0
+	}
+	savedBytes := inputBytes - outputBytes
+	if savedBytes < 0 {
+		savedBytes = 0
+	}
+	reductionPercent := 0.0
+	if inputBytes > 0 {
+		reductionPercent = float64(savedBytes) / float64(inputBytes) * 100
+	}
+	return &CompressionMetrics{
+		InputBytes: inputBytes, OutputBytes: outputBytes,
+		SavedBytes: savedBytes, ReductionPercent: reductionPercent,
 	}
 }
 

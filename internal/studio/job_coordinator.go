@@ -36,9 +36,29 @@ const (
 )
 
 type MarkupJobParameters struct {
-	Boxes []markup.Box `json:"boxes"`
-	Mode  markup.Mode  `json:"mode"`
+	Boxes []markup.Box     `json:"boxes"`
+	Mode  StudioMarkupMode `json:"mode"`
 }
+
+// StudioMarkupMode is the public closed set. The worker's internal "text"
+// mode is deliberately not accepted at this boundary.
+type StudioMarkupMode string
+
+const (
+	StudioMarkupModeManual StudioMarkupMode = "manual"
+	StudioMarkupModeSmart  StudioMarkupMode = "smart"
+	StudioMarkupModeOCR    StudioMarkupMode = "ocr"
+)
+
+func validStudioMarkupMode(mode StudioMarkupMode) bool {
+	switch mode {
+	case StudioMarkupModeManual, StudioMarkupModeSmart, StudioMarkupModeOCR:
+		return true
+	default:
+		return false
+	}
+}
+
 type EditExtractJobParameters struct{}
 type EditCompileJobParameters struct {
 	EditorStateID uuid.UUID       `json:"editor_state_id"`
@@ -280,7 +300,10 @@ func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobNam
 			return "", ErrInvalidJob
 		}
 		if p.Mode == "" {
-			p.Mode = markup.ModeSmart
+			p.Mode = StudioMarkupModeSmart
+		}
+		if !validStudioMarkupMode(p.Mode) {
+			return "", ErrInvalidJob
 		}
 		payload, err = json.Marshal(p)
 	case StudioJobEditExtract:

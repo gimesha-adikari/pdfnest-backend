@@ -123,6 +123,21 @@ func TestStudioMaterializationCoordinator_CompressesCurrentVDMAndReusesSnapshot(
 	assert.Equal(t, MaterializeCompress, MaterializationName(result.Operation.OperationName))
 	assert.True(t, result.Version.IsMaterialized)
 	require.NotNil(t, result.Version.SnapshotID)
+	require.NotNil(t, result.Metrics)
+	baseVersion, err := repo.GetVersion(context.Background(), rotated.Version.ID)
+	require.NoError(t, err)
+	require.NotNil(t, baseVersion.SnapshotID)
+	baseSnapshot, err := repo.GetSnapshot(context.Background(), *baseVersion.SnapshotID)
+	require.NoError(t, err)
+	baseAsset, err := repo.GetAsset(context.Background(), baseSnapshot.AssetID)
+	require.NoError(t, err)
+	assert.Equal(t, baseAsset.ByteSize, result.Metrics.InputBytes)
+	assert.Equal(t, result.Asset.ByteSize, result.Metrics.OutputBytes)
+	expectedSaved := result.Metrics.InputBytes - result.Metrics.OutputBytes
+	if expectedSaved < 0 {
+		expectedSaved = 0
+	}
+	assert.Equal(t, expectedSaved, result.Metrics.SavedBytes)
 	assert.Equal(t, result.Asset.ID, *result.VDM.Pages[0].SourceAssetID)
 	assert.Equal(t, result.Asset.ID, *result.VDM.Pages[len(result.VDM.Pages)-1].SourceAssetID)
 	assert.Greater(t, result.VDM.Pages[0].Dimensions.Width, result.VDM.Pages[0].Dimensions.Height, "the source VDM rotation is represented in the materialized input before compression")
@@ -137,6 +152,8 @@ func TestStudioMaterializationCoordinator_CompressesCurrentVDMAndReusesSnapshot(
 	assert.True(t, replay.IsIdempotentReplay)
 	assert.Equal(t, result.Version.ID, replay.Version.ID)
 	assert.Equal(t, result.Asset.ID, replay.Asset.ID)
+	require.NotNil(t, replay.Metrics)
+	assert.Equal(t, result.Metrics, replay.Metrics)
 
 	_, err = service.Undo(context.Background(), session.ID, ident)
 	require.NoError(t, err)

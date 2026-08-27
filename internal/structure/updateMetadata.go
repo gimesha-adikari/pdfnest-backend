@@ -1,6 +1,7 @@
 package structure
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -105,6 +106,66 @@ func (s *structureService) UpdateMetadataPDF(
 		return "", err
 	}
 
+	return outputPath, nil
+}
+
+func (s *structureService) PreserveMetadataPDF(inputPath string, metadataSourcePath string) (string, error) {
+	outputPath := filepath.Join(os.TempDir(), "metadata-preserved-"+uuid.New().String()+".pdf")
+
+	sourceFile, err := os.Open(metadataSourcePath)
+	if err != nil {
+		return "", err
+	}
+	defer sourceFile.Close()
+
+	var sourceBody bytes.Buffer
+	writer := multipart.NewWriter(&sourceBody)
+	inputPart, err := writer.CreateFormFile("file", filepath.Base(inputPath))
+	if err != nil {
+		return "", err
+	}
+	inputFile, err := os.Open(inputPath)
+	if err != nil {
+		return "", err
+	}
+	if _, err = io.Copy(inputPart, inputFile); err != nil {
+		inputFile.Close()
+		return "", err
+	}
+	inputFile.Close()
+	sourcePart, err := writer.CreateFormFile("metadata_source", filepath.Base(metadataSourcePath))
+	if err != nil {
+		return "", err
+	}
+	if _, err = io.Copy(sourcePart, sourceFile); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, worker.GetWorkerURL()+"/api/v1/metadata/preserve", &sourceBody)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := worker.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("metadata worker unavailable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("metadata worker failed: %s", string(b))
+	}
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		return "", err
+	}
 	return outputPath, nil
 }
 
