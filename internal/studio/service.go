@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +45,8 @@ type Service interface {
 	CreateWatermarkAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	CreateSignatureAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	GetSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioSession, *models.StudioDocument, *models.StudioVersion, error)
+	ListSessions(ctx context.Context, ident identity.Identity, query string, sort string, offset int, limit int) ([]StudioSessionSummary, int64, error)
+	RenameSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, title string) error
 	DeleteSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) error
 	ApplyOperation(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, req ApplyOperationRequest) (*ApplyOperationResult, error)
 	Undo(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) (*models.StudioVersion, error)
@@ -52,6 +56,13 @@ type Service interface {
 	RegisterSnapshot(ctx context.Context, docID uuid.UUID, versionID uuid.UUID, assetID string, r2Key string, byteSize int64, pageCount int) (*models.StudioSnapshot, error)
 	RegisterAsset(ctx context.Context, docID uuid.UUID, assetID string, assetType string, r2Key string, byteSize int64, mimeType string) (*models.StudioAsset, error)
 	CreateExport(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, exportFormat string, r2Key string, byteSize int64, expiresAt time.Time) (*models.StudioExport, error)
+}
+
+type StudioSessionSummary struct {
+	Session       *models.StudioSession
+	Document      *models.StudioDocument
+	ActiveVersion *models.StudioVersion
+	PreviewPageID string
 }
 
 type studioService struct {
@@ -221,6 +232,57 @@ func (s *studioService) GetSession(ctx context.Context, sessionID uuid.UUID, ide
 
 	_ = s.repo.TouchSession(ctx, sess.ID)
 	return sess, doc, ver, nil
+}
+
+func (s *studioService) ListSessions(ctx context.Context, ident identity.Identity, query string, sort string, offset int, limit int) ([]StudioSessionSummary, int64, error) {
+	if !ident.IsUser() {
+		return nil, 0, ErrUnauthorized
+	}
+	userID, err := uuid.Parse(ident.ID)
+	if err != nil {
+		return nil, 0, ErrUnauthorized
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 12
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	sessions, total, err := s.repo.ListUserSessions(ctx, userID, query, sort, offset, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	result := make([]StudioSessionSummary, 0, len(sessions))
+	for i := range sessions {
+		sess := sessions[i]
+		pageID := ""
+		if sess.ActiveVersion != nil {
+			var model vdm.DocumentModel
+			if json.Unmarshal(sess.ActiveVersion.VirtualModel, &model) == nil && len(model.Pages) > 0 {
+				pageID = model.Pages[0].PageID
+			}
+		}
+		result = append(result, StudioSessionSummary{Session: &sess, Document: sess.Document, ActiveVersion: sess.ActiveVersion, PreviewPageID: pageID})
+	}
+	return result, total, nil
+}
+
+func (s *studioService) RenameSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, title string) error {
+	if !ident.IsUser() {
+		return ErrUnauthorized
+	}
+	title = strings.TrimSpace(title)
+	if title == "" || len([]rune(title)) > 255 {
+		return errors.New("session title must be between 1 and 255 characters")
+	}
+	sess, err := s.repo.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := validateSessionAccess(sess, ident); err != nil {
+		return err
+	}
+	return s.repo.UpdateSessionTitle(ctx, sessionID, title)
 }
 
 // DeleteSession discards the complete Studio document workspace owned by the

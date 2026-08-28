@@ -176,6 +176,7 @@ type StudioSession struct {
 	CreatedAt       time.Time      `json:"created_at"`
 	LastAccessedAt  time.Time      `gorm:"index;not null" json:"last_accessed_at"`
 	ExpiresAt       time.Time      `gorm:"index;not null" json:"expires_at"`
+	Title           string         `gorm:"type:varchar(255)" json:"title,omitempty"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 
 	Document      *StudioDocument `gorm:"foreignKey:DocumentID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"-"`

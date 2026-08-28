@@ -11,8 +11,10 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	studioGroup := router.Group("/studio/v1")
 
 	studioGroup.Post("/sessions", ctrl.CreateSession)
+	studioGroup.Get("/sessions", ctrl.ListSessions)
 	studioGroup.Post("/sessions/from-upload", uploads.Prepare(), ctrl.CreateSessionFromUpload)
 	studioGroup.Get("/sessions/:id", ctrl.GetSession)
+	studioGroup.Patch("/sessions/:id", ctrl.RenameSession)
 	studioGroup.Delete("/sessions/:id", ctrl.DeleteSession)
 	studioGroup.Get("/sessions/:id/markup-analysis", ctrl.GetMarkupAnalysis)
 	studioGroup.Post("/sessions/:id/assets", uploads.Prepare(), ctrl.CreateSecondaryAsset)

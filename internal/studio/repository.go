@@ -17,6 +17,8 @@ type Repository interface {
 	WithTransaction(ctx context.Context, fn func(txRepo Repository, tx *gorm.DB) error) error
 	CreateDocumentWithInitialVersion(ctx context.Context, doc *models.StudioDocument, asset *models.StudioAsset, ver *models.StudioVersion, sess *models.StudioSession) error
 	GetSession(ctx context.Context, sessionID uuid.UUID) (*models.StudioSession, error)
+	ListUserSessions(ctx context.Context, userID uuid.UUID, query string, sort string, offset int, limit int) ([]models.StudioSession, int64, error)
+	UpdateSessionTitle(ctx context.Context, sessionID uuid.UUID, title string) error
 	GetDocument(ctx context.Context, docID uuid.UUID) (*models.StudioDocument, error)
 	GetVersion(ctx context.Context, verID uuid.UUID) (*models.StudioVersion, error)
 	LockSession(ctx context.Context, sessionID uuid.UUID) (*models.StudioSession, error)
@@ -99,6 +101,34 @@ func (r *gormRepository) GetSession(ctx context.Context, sessionID uuid.UUID) (*
 		return nil, err
 	}
 	return &sess, nil
+}
+
+func (r *gormRepository) ListUserSessions(ctx context.Context, userID uuid.UUID, query string, sort string, offset int, limit int) ([]models.StudioSession, int64, error) {
+	base := r.db.WithContext(ctx).Model(&models.StudioSession{}).Where("studio_sessions.user_id = ?", userID).Preload("Document").Preload("ActiveVersion")
+	countQuery := r.db.WithContext(ctx).Model(&models.StudioSession{}).Where("studio_sessions.user_id = ?", userID)
+	if query != "" {
+		like := "%" + query + "%"
+		join := "JOIN studio_documents ON studio_documents.id = studio_sessions.document_id"
+		base = base.Joins(join).Where("studio_sessions.title ILIKE ? OR studio_documents.original_file_name ILIKE ?", like, like)
+		countQuery = countQuery.Joins(join).Where("studio_sessions.title ILIKE ? OR studio_documents.original_file_name ILIKE ?", like, like)
+	}
+	var total int64
+	if err := countQuery.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var sessions []models.StudioSession
+	order := "studio_sessions.last_accessed_at DESC"
+	if sort == "created" {
+		order = "studio_sessions.created_at DESC"
+	}
+	if err := base.Order(order).Offset(offset).Limit(limit).Find(&sessions).Error; err != nil {
+		return nil, 0, err
+	}
+	return sessions, total, nil
+}
+
+func (r *gormRepository) UpdateSessionTitle(ctx context.Context, sessionID uuid.UUID, title string) error {
+	return r.db.WithContext(ctx).Model(&models.StudioSession{}).Where("id = ?", sessionID).Update("title", title).Error
 }
 
 func (r *gormRepository) GetDocument(ctx context.Context, docID uuid.UUID) (*models.StudioDocument, error) {

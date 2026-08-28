@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -301,6 +302,55 @@ func (ctrl *Controller) GetSession(c *fiber.Ctx) error {
 		"active_version": ver,
 		"vdm":            parsedVDM,
 	})
+}
+
+func (ctrl *Controller) ListSessions(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	if !ident.IsUser() {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "authenticated Studio access is required"})
+	}
+	page, _ := strconv.Atoi(c.Query("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.Query("page_size", "12"))
+	if pageSize < 1 || pageSize > 50 {
+		pageSize = 12
+	}
+	sort := c.Query("sort", "edited")
+	if sort != "created" {
+		sort = "edited"
+	}
+	sessions, total, err := ctrl.service.ListSessions(c.Context(), ident, c.Query("q"), sort, (page-1)*pageSize, pageSize)
+	if err != nil {
+		return ctrl.mapError(c, err)
+	}
+	items := make([]fiber.Map, 0, len(sessions))
+	for _, item := range sessions {
+		items = append(items, fiber.Map{"session": item.Session, "document": item.Document, "active_version": item.ActiveVersion, "preview_page_id": item.PreviewPageID})
+	}
+	return c.JSON(fiber.Map{"sessions": items, "total": total, "page": page, "page_size": pageSize})
+}
+
+func (ctrl *Controller) RenameSession(c *fiber.Ctx) error {
+	ident := identity.MustFromContext(c)
+	if !ident.IsUser() {
+		return c.Status(http.StatusUnauthorized).JSON(fiber.Map{"error": "authenticated Studio access is required"})
+	}
+	sessionID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid session id"})
+	}
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := decodeStrictParameters(c.Body(), &req); err != nil {
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "invalid rename payload"})
+	}
+	if err := ctrl.service.RenameSession(c.Context(), sessionID, ident, req.Title); err != nil {
+		return ctrl.mapError(c, err)
+	}
+	return c.JSON(fiber.Map{"renamed": true, "title": strings.TrimSpace(req.Title)})
 }
 
 // DeleteSession permanently discards the authenticated user's complete Studio
