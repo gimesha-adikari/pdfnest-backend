@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"time"
 
 	"pdfnest-backend/internal/storage"
@@ -124,6 +125,10 @@ func deleteStudioObject(ctx context.Context, key string) error {
 		if err := store.DeleteObject(ctx, key); err != nil {
 			errs = append(errs, err)
 		}
+	} else if os.Getenv("R2_BUCKET") != "" {
+		// In a managed deployment, an R2 configuration/client failure must stay
+		// on the durable cleanup ledger; local deletion is not a substitute.
+		errs = append(errs, err)
 	}
 	if err := storage.DeleteLocalObject(key); err != nil {
 		errs = append(errs, err)

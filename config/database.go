@@ -3,9 +3,6 @@ package config
 import (
 	"log"
 	"os"
-	analyzerModels "pdfnest-backend/internal/analyzer/models"
-	"pdfnest-backend/internal/models"
-	studioModels "pdfnest-backend/internal/studio/models"
 	"time"
 
 	"github.com/google/uuid"
@@ -172,6 +169,9 @@ type ContactTicket struct {
 }
 
 func ConnectDB() {
+	if err := ValidateRuntimeConfig(); err != nil {
+		log.Fatalf("Invalid runtime configuration: %v", err)
+	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
@@ -182,39 +182,14 @@ func ConnectDB() {
 		log.Fatalf("Failed to establish target connection database: %v", err)
 	}
 
-	err = database.AutoMigrate(
-		&User{},
-		&Subscription{},
-		&Transaction{},
-		&UsageLog{},
-		&WebhookLog{},
-		&BillingReservation{},
-		&UserSetting{},
-		&ContactCategory{},
-		&ContactTicket{},
-		&models.HomePageContent{},
-		&models.SubscribePageContent{},
-		&models.DynamicToolItem{},
-		models.AboutPageContent{},
-		&analyzerModels.AnalyzerSession{},
-		&studioModels.StudioDocument{},
-		&studioModels.StudioAsset{},
-		&studioModels.StudioSnapshot{},
-		&studioModels.StudioVersion{},
-		&studioModels.StudioOperation{},
-		&studioModels.StudioJob{},
-		&studioModels.StudioEditorState{},
-		&studioModels.StudioSession{},
-		&studioModels.StudioExport{},
-		&studioModels.StudioStorageCleanupTask{},
-	)
-	if err != nil {
-		log.Fatalf("Database structural schema update failure: %v", err)
-	}
-
-	err = database.Exec("CREATE SEQUENCE IF NOT EXISTS contact_ticket_sequence START 1").Error
-	if err != nil {
-		log.Fatalf("Failed to create sequence contact_ticket_sequence: %v", err)
+	if IsManagedEnvironment() {
+		if err := ValidateManagedSchema(database); err != nil {
+			log.Fatalf("Managed database schema is not ready: %v", err)
+		}
+	} else {
+		if err := RunSchemaMigrations(database); err != nil {
+			log.Fatalf("Database structural schema update failure: %v", err)
+		}
 	}
 
 	DB = database

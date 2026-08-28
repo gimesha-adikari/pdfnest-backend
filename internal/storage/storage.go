@@ -18,6 +18,15 @@ var (
 	ErrObjectNotFound = errors.New("storage: object not found")
 )
 
+func managedStorageRequired() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))) {
+	case "canary", "staging", "production":
+		return true
+	default:
+		return false
+	}
+}
+
 // GetLocalStorageDir returns the absolute directory for local file persistence.
 // It is guaranteed to be absolute and independent of caller working directory.
 func GetLocalStorageDir() string {
@@ -41,6 +50,9 @@ func GetLocalStorageDir() string {
 // SaveLocalStream writes a stream directly to the local storage directory under the given object key.
 // It streams into the file, calculating SHA-256 on the fly without holding the entire payload in memory.
 func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, string, error) {
+	if managedStorageRequired() {
+		return 0, "", fmt.Errorf("local filesystem storage is disabled in managed environments; use the configured R2 adapter")
+	}
 	sanitizedKey, err := sanitizeObjectKey(key)
 	if err != nil {
 		return 0, "", fmt.Errorf("invalid storage key: %w", err)
@@ -88,6 +100,9 @@ func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, strin
 // store. It is used only to roll back a failed database registration after a
 // source file was safely persisted.
 func DeleteLocalObject(key string) error {
+	if managedStorageRequired() {
+		return nil
+	}
 	sanitizedKey, err := sanitizeObjectKey(key)
 	if err != nil {
 		return fmt.Errorf("invalid storage key: %w", err)
@@ -106,19 +121,21 @@ func ObjectExists(ctx context.Context, key string) bool {
 		return false
 	}
 
-	// 1. Check local storage directory
-	localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
-	if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
-		return true
-	}
-
-	// 2. Check direct filesystem path (e.g. for test fixtures)
-	if fi, err := os.Stat(key); err == nil && !fi.IsDir() {
-		return true
-	}
-	if abs, err := filepath.Abs(key); err == nil {
-		if fi, err := os.Stat(abs); err == nil && !fi.IsDir() {
+	if !managedStorageRequired() {
+		// 1. Check local storage directory
+		localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
+		if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
 			return true
+		}
+
+		// 2. Check direct filesystem path (e.g. for test fixtures)
+		if fi, err := os.Stat(key); err == nil && !fi.IsDir() {
+			return true
+		}
+		if abs, err := filepath.Abs(key); err == nil {
+			if fi, err := os.Stat(abs); err == nil && !fi.IsDir() {
+				return true
+			}
 		}
 	}
 
@@ -142,6 +159,9 @@ func ObjectExists(ctx context.Context, key string) bool {
 func ResolveObject(ctx context.Context, key, prefix, suffix string) (string, func(), error) {
 	sanitizedKey, err := sanitizeObjectKey(key)
 	if err != nil {
+		if managedStorageRequired() {
+			return "", nil, fmt.Errorf("invalid managed storage key: %w", err)
+		}
 		// Fallback check if it is a raw filepath
 		if fi, statErr := os.Stat(key); statErr == nil && !fi.IsDir() {
 			abs, _ := filepath.Abs(key)
@@ -150,17 +170,19 @@ func ResolveObject(ctx context.Context, key, prefix, suffix string) (string, fun
 		return "", nil, fmt.Errorf("invalid storage key: %w", err)
 	}
 
-	// 1. Check local storage directory
-	localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
-	if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
-		return localPath, func() {}, nil
-	}
+	if !managedStorageRequired() {
+		// 1. Check local storage directory
+		localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
+		if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
+			return localPath, func() {}, nil
+		}
 
-	// 2. Check if key matches an existing filesystem path directly (e.g., test-corpus/)
-	if fi, err := os.Stat(key); err == nil && !fi.IsDir() {
-		abs, err := filepath.Abs(key)
-		if err == nil {
-			return abs, func() {}, nil
+		// 2. Check if key matches an existing filesystem path directly (e.g., test-corpus/)
+		if fi, err := os.Stat(key); err == nil && !fi.IsDir() {
+			abs, err := filepath.Abs(key)
+			if err == nil {
+				return abs, func() {}, nil
+			}
 		}
 	}
 

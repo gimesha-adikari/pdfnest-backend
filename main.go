@@ -46,6 +46,13 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found; using Render environment variables.")
 	}
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		if err := config.RunManagedMigrations(); err != nil {
+			log.Fatalf("Managed schema migration failed: %v", err)
+		}
+		log.Println("Managed schema migration completed successfully.")
+		return
+	}
 
 	config.ConnectDB()
 	content.SeedSiteContent()
@@ -145,7 +152,7 @@ func main() {
 	contentController := content.NewController()
 	content.RegisterRoutes(apiGroup, contentController)
 
-	healthController := health.NewController()
+	healthController := health.NewControllerWithDependencies(config.DB, config.Redis)
 	health.RegisterRoutes(apiGroup, healthController)
 
 	userController := user.NewController()

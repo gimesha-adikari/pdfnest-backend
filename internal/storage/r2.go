@@ -33,6 +33,8 @@ var (
 	once         sync.Once
 )
 
+const r2DeleteTimeout = 2 * time.Minute
+
 func getEncryptionKey() []byte {
 	key := strings.TrimSpace(os.Getenv("FILE_ENCRYPTION_KEY"))
 	if len(key) == 32 {
@@ -280,7 +282,32 @@ func (s *Store) DeleteObject(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
-	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	sanitizedKey, err := sanitizeObjectKey(key)
+	if err != nil {
+		return fmt.Errorf("invalid storage key: %w", err)
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, r2DeleteTimeout)
+	defer cancel()
+	if err := s.client.RemoveObject(deleteCtx, s.bucket, sanitizedKey, minio.RemoveObjectOptions{}); err != nil {
+		if isMissingObjectError(err) {
+			return nil
+		}
+		return fmt.Errorf("delete from r2 failed: %w", err)
+	}
+	return nil
+}
+
+func isMissingObjectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	response := minio.ToErrorResponse(err)
+	switch response.Code {
+	case "NoSuchKey", "NoSuchObject", "NotFound", "404":
+		return true
+	default:
+		return false
+	}
 }
 
 type PresignFile struct {

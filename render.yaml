@@ -4,4 +4,6 @@ services:
     runtime: docker
     plan: starter
     autoDeploy: true
+    # Cheap liveness remains the platform health path. Deployment gates should
+    # additionally probe /api/ready before sending canary traffic.
     healthCheckPath: /api/health
