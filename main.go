@@ -166,7 +166,9 @@ func main() {
 	analyzerApi.RegisterRoutes(toolGroup, analyzerController)
 
 	studioRepo := studio.NewRepository(config.DB)
-	studioService := studio.NewServiceWithMetadataReader(studioRepo, structureService)
+	studioCleanupWorker := studio.NewStorageCleanupWorker(studioRepo, nil)
+	studioService := studio.NewServiceWithMetadataReaderAndCleanup(studioRepo, structureService, studioCleanupWorker)
+	studioCleanupWorker.Start(context.Background(), 30*time.Second)
 	studioCoordinator := studio.NewOperationCoordinator(studioRepo)
 	studioRenderer := studio.NewTileRenderer(studioRepo)
 	studioFinalizer := studio.NewFinalizer(studioRepo, structureService)

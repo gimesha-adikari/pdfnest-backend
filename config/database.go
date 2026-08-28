@@ -206,6 +206,7 @@ func ConnectDB() {
 		&studioModels.StudioEditorState{},
 		&studioModels.StudioSession{},
 		&studioModels.StudioExport{},
+		&studioModels.StudioStorageCleanupTask{},
 	)
 	if err != nil {
 		log.Fatalf("Database structural schema update failure: %v", err)

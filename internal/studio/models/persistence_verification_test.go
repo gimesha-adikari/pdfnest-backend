@@ -36,6 +36,7 @@ func getLiveDB(t *testing.T) *gorm.DB {
 		&StudioOperation{},
 		&StudioSession{},
 		&StudioExport{},
+		&StudioStorageCleanupTask{},
 		&StudioEditorState{},
 	)
 	require.NoError(t, err, "AutoMigrate failed on live PostgreSQL")

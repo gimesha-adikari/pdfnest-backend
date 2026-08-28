@@ -196,3 +196,16 @@ type StudioExport struct {
 	Document *StudioDocument `gorm:"foreignKey:DocumentID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"-"`
 	Version  *StudioVersion  `gorm:"foreignKey:VersionID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;" json:"-"`
 }
+
+// StudioStorageCleanupTask is durable intent to remove one opaque storage
+// object after its owning Studio graph has been discarded.
+type StudioStorageCleanupTask struct {
+	ID             uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	ObjectKey      string     `gorm:"type:varchar(512);uniqueIndex;not null" json:"-"`
+	AttemptCount   int        `gorm:"not null;default:0" json:"-"`
+	NextAttemptAt  time.Time  `gorm:"index;not null" json:"-"`
+	LeaseExpiresAt *time.Time `gorm:"index" json:"-"`
+	LastError      string     `gorm:"type:varchar(512)" json:"-"`
+	CreatedAt      time.Time  `json:"-"`
+	UpdatedAt      time.Time  `json:"-"`
+}

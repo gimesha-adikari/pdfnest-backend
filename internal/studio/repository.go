@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"pdfnest-backend/internal/studio/models"
 )
@@ -39,7 +40,11 @@ type Repository interface {
 	CreateEditorState(ctx context.Context, state *models.StudioEditorState) error
 	GetEditorState(ctx context.Context, id uuid.UUID) (*models.StudioEditorState, error)
 	GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error)
-	DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]string, error)
+	DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]models.StudioStorageCleanupTask, error)
+	CreateStorageCleanupTasks(ctx context.Context, keys []string) ([]models.StudioStorageCleanupTask, error)
+	ClaimStorageCleanupTasks(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]models.StudioStorageCleanupTask, error)
+	DeleteStorageCleanupTask(ctx context.Context, taskID uuid.UUID) error
+	RescheduleStorageCleanupTask(ctx context.Context, taskID uuid.UUID, attempts int, nextAttemptAt time.Time, lastError string) error
 }
 
 type gormRepository struct {
@@ -327,10 +332,12 @@ func (r *gormRepository) GetEditorStateByExtractJob(ctx context.Context, jobID u
 }
 
 // DeleteSessionWorkspace removes the database-owned Studio workspace in FK-safe
-// order. Storage keys are returned for best-effort object cleanup after commit;
-// no client-provided document or storage identifier is accepted.
-func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]string, error) {
+// order and records every catalogued physical key as durable cleanup intent in
+// the same transaction. No client-provided document or storage identifier is
+// accepted.
+func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]models.StudioStorageCleanupTask, error) {
 	var keys []string
+	var cleanupTasks []models.StudioStorageCleanupTask
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var assets []models.StudioAsset
 		if err := tx.Where("document_id = ?", documentID).Find(&assets).Error; err != nil {
@@ -363,6 +370,11 @@ func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID u
 			if export.R2Key != "" {
 				keys = append(keys, export.R2Key)
 			}
+		}
+		var err error
+		cleanupTasks, err = (&gormRepository{db: tx}).CreateStorageCleanupTasks(ctx, keys)
+		if err != nil {
+			return err
 		}
 
 		// The session's active-version FK is RESTRICT, so remove the session
@@ -408,5 +420,83 @@ func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID u
 		}
 		return nil
 	})
-	return keys, err
+	return cleanupTasks, err
+}
+
+func (r *gormRepository) CreateStorageCleanupTasks(ctx context.Context, keys []string) ([]models.StudioStorageCleanupTask, error) {
+	uniqueKeys := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		uniqueKeys = append(uniqueKeys, key)
+	}
+	if len(uniqueKeys) == 0 {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	rows := make([]models.StudioStorageCleanupTask, 0, len(uniqueKeys))
+	for _, key := range uniqueKeys {
+		rows = append(rows, models.StudioStorageCleanupTask{ID: uuid.New(), ObjectKey: key, NextAttemptAt: now, CreatedAt: now, UpdatedAt: now})
+	}
+	if err := r.db.WithContext(ctx).Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "object_key"}}, DoNothing: true}).Create(&rows).Error; err != nil {
+		return nil, err
+	}
+	var persisted []models.StudioStorageCleanupTask
+	if err := r.db.WithContext(ctx).Where("object_key IN ?", uniqueKeys).Find(&persisted).Error; err != nil {
+		return nil, err
+	}
+	return persisted, nil
+}
+
+func (r *gormRepository) ClaimStorageCleanupTasks(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]models.StudioStorageCleanupTask, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if lease <= 0 {
+		lease = 5 * time.Minute
+	}
+	var tasks []models.StudioStorageCleanupTask
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("next_attempt_at <= ? AND (lease_expires_at IS NULL OR lease_expires_at < ?)", now, now).
+			Order("next_attempt_at ASC").Limit(limit).Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Find(&tasks).Error; err != nil {
+			return err
+		}
+		if len(tasks) == 0 {
+			return nil
+		}
+		leaseUntil := now.Add(lease)
+		return tx.Model(&models.StudioStorageCleanupTask{}).Where("id IN ?", taskIDs(tasks)).Updates(map[string]interface{}{"lease_expires_at": leaseUntil, "updated_at": now}).Error
+	})
+	return tasks, err
+}
+
+func taskIDs(tasks []models.StudioStorageCleanupTask) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	return ids
+}
+
+func (r *gormRepository) DeleteStorageCleanupTask(ctx context.Context, taskID uuid.UUID) error {
+	return r.db.WithContext(ctx).Delete(&models.StudioStorageCleanupTask{}, "id = ?", taskID).Error
+}
+
+func (r *gormRepository) RescheduleStorageCleanupTask(ctx context.Context, taskID uuid.UUID, attempts int, nextAttemptAt time.Time, lastError string) error {
+	if len(lastError) > 512 {
+		lastError = lastError[:512]
+	}
+	return r.db.WithContext(ctx).Model(&models.StudioStorageCleanupTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+		"attempt_count":    attempts,
+		"next_attempt_at":  nextAttemptAt,
+		"lease_expires_at": nil,
+		"last_error":       lastError,
+		"updated_at":       time.Now().UTC(),
+	}).Error
 }

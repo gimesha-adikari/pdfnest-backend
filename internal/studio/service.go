@@ -57,6 +57,7 @@ type Service interface {
 type studioService struct {
 	repo           Repository
 	metadataReader MetadataReader
+	cleanupWorker  *storageCleanupWorker
 }
 
 // MetadataReader reads the source PDF's metadata through the existing
@@ -67,13 +68,22 @@ type MetadataReader interface {
 
 // NewService initializes a Studio V2 domain service.
 func NewService(repo Repository) Service {
-	return &studioService{repo: repo}
+	return &studioService{repo: repo, cleanupWorker: NewStorageCleanupWorker(repo, nil)}
 }
 
 // NewServiceWithMetadataReader configures source-upload metadata hydration
 // without changing the existing Studio service contract.
 func NewServiceWithMetadataReader(repo Repository, reader MetadataReader) Service {
-	return &studioService{repo: repo, metadataReader: reader}
+	return &studioService{repo: repo, metadataReader: reader, cleanupWorker: NewStorageCleanupWorker(repo, nil)}
+}
+
+// NewServiceWithMetadataReaderAndCleanup allows the process lifecycle to share
+// one durable cleanup worker with the Studio service.
+func NewServiceWithMetadataReaderAndCleanup(repo Repository, reader MetadataReader, cleanupWorker *storageCleanupWorker) Service {
+	if cleanupWorker == nil {
+		cleanupWorker = NewStorageCleanupWorker(repo, nil)
+	}
+	return &studioService{repo: repo, metadataReader: reader, cleanupWorker: cleanupWorker}
 }
 
 // HashGuestToken computes a SHA-256 digest for guest identity tokens.
@@ -214,8 +224,9 @@ func (s *studioService) GetSession(ctx context.Context, sessionID uuid.UUID, ide
 }
 
 // DeleteSession discards the complete Studio document workspace owned by the
-// authenticated user. Database rows are deleted transactionally; the storage
-// layer then performs best-effort cleanup for catalogued and job staging keys.
+// authenticated user. Database rows and durable physical-cleanup intent are
+// committed together; storage cleanup is then attempted without making the
+// relational deletion depend on object-storage availability.
 func (s *studioService) DeleteSession(ctx context.Context, sessionID uuid.UUID, ident identity.Identity) error {
 	if !ident.IsUser() {
 		return ErrUnauthorized
@@ -227,20 +238,16 @@ func (s *studioService) DeleteSession(ctx context.Context, sessionID uuid.UUID, 
 	if err := validateSessionAccess(sess, ident); err != nil {
 		return err
 	}
-	keys, err := s.repo.DeleteSessionWorkspace(ctx, sessionID, sess.DocumentID)
+	tasks, err := s.repo.DeleteSessionWorkspace(ctx, sessionID, sess.DocumentID)
 	if err != nil {
 		return err
 	}
-	seen := make(map[string]struct{}, len(keys))
-	for _, key := range keys {
-		if key == "" {
-			continue
+	if s.cleanupWorker != nil {
+		for _, task := range tasks {
+			// The relational delete has committed. A failed attempt remains in
+			// the durable ledger and is retried by the backend worker.
+			s.cleanupWorker.RunTask(ctx, task)
 		}
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		cleanupStudioObject(ctx, key)
 	}
 	return nil
 }
