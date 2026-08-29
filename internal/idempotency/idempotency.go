@@ -13,6 +13,7 @@ import (
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/uploads"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,14 +65,39 @@ func CalculateFingerprint(c *fiber.Ctx) (string, error) {
 		hasher.Write([]byte(fmt.Sprintf("%s:%d", fileName, fileSize)))
 	}
 
-	if len(c.Body()) > 0 {
+	if strings.HasPrefix(strings.ToLower(c.Get(fiber.HeaderContentType)), "multipart/form-data") {
+		form, err := c.MultipartForm()
+		if err != nil {
+			return "", err
+		}
+		keys := make([]string, 0, len(form.Value))
+		for key := range form.Value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			values := append([]string(nil), form.Value[key]...)
+			sort.Strings(values)
+			for _, value := range values {
+				hasher.Write([]byte(fmt.Sprintf("field:%s=%s", key, value)))
+			}
+		}
+	} else if len(c.Body()) > 0 {
 		hasher.Write(c.Body())
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+type ReplayHandler func(*fiber.Ctx, Record) error
+
 func Use(redisClient *redis.Client) fiber.Handler {
+	return UseWithReplay(redisClient, nil)
+}
+
+// UseWithReplay preserves the existing idempotency reservation semantics while
+// allowing a product route to shape an idempotent replay response.
+func UseWithReplay(redisClient *redis.Client, replay ReplayHandler) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		client := redisClient
 		if client == nil {
@@ -152,6 +178,9 @@ func Use(redisClient *redis.Client) fiber.Handler {
 			}
 
 			if rec.State == "CREATED" && rec.TaskID != "" {
+				if replay != nil {
+					return replay(c, rec)
+				}
 				return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 					"taskId": rec.TaskID,
 				})

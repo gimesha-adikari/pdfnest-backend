@@ -96,6 +96,24 @@ func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, strin
 	return written, sha256Hex, nil
 }
 
+// SaveLocalFile persists a local-development object from a file path. It is
+// intentionally a thin wrapper around SaveLocalStream so OCR V2 can use the
+// same isolated local namespace as the Python worker without introducing a
+// second storage implementation. Managed environments continue to reject
+// local filesystem storage through SaveLocalStream.
+func SaveLocalFile(ctx context.Context, key, sourcePath string) error {
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	if _, _, err := SaveLocalStream(ctx, key, file); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DeleteLocalObject removes a canonical object from the local development
 // store. It is used only to roll back a failed database registration after a
 // source file was safely persisted.
@@ -112,6 +130,19 @@ func DeleteLocalObject(key string) error {
 		return err
 	}
 	return nil
+}
+
+// DeleteObject removes a server-created source or result object from the
+// configured durable store, with the existing local development fallback.
+func DeleteObject(ctx context.Context, key string) error {
+	if !managedStorageRequired() {
+		return DeleteLocalObject(key)
+	}
+	store, err := Default()
+	if err != nil {
+		return err
+	}
+	return store.client.RemoveObject(ctx, store.bucket, key, minio.RemoveObjectOptions{})
 }
 
 // ObjectExists verifies whether a canonical storage key exists in local storage or R2.

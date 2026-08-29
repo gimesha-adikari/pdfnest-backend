@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"mime/multipart"
+	"net/http"
 	"net/http/httptest"
 	"pdfnest-backend/internal/identity"
 	"sync"
@@ -218,6 +219,56 @@ func TestIdempotency_MultipartStreamSafety(t *testing.T) {
 	}
 	if resp.StatusCode != fiber.StatusOK {
 		t.Errorf("Expected 200 OK, got %d", resp.StatusCode)
+	}
+}
+
+func TestCalculateFingerprint_MultipartIgnoresBoundary(t *testing.T) {
+	app := fiber.New()
+	fingerprints := make([]string, 0, 2)
+	app.Post("/fingerprint", func(c *fiber.Ctx) error {
+		fingerprint, err := CalculateFingerprint(c)
+		if err != nil {
+			return err
+		}
+		fingerprints = append(fingerprints, fingerprint)
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	makeRequest := func(boundary string) *http.Request {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		if err := writer.SetBoundary(boundary); err != nil {
+			t.Fatalf("failed to set multipart boundary: %v", err)
+		}
+		part, err := writer.CreateFormFile("file", "same.pdf")
+		if err != nil {
+			t.Fatalf("failed to create file part: %v", err)
+		}
+		_, _ = part.Write([]byte("%PDF-1.4 same payload"))
+		if err := writer.WriteField("language", "eng"); err != nil {
+			t.Fatalf("failed to write language field: %v", err)
+		}
+		if err := writer.WriteField("routing_policy", "AUTO"); err != nil {
+			t.Fatalf("failed to write routing field: %v", err)
+		}
+		_ = writer.Close()
+		req := httptest.NewRequest("POST", "/fingerprint", body)
+		req.Header.Set("Idempotency-Key", "multipart-boundary-key")
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	for _, boundary := range []string{"----phase3e-boundary-a", "----phase3e-boundary-b"} {
+		resp, err := app.Test(makeRequest(boundary))
+		if err != nil {
+			t.Fatalf("fingerprint request failed: %v", err)
+		}
+		if resp.StatusCode != fiber.StatusNoContent {
+			t.Fatalf("expected 204 response, got %d", resp.StatusCode)
+		}
+	}
+	if len(fingerprints) != 2 || fingerprints[0] != fingerprints[1] {
+		t.Fatalf("same multipart payload must have stable fingerprint: %#v", fingerprints)
 	}
 }
 

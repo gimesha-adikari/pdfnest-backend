@@ -20,6 +20,7 @@ import (
 	"pdfnest-backend/internal/landing"
 	"pdfnest-backend/internal/markup"
 	"pdfnest-backend/internal/ocr"
+	ocrv2 "pdfnest-backend/internal/ocrv2"
 	"pdfnest-backend/internal/optimize"
 	"pdfnest-backend/internal/security"
 	"pdfnest-backend/internal/storage"
@@ -94,7 +95,7 @@ func main() {
 
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
-		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint,Idempotency-Key",
+		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint,Idempotency-Key,X-Request-ID",
 		AllowMethods:     "GET, POST, PUT, PATCH, DELETE, OPTIONS",
 		AllowCredentials: true,
 	}))
@@ -140,6 +141,10 @@ func main() {
 	ocrService := ocr.NewService()
 	ocrController := ocr.NewController(ocrService)
 	ocr.RegisterRoutes(toolGroup, ocrController)
+
+	ocrV2Service := ocrv2.NewService(ocrv2.NewWorkerClient())
+	ocrV2Controller := ocrv2.NewController(ocrV2Service)
+	ocrv2.RegisterRoutes(apiGroup, ocrV2Controller)
 
 	editService := edit.NewService()
 	editController := edit.NewController(editService)
