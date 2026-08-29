@@ -18,6 +18,7 @@ const (
 	ErrNotFound               = "NOT_FOUND"
 	ErrResultNotReady         = "RESULT_NOT_READY"
 	ErrResultExpired          = "RESULT_EXPIRED"
+	ErrPDFRenderFailure       = "PDF_RENDER_FAILURE"
 )
 
 type RequestError struct {

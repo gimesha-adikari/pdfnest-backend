@@ -289,7 +289,7 @@ func errorStatus(err error) int {
 		return fiber.StatusBadRequest
 	case ErrUnsupportedLanguage:
 		return fiber.StatusUnprocessableEntity
-	case ErrWorkerAuthentication, ErrEngineFailure, ErrInvalidEngineOutput:
+	case ErrWorkerAuthentication, ErrEngineFailure, ErrInvalidEngineOutput, ErrPDFRenderFailure:
 		return fiber.StatusBadGateway
 	case ErrTaskStorageUnavailable:
 		return fiber.StatusServiceUnavailable
@@ -326,6 +326,8 @@ func publicMessage(err error) string {
 		return "OCR worker authentication failed."
 	case ErrInvalidEngineOutput:
 		return "OCR worker returned an invalid result."
+	case ErrPDFRenderFailure:
+		return "The searchable PDF could not be rendered while preserving the source image."
 	case ErrTaskStorageUnavailable:
 		return "OCR V2 job persistence is temporarily unavailable."
 	case ErrNotFound:
