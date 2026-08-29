@@ -39,30 +39,33 @@ func CalculateFingerprint(c *fiber.Ctx) (string, error) {
 	hasher := sha256.New()
 	hasher.Write([]byte(c.Path()))
 
-	var filePath string
-	var fileName string
-	var fileSize int64
-
-	if file, err := uploads.MustFile(c, "file"); err == nil && file != nil && file.Path != "" {
-		filePath = file.Path
-		fileName = file.Header.Filename
-		fileSize = file.Header.Size
-	} else if fh, err := c.FormFile("file"); err == nil && fh != nil {
-		fileName = fh.Filename
-		fileSize = fh.Size
-	}
-
-	if filePath != "" {
-		f, err := os.Open(filePath)
-		if err == nil {
-			fileHasher := sha256.New()
-			_, _ = io.Copy(fileHasher, f)
-			f.Close()
-			fullFileHash := hex.EncodeToString(fileHasher.Sum(nil))
-			hasher.Write([]byte(fmt.Sprintf("%s:%d:%s", fileName, fileSize, fullFileHash)))
+	if uploadContext := uploads.FromCtx(c); uploadContext != nil {
+		fields := make([]string, 0, len(uploadContext.Files))
+		for field := range uploadContext.Files {
+			fields = append(fields, field)
 		}
-	} else if fileName != "" {
-		hasher.Write([]byte(fmt.Sprintf("%s:%d", fileName, fileSize)))
+		sort.Strings(fields)
+		for _, field := range fields {
+			for index, file := range uploadContext.All(field) {
+				if file == nil || file.Header == nil {
+					continue
+				}
+				hasher.Write([]byte(fmt.Sprintf("file:%s:%d:%s:%d", field, index, file.Header.Filename, file.Header.Size)))
+				if file.Path == "" {
+					continue
+				}
+				f, err := os.Open(file.Path)
+				if err != nil {
+					continue
+				}
+				fileHasher := sha256.New()
+				_, _ = io.Copy(fileHasher, f)
+				_ = f.Close()
+				hasher.Write([]byte(hex.EncodeToString(fileHasher.Sum(nil))))
+			}
+		}
+	} else if fh, err := c.FormFile("file"); err == nil && fh != nil {
+		hasher.Write([]byte(fmt.Sprintf("file:%s:%d", fh.Filename, fh.Size)))
 	}
 
 	if strings.HasPrefix(strings.ToLower(c.Get(fiber.HeaderContentType)), "multipart/form-data") {

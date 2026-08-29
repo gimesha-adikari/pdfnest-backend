@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/uploads"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -269,6 +270,123 @@ func TestCalculateFingerprint_MultipartIgnoresBoundary(t *testing.T) {
 	}
 	if len(fingerprints) != 2 || fingerprints[0] != fingerprints[1] {
 		t.Fatalf("same multipart payload must have stable fingerprint: %#v", fingerprints)
+	}
+}
+
+func TestCalculateFingerprint_MultipartSemanticPayloadDifferencesConflict(t *testing.T) {
+	app := fiber.New()
+	fingerprints := make([]string, 0, 10)
+	app.Post("/fingerprint-semantic", func(c *fiber.Ctx) error {
+		fingerprint, err := CalculateFingerprint(c)
+		if err != nil {
+			return err
+		}
+		fingerprints = append(fingerprints, fingerprint)
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	makeRequest := func(boundary, fileContent, language, routing string) *http.Request {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		if err := writer.SetBoundary(boundary); err != nil {
+			t.Fatalf("failed to set multipart boundary: %v", err)
+		}
+		part, err := writer.CreateFormFile("file", "same.pdf")
+		if err != nil {
+			t.Fatalf("failed to create file part: %v", err)
+		}
+		_, _ = part.Write([]byte(fileContent))
+		if err := writer.WriteField("language", language); err != nil {
+			t.Fatalf("failed to write language field: %v", err)
+		}
+		if err := writer.WriteField("routing_policy", routing); err != nil {
+			t.Fatalf("failed to write routing field: %v", err)
+		}
+		_ = writer.Close()
+		req := httptest.NewRequest("POST", "/fingerprint-semantic", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	semanticBaseline := func(index int) string {
+		return fingerprints[index]
+	}
+	send := func(req *http.Request) {
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("fingerprint request failed: %v", err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != fiber.StatusNoContent {
+			t.Fatalf("expected 204 response, got %d", resp.StatusCode)
+		}
+	}
+
+	send(makeRequest("----semantic-a", "%PDF-1.4 same payload", "eng", "AUTO"))
+	send(makeRequest("----semantic-b", "%PDF-1.4 same payload", "eng", "AUTO"))
+	if semanticBaseline(0) != semanticBaseline(1) {
+		t.Fatal("same semantic multipart payload must have the same fingerprint")
+	}
+
+	send(makeRequest("----semantic-c", "%PDF-1.4 changed bytes", "eng", "AUTO"))
+	if semanticBaseline(0) == semanticBaseline(2) {
+		t.Fatal("different multipart file bytes must change the fingerprint")
+	}
+
+	send(makeRequest("----semantic-d", "%PDF-1.4 same payload", "sin", "AUTO"))
+	if semanticBaseline(0) == semanticBaseline(3) {
+		t.Fatal("different multipart language must change the fingerprint")
+	}
+
+	send(makeRequest("----semantic-e", "%PDF-1.4 same payload", "eng", "FAST"))
+	if semanticBaseline(0) == semanticBaseline(4) {
+		t.Fatal("different multipart routing policy must change the fingerprint")
+	}
+}
+
+func TestCalculateFingerprint_OrderedMultipartFilesAffectFingerprint(t *testing.T) {
+	app := fiber.New()
+	fingerprints := make([]string, 0, 2)
+	app.Post("/ordered", uploads.Prepare(), func(c *fiber.Ctx) error {
+		fingerprint, err := CalculateFingerprint(c)
+		if err != nil {
+			return err
+		}
+		fingerprints = append(fingerprints, fingerprint)
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	makeRequest := func(first, second string) *http.Request {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		for _, item := range []struct{ name, content string }{{"first.png", first}, {"second.png", second}} {
+			part, err := writer.CreateFormFile("file", item.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = part.Write([]byte(item.content))
+		}
+		_ = writer.WriteField("language", "eng")
+		_ = writer.Close()
+		req := httptest.NewRequest("POST", "/ordered", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	for _, request := range []*http.Request{
+		makeRequest("image-one", "image-two"),
+		makeRequest("image-two", "image-one"),
+	} {
+		response, err := app.Test(request)
+		if err != nil {
+			t.Fatalf("ordered fingerprint request failed: %v", err)
+		}
+		if response == nil || response.StatusCode != fiber.StatusNoContent {
+			t.Fatalf("ordered fingerprint request failed: response=%v", response)
+		}
+	}
+	if len(fingerprints) != 2 || fingerprints[0] == fingerprints[1] {
+		t.Fatalf("reordering image inputs must change fingerprint: %#v", fingerprints)
 	}
 }
 

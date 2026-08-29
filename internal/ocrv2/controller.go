@@ -3,6 +3,7 @@ package ocrv2
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"pdfnest-backend/internal/idempotency"
@@ -86,6 +87,99 @@ func (c *Controller) CreateJob(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job persistence is temporarily unavailable."})
 	}
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
+}
+
+func (c *Controller) SearchableCapabilities(cctx *fiber.Ctx) error {
+	capabilities, err := c.service.GetCapabilities(cctx.UserContext())
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
+	return cctx.JSON(fiber.Map{
+		"schema_version": "ocr_v2_capabilities.v1",
+		"profile":        ProfileSearchablePDFV2,
+		"service_ready":  true,
+		"languages":      capabilities.Languages,
+		"routing_modes":  capabilities.RoutingModes,
+		"searchable_pdf": capabilities.SearchablePDF,
+	})
+}
+
+func (c *Controller) CreateSearchableJob(cctx *fiber.Ctx) error {
+	inputs, err := searchableImageUploads(cctx)
+	if err != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "One or more supported image uploads are required."})
+	}
+	requestID := strings.TrimSpace(cctx.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	policy := RoutingPolicy(strings.ToUpper(strings.TrimSpace(cctx.FormValue("routing_policy", string(RoutingAuto)))))
+	if !validPolicy(policy) {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
+	}
+	owner, _ := cctx.Locals("user_id").(string)
+	request := TextRequest{RequestID: requestID, Profile: ProfileSearchablePDFV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	job, execErr := c.service.CreateSearchablePDFJob(cctx.UserContext(), inputs, request, owner)
+	if execErr != nil {
+		idempotency.Release(cctx, nil)
+		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: publicMessage(execErr)})
+	}
+	if err := idempotency.SetTaskID(cctx, job.JobID, nil); err != nil {
+		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
+		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job persistence is temporarily unavailable."})
+	}
+	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
+}
+
+func (c *Controller) ReplaySearchableJob(cctx *fiber.Ctx, record idempotency.Record) error {
+	return cctx.Status(fiber.StatusAccepted).JSON(fiber.Map{"job_id": record.TaskID, "status": "QUEUED", "profile": ProfileSearchablePDFV2, "result_available": false, "idempotent_replay": true})
+}
+
+func (c *Controller) SearchableJobResult(cctx *fiber.Ctx) error {
+	artifact, err := c.service.GetOwnedSearchableArtifact(cctx.UserContext(), cctx.Params("job_id"), c.owner(cctx))
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
+	cctx.Type("pdf")
+	cctx.Set("Content-Type", "application/pdf")
+	cctx.Set("Content-Disposition", `attachment; filename="`+safeDownloadName(artifact.Filename)+`"`)
+	return cctx.Send(artifact.Bytes)
+}
+
+func searchableImageUploads(cctx *fiber.Ctx) ([]*uploads.File, error) {
+	context := uploads.FromCtx(cctx)
+	if context == nil {
+		return nil, errors.New("upload context missing")
+	}
+	files := context.All("file")
+	images := context.All("images")
+	if len(files) > 0 && len(images) > 0 {
+		return nil, errors.New("use one ordered multipart image field")
+	}
+	if len(files) == 0 {
+		files = images
+	}
+	if len(files) == 0 {
+		return nil, errors.New("missing image uploads")
+	}
+	return files, nil
+}
+
+func safeDownloadName(value string) string {
+	name := filepath.Base(strings.TrimSpace(value))
+	name = strings.Map(func(r rune) rune {
+		if r < 32 || r == '"' || r == '\\' || r == '/' {
+			return '-'
+		}
+		return r
+	}, name)
+	if name == "" || name == "." {
+		return "document-searchable.pdf"
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
+		name += ".pdf"
+	}
+	return name
 }
 
 func (c *Controller) ReplayJob(cctx *fiber.Ctx, record idempotency.Record) error {

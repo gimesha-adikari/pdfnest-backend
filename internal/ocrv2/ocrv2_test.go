@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,6 +63,10 @@ func (f *fakeAsyncInvoker) GetResult(context.Context, string) (*TextResponse, er
 func (f *fakeAsyncInvoker) CancelJob(_ context.Context, _ string, _ string) (*JobStatus, error) {
 	f.cancelled = true
 	return f.job, nil
+}
+
+func (f *fakeAsyncInvoker) GetArtifact(context.Context, string) (*ArtifactResult, error) {
+	return &ArtifactResult{Bytes: []byte("%PDF-1.7"), Filename: "document-searchable.pdf", ContentType: "application/pdf"}, nil
 }
 
 type fakeArtifactStore struct {
@@ -196,6 +201,35 @@ func TestAsyncServicePersistsInputAndScopesJobsToOwner(t *testing.T) {
 	}
 	if _, err := service.CancelJob(context.Background(), job.JobID, "user:alice"); err != nil || !async.cancelled {
 		t.Fatalf("expected owner cancellation, err=%v cancelled=%v", err, async.cancelled)
+	}
+}
+
+func TestSearchableServicePersistsOrderedImageInputs(t *testing.T) {
+	async := &fakeAsyncInvoker{}
+	artifacts := &fakeArtifactStore{}
+	service := NewService(&fakeInvoker{})
+	service.jobs = async
+	service.artifacts = artifacts
+	firstPath := filepath.Join(t.TempDir(), "first.png")
+	secondPath := filepath.Join(t.TempDir(), "second.jpg")
+	if err := os.WriteFile(firstPath, append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, make([]byte, 8)...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, append([]byte{0xff, 0xd8, 0xff}, make([]byte, 9)...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	inputs := []*uploads.File{
+		{Path: firstPath, Header: &multipart.FileHeader{Filename: "first.png", Size: 16, Header: make(textproto.MIMEHeader)}},
+		{Path: secondPath, Header: &multipart.FileHeader{Filename: "second.jpg", Size: 12, Header: make(textproto.MIMEHeader)}},
+	}
+	inputs[0].Header.Header.Set("Content-Type", "image/png")
+	inputs[1].Header.Header.Set("Content-Type", "image/jpeg")
+	job, err := service.CreateSearchablePDFJob(context.Background(), inputs, TextRequest{RequestID: "searchable-1", Profile: ProfileSearchablePDFV2, Language: "eng", RoutingPolicy: RoutingAuto}, "user:alice")
+	if err != nil {
+		t.Fatalf("expected searchable job submission, got %v", err)
+	}
+	if job == nil || async.submitted.Profile != ProfileSearchablePDFV2 || len(async.submitted.SourceFiles) != 2 || async.submitted.SourceFiles[0].SourceName != "first.png" || async.submitted.SourceFiles[1].SourceName != "second.jpg" {
+		t.Fatalf("expected ordered searchable sources, job=%+v request=%+v", job, async.submitted)
 	}
 }
 

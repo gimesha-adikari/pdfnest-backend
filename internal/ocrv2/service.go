@@ -1,7 +1,10 @@
 package ocrv2
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +21,93 @@ type Service struct {
 	capabilities CapabilitiesInvoker
 	maxPages     int
 	artifacts    ArtifactStore
+}
+
+func (s *Service) CreateSearchablePDFJob(ctx context.Context, inputs []*uploads.File, request TextRequest, ownerIdentity string) (*JobStatus, error) {
+	if s == nil || s.jobs == nil || s.artifacts == nil {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Searchable PDF V2 job service is not configured"}
+	}
+	searchableJobs, ok := s.jobs.(SearchableJobInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Searchable PDF V2 job service is not configured"}
+	}
+	if request.Profile != ProfileSearchablePDFV2 || strings.TrimSpace(ownerIdentity) == "" {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+		return nil, &RequestError{Code: ErrUnsupportedLanguage}
+	}
+	if len(inputs) == 0 || len(inputs) > s.maxPages {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	sources := make([]SourceFile, 0, len(inputs))
+	keys := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		if err := validateImageInput(input); err != nil {
+			return nil, &RequestError{Code: ErrInvalidInput}
+		}
+		ext := filepath.Ext(input.Header.Filename)
+		key := storage.BuildKey("jobs/ocr_v2/searchable_pdf/input", ext)
+		if err := s.artifacts.UploadFile(input.Path, key, input.Header.Header.Get("Content-Type")); err != nil {
+			for _, uploaded := range keys {
+				_ = s.artifacts.DeleteObject(context.Background(), uploaded)
+			}
+			return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Searchable PDF input storage is unavailable"}
+		}
+		keys = append(keys, key)
+		sources = append(sources, SourceFile{SourceKey: key, SourceName: filepath.Base(input.Header.Filename), ContentType: input.Header.Header.Get("Content-Type")})
+	}
+	job, err := searchableJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: ProfileSearchablePDFV2, Language: request.Language, RoutingPolicy: request.RoutingPolicy, SourceFiles: sources, SourceName: filepath.Base(inputs[0].Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: len(sources)})
+	if err != nil {
+		for _, key := range keys {
+			_ = s.artifacts.DeleteObject(context.Background(), key)
+		}
+		return nil, err
+	}
+	return job, nil
+}
+
+func validateImageInput(input *uploads.File) error {
+	if input == nil || input.Header == nil || input.Path == "" || input.Header.Size <= 0 {
+		return fmt.Errorf("empty image input")
+	}
+	name := strings.ToLower(input.Header.Filename)
+	contentType := strings.ToLower(strings.TrimSpace(input.Header.Header.Get("Content-Type")))
+	allowed := (strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") || strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".webp"))
+	if !allowed || (contentType != "" && contentType != "application/octet-stream" && !strings.HasPrefix(contentType, "image/")) {
+		return fmt.Errorf("unsupported image input")
+	}
+	file, err := os.Open(input.Path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	header := make([]byte, 12)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return err
+	}
+	if !bytes.HasPrefix(header, []byte{0xff, 0xd8, 0xff}) && !bytes.Equal(header[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) && !(string(header[:4]) == "RIFF" && string(header[8:12]) == "WEBP") {
+		return fmt.Errorf("image signature is invalid")
+	}
+	return nil
+}
+
+func (s *Service) GetOwnedSearchableArtifact(ctx context.Context, jobID, ownerIdentity string) (*ArtifactResult, error) {
+	searchableJobs, ok := s.jobs.(SearchableJobInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Searchable PDF V2 job service is not configured"}
+	}
+	job, err := s.GetOwnedJob(ctx, jobID, ownerIdentity)
+	if err != nil {
+		return nil, err
+	}
+	if job.Profile != ProfileSearchablePDFV2 {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if !job.ResultAvailable() {
+		return nil, &WorkerError{Code: ErrResultNotReady, Message: "Searchable PDF V2 result is not ready"}
+	}
+	return searchableJobs.GetArtifact(ctx, jobID)
 }
 
 type ArtifactStore interface {

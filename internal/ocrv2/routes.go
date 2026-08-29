@@ -18,6 +18,11 @@ func RegisterRoutes(router fiber.Router, controller *Controller) {
 	group.Get("/text/jobs/:job_id", controller.JobStatus)
 	group.Get("/text/jobs/:job_id/result", controller.JobResult)
 	group.Delete("/text/jobs/:job_id", controller.CancelJob)
+	group.Get("/searchable-pdf/capabilities", controller.SearchableCapabilities)
+	group.Post("/searchable-pdf/jobs", idempotency.UseWithReplay(nil, controller.ReplaySearchableJob), controller.CreateSearchableJob)
+	group.Get("/searchable-pdf/jobs/:job_id", controller.JobStatus)
+	group.Get("/searchable-pdf/jobs/:job_id/result", controller.SearchableJobResult)
+	group.Delete("/searchable-pdf/jobs/:job_id", controller.CancelJob)
 }
 
 func bindAuthenticatedIdentity() fiber.Handler {

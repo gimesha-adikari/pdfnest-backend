@@ -7,6 +7,7 @@ import (
 )
 
 const ProfileOCRTextV2 = "OCR_TEXT_V2"
+const ProfileSearchablePDFV2 = "SEARCHABLE_PDF_V2"
 
 type RoutingPolicy string
 
@@ -69,9 +70,17 @@ type RoutingCapability struct {
 }
 
 type Capabilities struct {
-	Languages              []LanguageCapability `json:"languages"`
-	RoutingModes           []RoutingCapability  `json:"routing_modes"`
-	QualityEngineAvailable bool                 `json:"quality_engine_available"`
+	Languages              []LanguageCapability    `json:"languages"`
+	RoutingModes           []RoutingCapability     `json:"routing_modes"`
+	QualityEngineAvailable bool                    `json:"quality_engine_available"`
+	SearchablePDF          SearchablePDFCapability `json:"searchable_pdf"`
+}
+
+type SearchablePDFCapability struct {
+	Available            bool     `json:"available"`
+	EngineID             string   `json:"engine_id"`
+	RequiredCapabilities []string `json:"required_capabilities"`
+	InputFormats         []string `json:"input_formats"`
 }
 
 type CapabilitiesInvoker interface {
@@ -85,8 +94,21 @@ type JobSubmitRequest struct {
 	RoutingPolicy RoutingPolicy
 	SourceKey     string
 	SourceName    string
+	SourceFiles   []SourceFile
 	OwnerIdentity string
 	TotalPages    int
+}
+
+type SourceFile struct {
+	SourceKey   string `json:"source_key"`
+	SourceName  string `json:"source_name"`
+	ContentType string `json:"content_type"`
+}
+
+type ArtifactResult struct {
+	Bytes       []byte
+	Filename    string
+	ContentType string
 }
 
 type JobStatus struct {
@@ -121,6 +143,11 @@ type AsyncJobInvoker interface {
 	GetJob(ctx context.Context, jobID string) (*JobStatus, error)
 	GetResult(ctx context.Context, jobID string) (*TextResponse, error)
 	CancelJob(ctx context.Context, jobID, ownerIdentity string) (*JobStatus, error)
+}
+
+type SearchableJobInvoker interface {
+	SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobStatus, error)
+	GetArtifact(ctx context.Context, jobID string) (*ArtifactResult, error)
 }
 
 type JobProgress struct {

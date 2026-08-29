@@ -120,6 +120,9 @@ func (c *Client) SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobS
 		"owner_identity": request.OwnerIdentity,
 		"total_pages":    request.TotalPages,
 	}
+	if len(request.SourceFiles) > 0 {
+		payload["source_files"] = request.SourceFiles
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -136,6 +139,52 @@ func (c *Client) SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobS
 		return nil, &WorkerError{Code: ErrInvalidEngineOutput, HTTPStatus: status, Message: "worker returned malformed OCR V2 job status"}
 	}
 	return &statusResponse, nil
+}
+
+func (c *Client) GetArtifact(ctx context.Context, jobID string) (*ArtifactResult, error) {
+	if c == nil || c.HTTP == nil {
+		return nil, &WorkerError{Code: ErrWorkerAuthentication, Message: "worker client is not configured"}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+"/internal/ocr/v2/jobs/"+jobID+"/result", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Request-ID", jobID)
+	if c.Signer != nil {
+		if err := c.Signer(req); err != nil {
+			return nil, err
+		}
+	}
+	response, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, decodeWorkerJSONError(data, response.StatusCode)
+	}
+	contentType := response.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/pdf"
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "application/pdf") || !bytes.HasPrefix(data, []byte("%PDF-")) {
+		return nil, &WorkerError{Code: ErrInvalidEngineOutput, HTTPStatus: response.StatusCode, Message: "worker returned a non-PDF searchable artifact"}
+	}
+	return &ArtifactResult{Bytes: data, Filename: contentDispositionFilename(response.Header.Get("Content-Disposition")), ContentType: contentType}, nil
+}
+
+func contentDispositionFilename(value string) string {
+	for _, part := range strings.Split(value, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(strings.ToLower(part), "filename=") {
+			return strings.Trim(strings.TrimSpace(part[len("filename="):]), "\"")
+		}
+	}
+	return "document-searchable.pdf"
 }
 
 func (c *Client) GetJob(ctx context.Context, jobID string) (*JobStatus, error) {
