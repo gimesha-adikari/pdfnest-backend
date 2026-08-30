@@ -174,8 +174,11 @@ func TestServiceExecuteTextValidatesProfileLanguageAndPDF(t *testing.T) {
 		t.Fatalf("expected typed invalid profile error, got %v", err)
 	}
 	_, err = service.ExecuteText(context.Background(), samplePDFPath(t), TextRequest{Profile: ProfileOCRTextV2, Language: "auto"})
-	if !errors.As(err, &requestErr) || requestErr.Code != ErrUnsupportedLanguage {
-		t.Fatalf("expected typed unsupported-language error, got %v", err)
+	if err != nil {
+		t.Fatalf("expected AUTO language policy to reach the worker, got %v", err)
+	}
+	if fake.received.Language != "auto" {
+		t.Fatalf("expected AUTO policy to reach worker, got %q", fake.received.Language)
 	}
 }
 

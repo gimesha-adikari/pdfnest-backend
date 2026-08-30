@@ -344,6 +344,65 @@ func TestCalculateFingerprint_MultipartSemanticPayloadDifferencesConflict(t *tes
 	}
 }
 
+func TestCalculateFingerprint_EquivalentLanguageRepresentationsMatch(t *testing.T) {
+	app := fiber.New()
+	fingerprints := make([]string, 0, 4)
+	app.Post("/language-equivalence", func(c *fiber.Ctx) error {
+		fingerprint, err := CalculateFingerprint(c)
+		if err != nil {
+			return err
+		}
+		fingerprints = append(fingerprints, fingerprint)
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+
+	makeRequest := func(boundary, language, mode string, languages ...string) *http.Request {
+		body := &bytes.Buffer{}
+		writer := multipart.NewWriter(body)
+		if err := writer.SetBoundary(boundary); err != nil {
+			t.Fatalf("failed to set boundary: %v", err)
+		}
+		part, err := writer.CreateFormFile("file", "same.pdf")
+		if err != nil {
+			t.Fatalf("failed to create file: %v", err)
+		}
+		_, _ = part.Write([]byte("%PDF-1.4 same payload"))
+		_ = writer.WriteField("language", language)
+		if mode != "" {
+			_ = writer.WriteField("language_mode", mode)
+		}
+		for _, value := range languages {
+			_ = writer.WriteField("languages", value)
+		}
+		_ = writer.WriteField("routing_policy", "AUTO")
+		_ = writer.Close()
+		req := httptest.NewRequest("POST", "/language-equivalence", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		return req
+	}
+
+	for _, request := range []*http.Request{
+		makeRequest("----language-a", "eng", ""),
+		makeRequest("----language-b", "eng", "EXPLICIT", "eng"),
+		makeRequest("----language-c", "eng+sin", "EXPLICIT", "sin", "eng"),
+		makeRequest("----language-d", "eng", "EXPLICIT", "eng", "sin"),
+	} {
+		response, err := app.Test(request)
+		if err != nil {
+			t.Fatalf("fingerprint request failed: %v", err)
+		}
+		if response.StatusCode != fiber.StatusNoContent {
+			t.Fatalf("expected 204 response, got %d", response.StatusCode)
+		}
+	}
+	if fingerprints[0] != fingerprints[1] {
+		t.Fatal("legacy and explicit single-language representations must match")
+	}
+	if fingerprints[1] == fingerprints[2] || fingerprints[1] == fingerprints[3] {
+		t.Fatal("different language sets must remain distinct")
+	}
+}
+
 func TestCalculateFingerprint_OrderedMultipartFilesAffectFingerprint(t *testing.T) {
 	app := fiber.New()
 	fingerprints := make([]string, 0, 2)

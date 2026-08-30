@@ -36,7 +36,7 @@ func (s *Service) CreateSearchablePDFJob(ctx context.Context, inputs []*uploads.
 	if request.Profile != ProfileSearchablePDFV2 || strings.TrimSpace(ownerIdentity) == "" {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
 	if len(inputs) == 0 || len(inputs) > s.maxPages {
@@ -59,7 +59,7 @@ func (s *Service) CreateSearchablePDFJob(ctx context.Context, inputs []*uploads.
 		keys = append(keys, key)
 		sources = append(sources, SourceFile{SourceKey: key, SourceName: filepath.Base(input.Header.Filename), ContentType: input.Header.Header.Get("Content-Type")})
 	}
-	job, err := searchableJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: ProfileSearchablePDFV2, Language: request.Language, RoutingPolicy: request.RoutingPolicy, SourceFiles: sources, SourceName: filepath.Base(inputs[0].Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: len(sources)})
+	job, err := searchableJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: ProfileSearchablePDFV2, Language: request.Language, LanguageMode: request.LanguageMode, Languages: request.Languages, LanguageUsage: LanguageUsageRanking(ownerIdentity), RoutingPolicy: request.RoutingPolicy, SourceFiles: sources, SourceName: filepath.Base(inputs[0].Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: len(sources)})
 	if err != nil {
 		for _, key := range keys {
 			_ = s.artifacts.DeleteObject(context.Background(), key)
@@ -80,7 +80,7 @@ func (s *Service) CreateStructuredJob(ctx context.Context, input *uploads.File, 
 	if (request.Profile != ProfileDocumentExtractionV2 && request.Profile != ProfilePDFMarkdownV2) || strings.TrimSpace(ownerIdentity) == "" {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
 	if err := validatePDFInput(input); err != nil {
@@ -98,7 +98,7 @@ func (s *Service) CreateStructuredJob(ctx context.Context, input *uploads.File, 
 		_ = s.artifacts.DeleteObject(context.Background(), key)
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	job, err := structuredJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: request.Profile, Language: request.Language, RoutingPolicy: request.RoutingPolicy, SourceKey: key, SourceName: filepath.Base(input.Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: pageCount})
+	job, err := structuredJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: request.Profile, Language: request.Language, LanguageMode: request.LanguageMode, Languages: request.Languages, LanguageUsage: LanguageUsageRanking(ownerIdentity), RoutingPolicy: request.RoutingPolicy, SourceKey: key, SourceName: filepath.Base(input.Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: pageCount})
 	if err != nil {
 		_ = s.artifacts.DeleteObject(context.Background(), key)
 		return nil, err
@@ -113,7 +113,7 @@ func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, requ
 	if strings.TrimSpace(ownerIdentity) == "" || request.Profile != ProfileMarkupV2 {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
 	if err := validatePDFInput(input); err != nil || strings.TrimSpace(markup.Query) == "" {
@@ -149,7 +149,7 @@ func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, requ
 		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Markup job service is not configured"}
 	}
 	job, err := asyncJobs.SubmitJob(ctx, JobSubmitRequest{
-		RequestID: request.RequestID, Profile: ProfileMarkupV2, Language: request.Language,
+		RequestID: request.RequestID, Profile: ProfileMarkupV2, Language: request.Language, LanguageMode: request.LanguageMode, Languages: request.Languages, LanguageUsage: LanguageUsageRanking(ownerIdentity),
 		RoutingPolicy: request.RoutingPolicy, SourceKey: key, SourceName: filepath.Base(input.Header.Filename),
 		OwnerIdentity: ownerIdentity, TotalPages: pageCount, Markup: &markup,
 	})
@@ -298,7 +298,7 @@ func (s *Service) ExecuteText(ctx context.Context, inputPath string, request Tex
 	if strings.TrimSpace(request.Profile) != ProfileOCRTextV2 {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
 	if _, err := os.Stat(inputPath); err != nil {
@@ -323,7 +323,7 @@ func (s *Service) CreateJob(ctx context.Context, inputPath string, request TextR
 	if strings.TrimSpace(ownerIdentity) == "" {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
-	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
 	if _, err := os.Stat(inputPath); err != nil {
@@ -346,6 +346,9 @@ func (s *Service) CreateJob(ctx context.Context, inputPath string, request TextR
 		RequestID:     request.RequestID,
 		Profile:       request.Profile,
 		Language:      request.Language,
+		LanguageMode:  request.LanguageMode,
+		Languages:     request.Languages,
+		LanguageUsage: LanguageUsageRanking(ownerIdentity),
 		RoutingPolicy: request.RoutingPolicy,
 		SourceKey:     key,
 		SourceName:    name,

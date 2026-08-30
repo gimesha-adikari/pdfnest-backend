@@ -93,6 +93,23 @@ type UsageLog struct {
 	CreatedAt  time.Time `gorm:"index"`
 }
 
+// OCRLanguageUsage stores only language identifiers and counters.  OwnerKey
+// is either the authenticated owner identity or the literal "global"; no OCR
+// text, image, or document identifier is retained for ranking.
+type OCRLanguageUsage struct {
+	ID                    string    `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
+	OwnerKey              string    `gorm:"type:varchar(255);uniqueIndex:idx_ocr_language_usage;not null"`
+	LanguageCode          string    `gorm:"type:varchar(64);uniqueIndex:idx_ocr_language_usage;not null"`
+	LanguageSet           string    `gorm:"type:varchar(255);uniqueIndex:idx_ocr_language_usage;not null;default:''"`
+	ManualSelectionCount  int       `gorm:"default:0;not null"`
+	ManualCorrectionCount int       `gorm:"default:0;not null"`
+	AutoConfirmedCount    int       `gorm:"default:0;not null"`
+	AutoRejectedCount     int       `gorm:"default:0;not null"`
+	LastUsedAt            time.Time `gorm:"index"`
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
 type WebhookLog struct {
 	ID        string `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
 	EventID   string `gorm:"type:varchar(255);uniqueIndex;not null"`

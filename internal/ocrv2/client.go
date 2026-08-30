@@ -41,9 +41,17 @@ func (c *Client) Execute(ctx context.Context, inputPath string, request TextRequ
 		"language":       request.Language,
 		"routing_policy": string(request.RoutingPolicy),
 	}
+	if request.LanguageMode != "" {
+		fields["language_mode"] = request.LanguageMode
+	}
 	body, contentType, err := worker.CreateMultipartRequest(inputPath, func(writer *multipart.Writer) error {
 		for key, value := range fields {
 			if err := writer.WriteField(key, value); err != nil {
+				return err
+			}
+		}
+		for _, language := range request.Languages {
+			if err := writer.WriteField("languages", language); err != nil {
 				return err
 			}
 		}
@@ -119,6 +127,15 @@ func (c *Client) SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobS
 		"source_name":    request.SourceName,
 		"owner_identity": request.OwnerIdentity,
 		"total_pages":    request.TotalPages,
+	}
+	if request.LanguageMode != "" {
+		payload["language_mode"] = request.LanguageMode
+	}
+	if len(request.Languages) > 0 {
+		payload["languages"] = request.Languages
+	}
+	if len(request.LanguageUsage) > 0 {
+		payload["language_usage"] = request.LanguageUsage
 	}
 	if request.Markup != nil {
 		payload["markup_action"] = request.Markup.Action

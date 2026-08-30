@@ -27,6 +27,9 @@ type TextRequest struct {
 	RequestID     string
 	Profile       string
 	Language      string
+	LanguageMode  string
+	Languages     []string
+	LanguageUsage map[string]float64
 	RoutingPolicy RoutingPolicy
 }
 
@@ -82,6 +85,7 @@ type RoutingCapability struct {
 
 type Capabilities struct {
 	Languages              []LanguageCapability    `json:"languages"`
+	LanguagePolicy         map[string]any          `json:"language_policy,omitempty"`
 	RoutingModes           []RoutingCapability     `json:"routing_modes"`
 	QualityEngineAvailable bool                    `json:"quality_engine_available"`
 	SearchablePDF          SearchablePDFCapability `json:"searchable_pdf"`
@@ -102,6 +106,9 @@ type JobSubmitRequest struct {
 	RequestID     string
 	Profile       string
 	Language      string
+	LanguageMode  string
+	Languages     []string
+	LanguageUsage map[string]float64
 	RoutingPolicy RoutingPolicy
 	SourceKey     string
 	SourceName    string

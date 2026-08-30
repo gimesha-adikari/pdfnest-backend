@@ -73,23 +73,82 @@ func CalculateFingerprint(c *fiber.Ctx) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		languageMode, languagePolicy := canonicalLanguagePolicy(form.Value)
 		keys := make([]string, 0, len(form.Value))
 		for key := range form.Value {
+			if key == "language" || key == "languages" || key == "language_mode" {
+				continue
+			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
 			values := append([]string(nil), form.Value[key]...)
+			if key == "language" || key == "languages" {
+				for index, value := range values {
+					values[index] = canonicalLanguageField(value)
+				}
+			}
 			sort.Strings(values)
 			for _, value := range values {
 				hasher.Write([]byte(fmt.Sprintf("field:%s=%s", key, value)))
 			}
+		}
+		if languageMode != "" || languagePolicy != "" {
+			hasher.Write([]byte(fmt.Sprintf("field:language_policy=%s:%s", languageMode, languagePolicy)))
 		}
 	} else if len(c.Body()) > 0 {
 		hasher.Write(c.Body())
 	}
 
 	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func canonicalLanguagePolicy(values map[string][]string) (string, string) {
+	mode := ""
+	if raw := values["language_mode"]; len(raw) > 0 {
+		mode = strings.ToUpper(strings.TrimSpace(raw[0]))
+	}
+
+	seen := make(map[string]struct{})
+	for _, key := range []string{"language", "languages"} {
+		for _, value := range values[key] {
+			canonical := canonicalLanguageField(value)
+			if canonical == "AUTO" {
+				if mode == "" {
+					mode = "AUTO"
+				}
+				continue
+			}
+			for _, token := range strings.Split(canonical, "+") {
+				if token != "" {
+					seen[token] = struct{}{}
+				}
+			}
+		}
+	}
+	if mode == "" && len(seen) > 0 {
+		mode = "EXPLICIT"
+	}
+	if mode == "AUTO" {
+		return mode, "AUTO"
+	}
+	languages := make([]string, 0, len(seen))
+	for language := range seen {
+		languages = append(languages, language)
+	}
+	sort.Strings(languages)
+	return mode, strings.Join(languages, "+")
+}
+
+func canonicalLanguageField(value string) string {
+	clean := strings.ToLower(strings.TrimSpace(value))
+	if clean == "auto" || clean == "automatic" || clean == "detect" {
+		return "AUTO"
+	}
+	parts := strings.FieldsFunc(clean, func(r rune) bool { return r == '+' || r == ',' || r == ' ' || r == '\t' })
+	sort.Strings(parts)
+	return strings.Join(parts, "+")
 }
 
 type ReplayHandler func(*fiber.Ctx, Record) error

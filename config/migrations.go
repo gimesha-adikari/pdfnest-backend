@@ -18,7 +18,7 @@ const managedSchemaVersion = "20260828_01"
 
 func schemaModels() []interface{} {
 	return []interface{}{
-		&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &WebhookLog{}, &BillingReservation{}, &UserSetting{},
+		&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &OCRLanguageUsage{}, &WebhookLog{}, &BillingReservation{}, &UserSetting{},
 		&ContactCategory{}, &ContactTicket{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{},
 		models.AboutPageContent{}, &analyzerModels.AnalyzerSession{}, &studioModels.StudioDocument{}, &studioModels.StudioAsset{},
 		&studioModels.StudioSnapshot{}, &studioModels.StudioVersion{}, &studioModels.StudioOperation{}, &studioModels.StudioJob{},

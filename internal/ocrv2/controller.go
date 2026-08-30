@@ -38,7 +38,7 @@ func (c *Controller) Text(cctx *fiber.Ctx) error {
 	if !validPolicy(policy) {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
 	}
-	request := TextRequest{RequestID: requestID, Profile: ProfileOCRTextV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	request := textRequestFromContext(cctx, requestID, ProfileOCRTextV2, policy)
 	ctx := cctx.UserContext()
 	if ctx == nil {
 		ctx = context.Background()
@@ -76,7 +76,7 @@ func (c *Controller) CreateJob(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
 	}
 	owner, _ := cctx.Locals("user_id").(string)
-	request := TextRequest{RequestID: requestID, Profile: ProfileOCRTextV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	request := textRequestFromContext(cctx, requestID, ProfileOCRTextV2, policy)
 	job, execErr := c.service.CreateJob(cctx.UserContext(), upload.Path, request, owner)
 	if execErr != nil {
 		idempotency.Release(cctx, nil)
@@ -86,6 +86,7 @@ func (c *Controller) CreateJob(cctx *fiber.Ctx) error {
 		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
 		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job persistence is temporarily unavailable."})
 	}
+	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
 }
 
@@ -95,16 +96,21 @@ func (c *Controller) SearchableCapabilities(cctx *fiber.Ctx) error {
 		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
 	}
 	return cctx.JSON(fiber.Map{
-		"schema_version": "ocr_v2_capabilities.v1",
-		"profile":        ProfileSearchablePDFV2,
-		"service_ready":  true,
-		"languages":      capabilities.Languages,
-		"routing_modes":  capabilities.RoutingModes,
-		"searchable_pdf": capabilities.SearchablePDF,
+		"schema_version":  "ocr_v2_capabilities.v1",
+		"profile":         ProfileSearchablePDFV2,
+		"service_ready":   true,
+		"languages":       capabilities.Languages,
+		"language_policy": capabilities.LanguagePolicy,
+		"routing_modes":   capabilities.RoutingModes,
+		"searchable_pdf":  capabilities.SearchablePDF,
 	})
 }
 
 func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
+	capabilities, err := c.service.GetCapabilities(cctx.UserContext())
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
 	return cctx.JSON(fiber.Map{
 		"schema_version": "ocr_v2_structured_capabilities.v1",
 		"service_ready":  true,
@@ -112,7 +118,9 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 			ProfileDocumentExtractionV2: fiber.Map{"available": true, "input_formats": []string{"application/pdf"}},
 			ProfilePDFMarkdownV2:        fiber.Map{"available": true, "input_formats": []string{"application/pdf"}},
 		},
-		"native_first": true,
+		"native_first":    true,
+		"languages":       capabilities.Languages,
+		"language_policy": capabilities.LanguagePolicy,
 		"engines": []fiber.Map{
 			{"id": "pymupdf_native", "available": true, "capabilities": []string{"TEXT", "BLOCK_GEOMETRY", "READING_ORDER"}},
 			{"id": "pdfplumber_native", "available": true, "capabilities": []string{"TABLES"}},
@@ -122,13 +130,17 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 }
 
 func (c *Controller) MarkupCapabilities(cctx *fiber.Ctx) error {
+	capabilities, err := c.service.GetCapabilities(cctx.UserContext())
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
 	return cctx.JSON(fiber.Map{
 		"schema_version":        "ocr_v2_markup_capabilities.v1",
 		"service_ready":         true,
 		"profile":               ProfileMarkupV2,
 		"actions":               []string{"highlight", "underline", "strikeout"},
 		"modes":                 []string{"smart", "ocr", "native"},
-		"languages":             []string{"eng"},
+		"languages":             capabilities.Languages,
 		"required_capabilities": []string{"TEXT", "WORD_GEOMETRY", "READING_ORDER"},
 	})
 }
@@ -149,7 +161,7 @@ func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
 	}
 	owner, _ := cctx.Locals("user_id").(string)
-	request := TextRequest{RequestID: requestID, Profile: ProfileMarkupV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	request := textRequestFromContext(cctx, requestID, ProfileMarkupV2, policy)
 	markup := MarkupRequest{Action: action, Mode: strings.ToLower(strings.TrimSpace(cctx.FormValue("mode"))), Query: cctx.FormValue("query"), Color: strings.TrimSpace(cctx.FormValue("color"))}
 	if markup.Mode == "" {
 		markup.Mode = "smart"
@@ -163,6 +175,7 @@ func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
 		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
 		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "Markup job persistence is temporarily unavailable."})
 	}
+	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
 }
 
@@ -207,7 +220,7 @@ func (c *Controller) CreateStructuredJob(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported structured OCR profile."})
 	}
 	owner, _ := cctx.Locals("user_id").(string)
-	request := TextRequest{RequestID: requestID, Profile: profile, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	request := textRequestFromContext(cctx, requestID, profile, policy)
 	job, execErr := c.service.CreateStructuredJob(cctx.UserContext(), upload, request, owner)
 	if execErr != nil {
 		idempotency.Release(cctx, nil)
@@ -217,6 +230,7 @@ func (c *Controller) CreateStructuredJob(cctx *fiber.Ctx) error {
 		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
 		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "Structured OCR job persistence is temporarily unavailable."})
 	}
+	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
 }
 
@@ -251,7 +265,7 @@ func (c *Controller) CreateSearchableJob(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
 	}
 	owner, _ := cctx.Locals("user_id").(string)
-	request := TextRequest{RequestID: requestID, Profile: ProfileSearchablePDFV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	request := textRequestFromContext(cctx, requestID, ProfileSearchablePDFV2, policy)
 	job, execErr := c.service.CreateSearchablePDFJob(cctx.UserContext(), inputs, request, owner)
 	if execErr != nil {
 		idempotency.Release(cctx, nil)
@@ -261,6 +275,7 @@ func (c *Controller) CreateSearchableJob(cctx *fiber.Ctx) error {
 		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
 		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job persistence is temporarily unavailable."})
 	}
+	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
 }
 
@@ -296,6 +311,25 @@ func searchableImageUploads(cctx *fiber.Ctx) ([]*uploads.File, error) {
 		return nil, errors.New("missing image uploads")
 	}
 	return files, nil
+}
+
+func textRequestFromContext(cctx *fiber.Ctx, requestID, profile string, policy RoutingPolicy) TextRequest {
+	languages := []string{}
+	if form, err := cctx.MultipartForm(); err == nil && form != nil {
+		languages = append(languages, form.Value["languages"]...)
+	}
+	languageMode := strings.TrimSpace(cctx.FormValue("language_mode"))
+	if languageMode == "" {
+		languageMode = "EXPLICIT"
+	}
+	return TextRequest{
+		RequestID:     requestID,
+		Profile:       profile,
+		Language:      strings.TrimSpace(cctx.FormValue("language")),
+		LanguageMode:  languageMode,
+		Languages:     languages,
+		RoutingPolicy: policy,
+	}
 }
 
 func safeDownloadName(value string) string {
