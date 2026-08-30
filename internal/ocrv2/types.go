@@ -2,12 +2,15 @@ package ocrv2
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
 
 const ProfileOCRTextV2 = "OCR_TEXT_V2"
 const ProfileSearchablePDFV2 = "SEARCHABLE_PDF_V2"
+const ProfileDocumentExtractionV2 = "DOCUMENT_EXTRACTION_V2"
+const ProfilePDFMarkdownV2 = "PDF_MARKDOWN_V2"
 
 type RoutingPolicy string
 
@@ -148,6 +151,13 @@ type AsyncJobInvoker interface {
 type SearchableJobInvoker interface {
 	SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobStatus, error)
 	GetArtifact(ctx context.Context, jobID string) (*ArtifactResult, error)
+}
+
+type StructuredJobInvoker interface {
+	SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobStatus, error)
+	GetJob(ctx context.Context, jobID string) (*JobStatus, error)
+	GetStructuredResult(ctx context.Context, jobID string) (json.RawMessage, error)
+	CancelJob(ctx context.Context, jobID, ownerIdentity string) (*JobStatus, error)
 }
 
 type JobProgress struct {

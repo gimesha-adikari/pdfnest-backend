@@ -3,6 +3,7 @@ package ocrv2
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ type Service struct {
 	jobs         AsyncJobInvoker
 	capabilities CapabilitiesInvoker
 	maxPages     int
+	maxBytes     int64
 	artifacts    ArtifactStore
 }
 
@@ -67,6 +69,53 @@ func (s *Service) CreateSearchablePDFJob(ctx context.Context, inputs []*uploads.
 	return job, nil
 }
 
+func (s *Service) CreateStructuredJob(ctx context.Context, input *uploads.File, request TextRequest, ownerIdentity string) (*JobStatus, error) {
+	if s == nil || s.jobs == nil || s.artifacts == nil {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Structured OCR job service is not configured"}
+	}
+	structuredJobs, ok := s.jobs.(StructuredJobInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Structured OCR job service is not configured"}
+	}
+	if (request.Profile != ProfileDocumentExtractionV2 && request.Profile != ProfilePDFMarkdownV2) || strings.TrimSpace(ownerIdentity) == "" {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+		return nil, &RequestError{Code: ErrUnsupportedLanguage}
+	}
+	if err := validatePDFInput(input); err != nil {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if int64(input.Header.Size) > s.maxBytes {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	key := storage.BuildKey("jobs/ocr_v2/structured/input", ".pdf")
+	if err := s.artifacts.UploadFile(input.Path, key, "application/pdf"); err != nil {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Structured OCR input storage is unavailable"}
+	}
+	pageCount, err := uploads.CheckPDFPageLimit(input.Path, "OCR_V2_MAX_PAGES", s.maxPages)
+	if err != nil {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	job, err := structuredJobs.SubmitJob(ctx, JobSubmitRequest{RequestID: request.RequestID, Profile: request.Profile, Language: request.Language, RoutingPolicy: request.RoutingPolicy, SourceKey: key, SourceName: filepath.Base(input.Header.Filename), OwnerIdentity: ownerIdentity, TotalPages: pageCount})
+	if err != nil {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, err
+	}
+	return job, nil
+}
+
+func validatePDFInput(input *uploads.File) error {
+	if input == nil || input.Header == nil || input.Path == "" || input.Header.Size <= 0 {
+		return fmt.Errorf("empty PDF input")
+	}
+	if !strings.HasSuffix(strings.ToLower(input.Header.Filename), ".pdf") {
+		return fmt.Errorf("unsupported PDF input")
+	}
+	return uploads.ValidatePDFHeader(input.Path)
+}
+
 func validateImageInput(input *uploads.File) error {
 	if input == nil || input.Header == nil || input.Path == "" || input.Header.Size <= 0 {
 		return fmt.Errorf("empty image input")
@@ -110,6 +159,24 @@ func (s *Service) GetOwnedSearchableArtifact(ctx context.Context, jobID, ownerId
 	return searchableJobs.GetArtifact(ctx, jobID)
 }
 
+func (s *Service) GetOwnedStructuredResult(ctx context.Context, jobID, ownerIdentity string) (json.RawMessage, error) {
+	structuredJobs, ok := s.jobs.(StructuredJobInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Structured OCR job service is not configured"}
+	}
+	job, err := s.GetOwnedJob(ctx, jobID, ownerIdentity)
+	if err != nil {
+		return nil, err
+	}
+	if job.Profile != ProfileDocumentExtractionV2 && job.Profile != ProfilePDFMarkdownV2 {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if !job.ResultAvailable() {
+		return nil, &WorkerError{Code: ErrResultNotReady, Message: "Structured OCR result is not ready"}
+	}
+	return structuredJobs.GetStructuredResult(ctx, jobID)
+}
+
 type ArtifactStore interface {
 	UploadFile(path, key, contentType string) error
 	DeleteObject(ctx context.Context, key string) error
@@ -134,7 +201,8 @@ func (objectArtifactStore) DeleteObject(ctx context.Context, key string) error {
 
 func NewService(workerClient WorkerInvoker) *Service {
 	maxPages := uploads.GetEnvInt("OCR_V2_MAX_PAGES", uploads.GetEnvInt("MAX_PAGES_OCR", 150))
-	service := &Service{worker: workerClient, maxPages: maxPages, artifacts: objectArtifactStore{}}
+	maxBytes := int64(uploads.GetEnvInt("OCR_V2_STRUCTURED_MAX_BYTES", uploads.GetEnvInt("OCR_V2_MAX_BYTES", 100*1024*1024)))
+	service := &Service{worker: workerClient, maxPages: maxPages, maxBytes: maxBytes, artifacts: objectArtifactStore{}}
 	if jobClient, ok := workerClient.(AsyncJobInvoker); ok {
 		service.jobs = jobClient
 	}

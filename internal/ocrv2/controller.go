@@ -104,6 +104,78 @@ func (c *Controller) SearchableCapabilities(cctx *fiber.Ctx) error {
 	})
 }
 
+func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
+	return cctx.JSON(fiber.Map{
+		"schema_version": "ocr_v2_structured_capabilities.v1",
+		"service_ready":  true,
+		"profiles": fiber.Map{
+			ProfileDocumentExtractionV2: fiber.Map{"available": true, "input_formats": []string{"application/pdf"}},
+			ProfilePDFMarkdownV2:        fiber.Map{"available": true, "input_formats": []string{"application/pdf"}},
+		},
+		"native_first": true,
+		"engines": []fiber.Map{
+			{"id": "pymupdf_native", "available": true, "capabilities": []string{"TEXT", "BLOCK_GEOMETRY", "READING_ORDER"}},
+			{"id": "pdfplumber_native", "available": true, "capabilities": []string{"TABLES"}},
+			{"id": "tesseract_v2", "available": true, "capabilities": []string{"TEXT", "WORD_GEOMETRY", "LINE_GEOMETRY", "BLOCK_GEOMETRY", "READING_ORDER"}},
+		},
+	})
+}
+
+func (c *Controller) CreateStructuredJob(cctx *fiber.Ctx) error {
+	upload, err := uploads.MustFile(cctx, "file")
+	if err != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "A valid PDF upload is required."})
+	}
+	requestID := strings.TrimSpace(cctx.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	policy := RoutingPolicy(strings.ToUpper(strings.TrimSpace(cctx.FormValue("routing_policy", string(RoutingAuto)))))
+	if !validPolicy(policy) {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported structured OCR routing policy."})
+	}
+	profile := strings.TrimSpace(cctx.FormValue("profile"))
+	if profile == "" {
+		if strings.Contains(cctx.Path(), "pdf-to-markdown-v2") {
+			profile = ProfilePDFMarkdownV2
+		} else {
+			profile = ProfileDocumentExtractionV2
+		}
+	}
+	if profile != ProfileDocumentExtractionV2 && profile != ProfilePDFMarkdownV2 {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported structured OCR profile."})
+	}
+	owner, _ := cctx.Locals("user_id").(string)
+	request := TextRequest{RequestID: requestID, Profile: profile, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	job, execErr := c.service.CreateStructuredJob(cctx.UserContext(), upload, request, owner)
+	if execErr != nil {
+		idempotency.Release(cctx, nil)
+		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: publicMessage(execErr)})
+	}
+	if err := idempotency.SetTaskID(cctx, job.JobID, nil); err != nil {
+		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
+		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "Structured OCR job persistence is temporarily unavailable."})
+	}
+	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
+}
+
+func (c *Controller) ReplayStructuredJob(cctx *fiber.Ctx, record idempotency.Record) error {
+	profile := ProfileDocumentExtractionV2
+	if strings.Contains(cctx.Path(), "pdf-to-markdown-v2") {
+		profile = ProfilePDFMarkdownV2
+	}
+	return cctx.Status(fiber.StatusAccepted).JSON(fiber.Map{"job_id": record.TaskID, "status": "QUEUED", "profile": profile, "result_available": false, "idempotent_replay": true})
+}
+
+func (c *Controller) StructuredJobResult(cctx *fiber.Ctx) error {
+	result, err := c.service.GetOwnedStructuredResult(cctx.UserContext(), cctx.Params("job_id"), c.owner(cctx))
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
+	cctx.Type("json")
+	return cctx.Send(result)
+}
+
 func (c *Controller) CreateSearchableJob(cctx *fiber.Ctx) error {
 	inputs, err := searchableImageUploads(cctx)
 	if err != nil {
@@ -289,8 +361,10 @@ func errorStatus(err error) int {
 		return fiber.StatusBadRequest
 	case ErrUnsupportedLanguage:
 		return fiber.StatusUnprocessableEntity
-	case ErrWorkerAuthentication, ErrEngineFailure, ErrInvalidEngineOutput, ErrPDFRenderFailure:
+	case ErrWorkerAuthentication, ErrEngineFailure, ErrInvalidEngineOutput, ErrPDFRenderFailure, ErrStructuredEngineUnavailable:
 		return fiber.StatusBadGateway
+	case ErrStructuredOutputInvalid, ErrStructuredProfileNotEligible, ErrTableStructureUnavailable, ErrFormulaStructureUnavailable:
+		return fiber.StatusUnprocessableEntity
 	case ErrTaskStorageUnavailable:
 		return fiber.StatusServiceUnavailable
 	case ErrNotFound:
@@ -328,6 +402,16 @@ func publicMessage(err error) string {
 		return "OCR worker returned an invalid result."
 	case ErrPDFRenderFailure:
 		return "The searchable PDF could not be rendered while preserving the source image."
+	case ErrStructuredEngineUnavailable:
+		return "The structured document engine is currently unavailable."
+	case ErrStructuredOutputInvalid:
+		return "The structured document result could not be validated."
+	case ErrStructuredProfileNotEligible:
+		return "The document did not satisfy the structured extraction profile."
+	case ErrTableStructureUnavailable:
+		return "Table structure is not available for this page."
+	case ErrFormulaStructureUnavailable:
+		return "Formula structure is not available for this page."
 	case ErrTaskStorageUnavailable:
 		return "OCR V2 job persistence is temporarily unavailable."
 	case ErrNotFound:

@@ -217,6 +217,21 @@ func (c *Client) GetResult(ctx context.Context, jobID string) (*TextResponse, er
 	return &response, nil
 }
 
+func (c *Client) GetStructuredResult(ctx context.Context, jobID string) (json.RawMessage, error) {
+	data, status, err := c.doJSON(ctx, http.MethodGet, "/internal/ocr/v2/jobs/"+jobID+"/result", jobID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status >= 300 {
+		return nil, decodeWorkerJSONError(data, status)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil || object == nil {
+		return nil, &WorkerError{Code: ErrInvalidEngineOutput, HTTPStatus: status, Message: "worker returned malformed structured OCR result"}
+	}
+	return json.RawMessage(data), nil
+}
+
 func (c *Client) CancelJob(ctx context.Context, jobID, ownerIdentity string) (*JobStatus, error) {
 	data, err := json.Marshal(map[string]string{"owner_identity": ownerIdentity})
 	if err != nil {

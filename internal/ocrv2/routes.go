@@ -23,6 +23,15 @@ func RegisterRoutes(router fiber.Router, controller *Controller) {
 	group.Get("/searchable-pdf/jobs/:job_id", controller.JobStatus)
 	group.Get("/searchable-pdf/jobs/:job_id/result", controller.SearchableJobResult)
 	group.Delete("/searchable-pdf/jobs/:job_id", controller.CancelJob)
+	group.Get("/structured/capabilities", controller.StructuredCapabilities)
+	group.Post("/document-extraction-v2/jobs", idempotency.UseWithReplay(nil, controller.ReplayStructuredJob), controller.CreateStructuredJob)
+	group.Get("/document-extraction-v2/jobs/:job_id", controller.JobStatus)
+	group.Get("/document-extraction-v2/jobs/:job_id/result", controller.StructuredJobResult)
+	group.Delete("/document-extraction-v2/jobs/:job_id", controller.CancelJob)
+	group.Post("/pdf-to-markdown-v2/jobs", idempotency.UseWithReplay(nil, controller.ReplayStructuredJob), controller.CreateStructuredJob)
+	group.Get("/pdf-to-markdown-v2/jobs/:job_id", controller.JobStatus)
+	group.Get("/pdf-to-markdown-v2/jobs/:job_id/result", controller.StructuredJobResult)
+	group.Delete("/pdf-to-markdown-v2/jobs/:job_id", controller.CancelJob)
 }
 
 func bindAuthenticatedIdentity() fiber.Handler {
