@@ -126,7 +126,11 @@ func (g *studioWorkerGateway) SubmitEdit(_ context.Context, op StudioJobName, so
 	var e error
 	switch op {
 	case StudioJobEditExtract:
-		s, e = g.edit.ExtractLayout(source, "", name)
+		if v2, ok := g.edit.(edit.OCRV2Service); ok {
+			s, e = v2.ExtractLayoutV2(source, "", name)
+		} else {
+			s, e = g.edit.ExtractLayout(source, "", name)
+		}
 	case StudioJobEditCompile:
 		s, e = g.edit.CompileLayout(source, payload, name)
 	default:
@@ -305,7 +309,10 @@ func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobNam
 		if !validStudioMarkupMode(p.Mode) {
 			return "", ErrInvalidJob
 		}
-		payload, err = json.Marshal(p)
+		payload, err = json.Marshal(struct {
+			MarkupJobParameters
+			OCRV2 bool `json:"ocr_v2"`
+		}{MarkupJobParameters: p, OCRV2: true})
 	case StudioJobEditExtract:
 		var p EditExtractJobParameters
 		if err = decodeStrictParameters(canonical, &p); err != nil {

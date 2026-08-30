@@ -12,10 +12,13 @@ import (
 // opaque editor metadata, never storage locations; this worker currently does
 // not require either tracker to compile a layout.
 type EditorLayout struct {
-	Success        bool         `json:"success"`
-	Pages          []EditorPage `json:"pages"`
-	SourceTracker  string       `json:"source_tracker,omitempty"`
-	UprightTracker string       `json:"upright_tracker,omitempty"`
+	SchemaVersion  string         `json:"schema_version,omitempty"`
+	OCRV2          bool           `json:"ocr_v2,omitempty"`
+	Success        bool           `json:"success"`
+	Pages          []EditorPage   `json:"pages"`
+	Source         map[string]any `json:"source,omitempty"`
+	SourceTracker  string         `json:"source_tracker,omitempty"`
+	UprightTracker string         `json:"upright_tracker,omitempty"`
 }
 type EditorPage struct {
 	PageNum           int             `json:"page_num"`
@@ -28,20 +31,40 @@ type EditorPage struct {
 	TextBlockCount    int             `json:"text_block_count"`
 	ImageBlockCount   int             `json:"image_block_count"`
 	IsOCR             *bool           `json:"is_ocr,omitempty"`
+	Source            string          `json:"source,omitempty"`
+	Provenance        []string        `json:"provenance,omitempty"`
+	ReadingOrder      []string        `json:"reading_order,omitempty"`
+	Capabilities      []string        `json:"capabilities,omitempty"`
 }
 type EditorElement struct {
-	ID            string  `json:"id"`
-	Text          string  `json:"text"`
-	Original      string  `json:"original_text,omitempty"`
-	X             float64 `json:"x"`
-	Y             float64 `json:"y"`
-	Width         float64 `json:"width"`
-	Height        float64 `json:"height"`
-	Size          float64 `json:"size"`
-	Font          string  `json:"font"`
-	BGColor       string  `json:"bg_color,omitempty"`
-	TextColor     string  `json:"text_color,omitempty"`
-	TransparentBG bool    `json:"transparent_bg,omitempty"`
+	ID            string               `json:"id"`
+	Text          string               `json:"text"`
+	Original      string               `json:"original_text,omitempty"`
+	X             float64              `json:"x"`
+	Y             float64              `json:"y"`
+	Width         float64              `json:"width"`
+	Height        float64              `json:"height"`
+	Size          float64              `json:"size"`
+	Font          string               `json:"font"`
+	BGColor       string               `json:"bg_color,omitempty"`
+	TextColor     string               `json:"text_color,omitempty"`
+	TransparentBG bool                 `json:"transparent_bg,omitempty"`
+	OCRV2         bool                 `json:"ocr_v2,omitempty"`
+	Source        string               `json:"source,omitempty"`
+	Provenance    []string             `json:"provenance,omitempty"`
+	WordIDs       []string             `json:"word_ids,omitempty"`
+	WordGeometry  []EditorWordGeometry `json:"word_geometry,omitempty"`
+	ReadingOrder  []string             `json:"reading_order,omitempty"`
+	Confidence    *float64             `json:"confidence,omitempty"`
+}
+
+type EditorWordGeometry struct {
+	ID     string  `json:"id"`
+	Text   string  `json:"text"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
 }
 
 func decodeEditorLayout(raw []byte) (EditorLayout, []byte, error) {

@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/uploads"
@@ -17,6 +19,33 @@ import (
 
 type Controller struct {
 	service Service
+}
+
+func localDevelopmentStorageEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("APP_ENV")), "development")
+}
+
+func (cr *Controller) persistSource(path, key, contentType string) error {
+	if localDevelopmentStorageEnabled() {
+		return storage.SaveLocalFile(context.Background(), key, path)
+	}
+	store, err := storage.Default()
+	if err != nil {
+		return err
+	}
+	return store.UploadFile(path, key, contentType)
+}
+
+func (cr *Controller) persistLayout(payload []byte, key string) error {
+	if localDevelopmentStorageEnabled() {
+		_, _, err := storage.SaveLocalStream(context.Background(), key, bytes.NewReader(payload))
+		return err
+	}
+	store, err := storage.Default()
+	if err != nil {
+		return err
+	}
+	return store.UploadBytes(payload, key, "application/json")
 }
 
 func NewController(s Service) *Controller {
@@ -42,28 +71,29 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	filePassword := c.FormValue("file_password")
 
-	store, err := storage.Default()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   err.Error(),
-		})
-	}
-
 	contentType := upload.Header.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/pdf"
 	}
 
 	sourceKey := storage.BuildKey("edit/source", filepath.Ext(upload.Header.Filename))
-	if err := store.UploadFile(upload.Path, sourceKey, contentType); err != nil {
+	if err := cr.persistSource(upload.Path, sourceKey, contentType); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
+			"error":   fmt.Sprintf("Failed to persist original PDF: %v", err),
 		})
 	}
 
-	submission, err := cr.service.ExtractLayout(sourceKey, filePassword, upload.Header.Filename)
+	var submission *WorkerJobSubmission
+	if strings.EqualFold(strings.TrimSpace(c.FormValue("ocr_v2")), "true") {
+		v2, ok := cr.service.(OCRV2Service)
+		if !ok {
+			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "OCR V2 editor extraction is unavailable"})
+		}
+		submission, err = v2.ExtractLayoutV2(sourceKey, filePassword, upload.Header.Filename)
+	} else {
+		submission, err = cr.service.ExtractLayout(sourceKey, filePassword, upload.Header.Filename)
+	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -102,19 +132,11 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 		})
 	}
 
-	store, err := storage.Default()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   err.Error(),
-		})
-	}
-
 	pagesJSONKey := storage.BuildKey("edit/layout", ".json")
-	if err := store.UploadBytes(payloadBytes, pagesJSONKey, "application/json"); err != nil {
+	if err := cr.persistLayout(payloadBytes, pagesJSONKey); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to upload edit payload to R2: %v", err),
+			"error":   fmt.Sprintf("Failed to persist edit payload: %v", err),
 		})
 	}
 

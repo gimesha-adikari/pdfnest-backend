@@ -120,6 +120,12 @@ func (c *Client) SubmitJob(ctx context.Context, request JobSubmitRequest) (*JobS
 		"owner_identity": request.OwnerIdentity,
 		"total_pages":    request.TotalPages,
 	}
+	if request.Markup != nil {
+		payload["markup_action"] = request.Markup.Action
+		payload["markup_mode"] = request.Markup.Mode
+		payload["markup_query"] = request.Markup.Query
+		payload["markup_color"] = request.Markup.Color
+	}
 	if len(request.SourceFiles) > 0 {
 		payload["source_files"] = request.SourceFiles
 	}

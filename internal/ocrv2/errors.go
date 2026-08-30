@@ -24,6 +24,9 @@ const (
 	ErrStructuredProfileNotEligible = "STRUCTURED_PROFILE_NOT_ELIGIBLE"
 	ErrTableStructureUnavailable    = "TABLE_STRUCTURE_UNAVAILABLE"
 	ErrFormulaStructureUnavailable  = "FORMULA_STRUCTURE_UNAVAILABLE"
+	ErrWordGeometryUnavailable      = "WORD_GEOMETRY_NOT_AVAILABLE"
+	ErrTextNotFound                 = "TEXT_NOT_FOUND"
+	ErrAnnotationWriteFailure       = "ANNOTATION_WRITE_FAILURE"
 )
 
 type RequestError struct {

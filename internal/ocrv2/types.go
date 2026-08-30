@@ -11,6 +11,7 @@ const ProfileOCRTextV2 = "OCR_TEXT_V2"
 const ProfileSearchablePDFV2 = "SEARCHABLE_PDF_V2"
 const ProfileDocumentExtractionV2 = "DOCUMENT_EXTRACTION_V2"
 const ProfilePDFMarkdownV2 = "PDF_MARKDOWN_V2"
+const ProfileMarkupV2 = "MARKUP_V2"
 
 type RoutingPolicy string
 
@@ -27,6 +28,13 @@ type TextRequest struct {
 	Profile       string
 	Language      string
 	RoutingPolicy RoutingPolicy
+}
+
+type MarkupRequest struct {
+	Action string
+	Mode   string
+	Query  string
+	Color  string
 }
 
 type PageResult struct {
@@ -100,6 +108,7 @@ type JobSubmitRequest struct {
 	SourceFiles   []SourceFile
 	OwnerIdentity string
 	TotalPages    int
+	Markup        *MarkupRequest
 }
 
 type SourceFile struct {

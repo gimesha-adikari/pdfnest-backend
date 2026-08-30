@@ -121,6 +121,67 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 	})
 }
 
+func (c *Controller) MarkupCapabilities(cctx *fiber.Ctx) error {
+	return cctx.JSON(fiber.Map{
+		"schema_version":        "ocr_v2_markup_capabilities.v1",
+		"service_ready":         true,
+		"profile":               ProfileMarkupV2,
+		"actions":               []string{"highlight", "underline", "strikeout"},
+		"modes":                 []string{"smart", "ocr", "native"},
+		"languages":             []string{"eng"},
+		"required_capabilities": []string{"TEXT", "WORD_GEOMETRY", "READING_ORDER"},
+	})
+}
+
+func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
+	upload, err := uploads.MustPDFFile(cctx, "file")
+	if err != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "A valid PDF upload is required."})
+	}
+	action := strings.TrimPrefix(cctx.Path(), "/api/v2/ocr/markup/")
+	action = strings.TrimSuffix(action, "/jobs")
+	requestID := strings.TrimSpace(cctx.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	policy := RoutingPolicy(strings.ToUpper(strings.TrimSpace(cctx.FormValue("routing_policy", string(RoutingAuto)))))
+	if !validPolicy(policy) {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR V2 routing policy."})
+	}
+	owner, _ := cctx.Locals("user_id").(string)
+	request := TextRequest{RequestID: requestID, Profile: ProfileMarkupV2, Language: strings.TrimSpace(cctx.FormValue("language")), RoutingPolicy: policy}
+	markup := MarkupRequest{Action: action, Mode: strings.ToLower(strings.TrimSpace(cctx.FormValue("mode"))), Query: cctx.FormValue("query"), Color: strings.TrimSpace(cctx.FormValue("color"))}
+	if markup.Mode == "" {
+		markup.Mode = "smart"
+	}
+	job, execErr := c.service.CreateMarkupJob(cctx.UserContext(), upload, request, markup, owner)
+	if execErr != nil {
+		idempotency.Release(cctx, nil)
+		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: publicMessage(execErr)})
+	}
+	if err := idempotency.SetTaskID(cctx, job.JobID, nil); err != nil {
+		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
+		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "Markup job persistence is temporarily unavailable."})
+	}
+	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
+}
+
+func (c *Controller) ReplayMarkupJob(cctx *fiber.Ctx, record idempotency.Record) error {
+	action := strings.TrimPrefix(cctx.Path(), "/api/v2/ocr/markup/")
+	action = strings.TrimSuffix(action, "/jobs")
+	return cctx.Status(fiber.StatusAccepted).JSON(fiber.Map{"job_id": record.TaskID, "status": "QUEUED", "profile": ProfileMarkupV2, "action": action, "result_available": false, "idempotent_replay": true})
+}
+
+func (c *Controller) MarkupJobResult(cctx *fiber.Ctx) error {
+	artifact, err := c.service.GetOwnedMarkupArtifact(cctx.UserContext(), cctx.Params("job_id"), c.owner(cctx))
+	if err != nil {
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+	}
+	cctx.Set("Content-Type", "application/pdf")
+	cctx.Set("Content-Disposition", `attachment; filename="`+safeDownloadName(artifact.Filename)+`"`)
+	return cctx.Send(artifact.Bytes)
+}
+
 func (c *Controller) CreateStructuredJob(cctx *fiber.Ctx) error {
 	upload, err := uploads.MustFile(cctx, "file")
 	if err != nil {
@@ -365,6 +426,8 @@ func errorStatus(err error) int {
 		return fiber.StatusBadGateway
 	case ErrStructuredOutputInvalid, ErrStructuredProfileNotEligible, ErrTableStructureUnavailable, ErrFormulaStructureUnavailable:
 		return fiber.StatusUnprocessableEntity
+	case ErrWordGeometryUnavailable, ErrTextNotFound, ErrAnnotationWriteFailure:
+		return fiber.StatusUnprocessableEntity
 	case ErrTaskStorageUnavailable:
 		return fiber.StatusServiceUnavailable
 	case ErrNotFound:
@@ -412,6 +475,12 @@ func publicMessage(err error) string {
 		return "Table structure is not available for this page."
 	case ErrFormulaStructureUnavailable:
 		return "Formula structure is not available for this page."
+	case ErrWordGeometryUnavailable:
+		return "Automatic OCR-aware text selection is unavailable for this document."
+	case ErrTextNotFound:
+		return "The requested text was not found in the document."
+	case ErrAnnotationWriteFailure:
+		return "The requested markup could not be written to the PDF."
 	case ErrTaskStorageUnavailable:
 		return "OCR V2 job persistence is temporarily unavailable."
 	case ErrNotFound:

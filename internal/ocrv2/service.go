@@ -106,6 +106,60 @@ func (s *Service) CreateStructuredJob(ctx context.Context, input *uploads.File, 
 	return job, nil
 }
 
+func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, request TextRequest, markup MarkupRequest, ownerIdentity string) (*JobStatus, error) {
+	if s == nil || s.jobs == nil || s.artifacts == nil {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "OCR-aware markup service is not configured"}
+	}
+	if strings.TrimSpace(ownerIdentity) == "" || request.Profile != ProfileMarkupV2 {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if strings.TrimSpace(request.Language) == "" || strings.EqualFold(strings.TrimSpace(request.Language), "auto") || strings.EqualFold(strings.TrimSpace(request.Language), "detect") {
+		return nil, &RequestError{Code: ErrUnsupportedLanguage}
+	}
+	if err := validatePDFInput(input); err != nil || strings.TrimSpace(markup.Query) == "" {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if markup.Action != "highlight" && markup.Action != "underline" && markup.Action != "strikeout" {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if markup.Mode != "smart" && markup.Mode != "ocr" && markup.Mode != "native" {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if markup.Color == "" {
+		markup.Color = "#FFFF00"
+	}
+	if len(markup.Color) != 7 || markup.Color[0] != '#' {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if int64(input.Header.Size) > s.maxBytes {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	key := storage.BuildKey("jobs/ocr_v2/markup/input", ".pdf")
+	if err := s.artifacts.UploadFile(input.Path, key, "application/pdf"); err != nil {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Markup input storage is unavailable"}
+	}
+	pageCount, err := uploads.CheckPDFPageLimit(input.Path, "OCR_V2_MAX_PAGES", s.maxPages)
+	if err != nil {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	asyncJobs, ok := s.jobs.(AsyncJobInvoker)
+	if !ok {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Markup job service is not configured"}
+	}
+	job, err := asyncJobs.SubmitJob(ctx, JobSubmitRequest{
+		RequestID: request.RequestID, Profile: ProfileMarkupV2, Language: request.Language,
+		RoutingPolicy: request.RoutingPolicy, SourceKey: key, SourceName: filepath.Base(input.Header.Filename),
+		OwnerIdentity: ownerIdentity, TotalPages: pageCount, Markup: &markup,
+	})
+	if err != nil {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, err
+	}
+	return job, nil
+}
+
 func validatePDFInput(input *uploads.File) error {
 	if input == nil || input.Header == nil || input.Path == "" || input.Header.Size <= 0 {
 		return fmt.Errorf("empty PDF input")
@@ -175,6 +229,24 @@ func (s *Service) GetOwnedStructuredResult(ctx context.Context, jobID, ownerIden
 		return nil, &WorkerError{Code: ErrResultNotReady, Message: "Structured OCR result is not ready"}
 	}
 	return structuredJobs.GetStructuredResult(ctx, jobID)
+}
+
+func (s *Service) GetOwnedMarkupArtifact(ctx context.Context, jobID, ownerIdentity string) (*ArtifactResult, error) {
+	job, err := s.GetOwnedJob(ctx, jobID, ownerIdentity)
+	if err != nil {
+		return nil, err
+	}
+	if job.Profile != ProfileMarkupV2 {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if !job.ResultAvailable() {
+		return nil, &WorkerError{Code: ErrResultNotReady, Message: "Markup result is not ready"}
+	}
+	searchableJobs, ok := s.jobs.(SearchableJobInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "Markup result service is not configured"}
+	}
+	return searchableJobs.GetArtifact(ctx, jobID)
 }
 
 type ArtifactStore interface {
