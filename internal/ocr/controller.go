@@ -317,12 +317,21 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
 				return
 			}
+			if err := persistLocalTaskResult(taskCtx, r2Key, outPath); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to persist completed document locally.", owner)
+				return
+			}
 			if err := billing.Default.Commit(reservationID); err != nil {
 				_ = billing.Default.Release(reservationID)
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 				return
 			}
-			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			localResultPath := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(r2Key))
+			// Set must receive the durable filesystem path, not the local object
+			// key; SetWithKey intentionally represents result arguments as R2
+			// keys. The durable copy survives temporary-job cleanup.
+			_ = tasks.Registry.Set(id, "COMPLETED", 100, localResultPath, "")
 			return
 		}
 
@@ -548,12 +557,20 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
 				return
 			}
+			if err := persistLocalTaskResult(taskCtx, r2Key, outPath); err != nil {
+				_ = billing.Default.Release(reservationID)
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to persist completed document locally.", owner)
+				return
+			}
 			if err := billing.Default.Commit(reservationID); err != nil {
 				_ = billing.Default.Release(reservationID)
 				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
 				return
 			}
-			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			localResultPath := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(r2Key))
+			// Keep the local fallback as a durable filesystem result URL. The
+			// managed branch above persists an R2 key and uses SetWithKey.
+			_ = tasks.Registry.Set(id, "COMPLETED", 100, localResultPath, "")
 			return
 		}
 
@@ -578,6 +595,10 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 	}(taskId, tempPaths, reservation.ID, lang, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
+}
+
+func persistLocalTaskResult(ctx context.Context, key, sourcePath string) error {
+	return storage.SaveLocalFile(ctx, key, sourcePath)
 }
 
 func (ctrl *Controller) Languages(c *fiber.Ctx) error {

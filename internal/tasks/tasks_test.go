@@ -64,6 +64,9 @@ func TestTaskRegistry_RedisOperations(t *testing.T) {
 	if t3.Status != "COMPLETED" || t3.ResultURL != "/tmp/output.pdf" {
 		t.Errorf("Unexpected updated status: %+v", t3)
 	}
+	if t3.ResultKey != "" {
+		t.Errorf("Local filesystem completion must not be represented as an object key: %+v", t3)
+	}
 
 	// 5. Verify TTL set
 	ttl := client.TTL(context.Background(), TaskKeyPrefix+taskID).Val()
