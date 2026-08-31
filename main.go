@@ -144,7 +144,7 @@ func main() {
 
 	ocrV2Service := ocrv2.NewService(ocrv2.NewWorkerClient())
 	ocrV2Controller := ocrv2.NewController(ocrV2Service)
-	ocrv2.RegisterRoutes(apiGroup, ocrV2Controller)
+	ocrv2.RegisterRoutes(apiGroup, ocrV2Controller, identityStore)
 
 	editService := edit.NewService()
 	editController := edit.NewController(editService)

@@ -121,6 +121,7 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 		"native_first":    true,
 		"languages":       capabilities.Languages,
 		"language_policy": capabilities.LanguagePolicy,
+		"routing_modes":   capabilities.RoutingModes,
 		"engines": []fiber.Map{
 			{"id": "pymupdf_native", "available": true, "capabilities": []string{"TEXT", "BLOCK_GEOMETRY", "READING_ORDER"}},
 			{"id": "pdfplumber_native", "available": true, "capabilities": []string{"TABLES"}},

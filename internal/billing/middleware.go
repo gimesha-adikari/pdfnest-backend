@@ -12,7 +12,6 @@ import (
 
 func Use(tool Tool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-
 		identityType, _ := c.Locals(identity.LocalIdentityType).(string)
 		identityID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
 		if strings.TrimSpace(identityID) == "" {
@@ -22,59 +21,7 @@ func Use(tool Tool) fiber.Handler {
 		}
 
 		if identityType == string(identity.TypeGuest) {
-			if GuestQuota == nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error": "guest quota store not configured",
-				})
-			}
-
-			pages, images, err := EstimateFromRequest(c, tool)
-			if err != nil {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-					"error": err.Error(),
-				})
-			}
-
-			ctx := identity.RequestContext(c)
-			reservation, err := GuestQuota.Reserve(ctx, identityID, tool, pages, images, c.Path())
-			if err != nil {
-				var berr *BillingError
-				if errors.As(err, &berr) {
-					berr.Tool = tool.Name
-					return c.Status(fiber.StatusTooManyRequests).JSON(berr)
-				}
-
-				return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
-					"code":    "BILLING_ERROR",
-					"title":   "Unable to process request",
-					"message": err.Error(),
-					"tool":    tool.Name,
-				})
-			}
-
-			c.Locals("billing_reservation_id", reservation.ID)
-			c.Locals("billing_tool", tool.Name)
-			c.Locals("billing_kind", "guest")
-
-			err = c.Next()
-			if err != nil {
-				_ = GuestQuota.Release(ctx, reservation.ID)
-				return err
-			}
-
-			if c.Response().StatusCode() >= 400 {
-				_ = GuestQuota.Release(ctx, reservation.ID)
-				return nil
-			}
-
-			if err := GuestQuota.Commit(ctx, reservation.ID); err != nil {
-				log.Printf("[BILLING] guest commit failed: %v", err)
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-					"error": "failed to finalize guest usage",
-				})
-			}
-
-			return nil
+			return runGuestQuota(c, tool, identityID)
 		}
 
 		pages, images, err := EstimateFromRequest(c, tool)
@@ -126,4 +73,68 @@ func Use(tool Tool) fiber.Handler {
 
 		return nil
 	}
+}
+
+// UseGuestOnly applies the existing anonymous quota boundary without changing
+// billing behavior for authenticated users. It is intended for products whose
+// job ownership and resource limits already support guest identities.
+func UseGuestOnly(tool Tool) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		identityType, _ := c.Locals(identity.LocalIdentityType).(string)
+		identityID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+		if strings.TrimSpace(identityID) == "" {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "missing identity"})
+		}
+		if identityType != string(identity.TypeGuest) {
+			return c.Next()
+		}
+		return runGuestQuota(c, tool, identityID)
+	}
+}
+
+func runGuestQuota(c *fiber.Ctx, tool Tool, identityID string) error {
+	if GuestQuota == nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "guest quota store not configured",
+		})
+	}
+
+	pages, images, err := EstimateFromRequest(c, tool)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	ctx := identity.RequestContext(c)
+	reservation, err := GuestQuota.Reserve(ctx, identityID, tool, pages, images, c.Path())
+	if err != nil {
+		var berr *BillingError
+		if errors.As(err, &berr) {
+			berr.Tool = tool.Name
+			return c.Status(fiber.StatusTooManyRequests).JSON(berr)
+		}
+		return c.Status(fiber.StatusTooManyRequests).JSON(fiber.Map{
+			"code":    "BILLING_ERROR",
+			"title":   "Unable to process request",
+			"message": err.Error(),
+			"tool":    tool.Name,
+		})
+	}
+
+	c.Locals("billing_reservation_id", reservation.ID)
+	c.Locals("billing_tool", tool.Name)
+	c.Locals("billing_kind", "guest")
+
+	if err := c.Next(); err != nil {
+		_ = GuestQuota.Release(ctx, reservation.ID)
+		return err
+	}
+	if c.Response().StatusCode() >= 400 {
+		_ = GuestQuota.Release(ctx, reservation.ID)
+		return nil
+	}
+	if err := GuestQuota.Commit(ctx, reservation.ID); err != nil {
+		log.Printf("[BILLING] guest commit failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to finalize guest usage"})
+	}
+	return nil
 }

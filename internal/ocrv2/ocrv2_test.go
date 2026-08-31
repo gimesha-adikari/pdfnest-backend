@@ -103,8 +103,7 @@ func TestServiceCapabilitiesExposeOnlyProductSafeProjection(t *testing.T) {
 	}
 }
 
-func TestControllerCapabilitiesRequiresAuthAndReturnsSafeFields(t *testing.T) {
-	t.Setenv("JWT_SECRET", "test-secret")
+func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 	service := NewService(&fakeCapabilitiesInvoker{
 		capabilities: &Capabilities{
 			Languages:    []LanguageCapability{{Code: "eng", Name: "English"}},
@@ -113,29 +112,15 @@ func TestControllerCapabilitiesRequiresAuthAndReturnsSafeFields(t *testing.T) {
 	})
 	controller := NewController(service)
 	app := fiber.New()
-	app.Get("/api/v2/ocr/text/capabilities", middleware.Protect(), controller.Capabilities)
+	app.Get("/api/v2/ocr/text/capabilities", controller.Capabilities)
+	app.Get("/api/v2/ocr/structured/capabilities", controller.StructuredCapabilities)
 
-	unauthenticated, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/ocr/text/capabilities", nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if unauthenticated.StatusCode != fiber.StatusUnauthorized {
-		t.Fatalf("expected capabilities auth gate, got %d", unauthenticated.StatusCode)
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": "user-alice", "role": "user"})
-	serialized, err := token.SignedString([]byte("test-secret"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/v2/ocr/text/capabilities", nil)
-	req.AddCookie(&http.Cookie{Name: "auth_token", Value: serialized})
-	response, err := app.Test(req)
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/ocr/text/capabilities", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if response.StatusCode != fiber.StatusOK {
-		t.Fatalf("expected safe capabilities response, got %d", response.StatusCode)
+		t.Fatalf("expected public safe capabilities response, got %d", response.StatusCode)
 	}
 	var payload Capabilities
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
@@ -143,6 +128,20 @@ func TestControllerCapabilitiesRequiresAuthAndReturnsSafeFields(t *testing.T) {
 	}
 	if len(payload.Languages) != 1 || len(payload.RoutingModes) != 1 {
 		t.Fatalf("unexpected capability response: %+v", payload)
+	}
+	structuredResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/ocr/structured/capabilities", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if structuredResponse.StatusCode != fiber.StatusOK {
+		t.Fatalf("expected public structured capabilities response, got %d", structuredResponse.StatusCode)
+	}
+	var structuredPayload map[string]any
+	if err := json.NewDecoder(structuredResponse.Body).Decode(&structuredPayload); err != nil {
+		t.Fatal(err)
+	}
+	if structuredPayload["native_first"] != true {
+		t.Fatalf("expected native-first structured capability response: %+v", structuredPayload)
 	}
 }
 
