@@ -111,6 +111,13 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 	if err != nil {
 		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
 	}
+	structuredLanguages := make([]LanguageCapability, 0, len(capabilities.Languages))
+	for _, language := range capabilities.Languages {
+		switch strings.ToLower(strings.TrimSpace(language.Code)) {
+		case "eng", "sin", "tam":
+			structuredLanguages = append(structuredLanguages, language)
+		}
+	}
 	return cctx.JSON(fiber.Map{
 		"schema_version": "ocr_v2_structured_capabilities.v1",
 		"service_ready":  true,
@@ -119,7 +126,7 @@ func (c *Controller) StructuredCapabilities(cctx *fiber.Ctx) error {
 			ProfilePDFMarkdownV2:        fiber.Map{"available": true, "input_formats": []string{"application/pdf"}},
 		},
 		"native_first":    true,
-		"languages":       capabilities.Languages,
+		"languages":       structuredLanguages,
 		"language_policy": capabilities.LanguagePolicy,
 		"routing_modes":   capabilities.RoutingModes,
 		"engines": []fiber.Map{
@@ -270,11 +277,11 @@ func (c *Controller) CreateSearchableJob(cctx *fiber.Ctx) error {
 	job, execErr := c.service.CreateSearchablePDFJob(cctx.UserContext(), inputs, request, owner)
 	if execErr != nil {
 		idempotency.Release(cctx, nil)
-		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: publicMessage(execErr)})
+		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: searchablePublicMessage(execErr)})
 	}
 	if err := idempotency.SetTaskID(cctx, job.JobID, nil); err != nil {
 		_, _ = c.service.CancelJob(cctx.UserContext(), job.JobID, owner)
-		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job persistence is temporarily unavailable."})
+		return cctx.Status(fiber.StatusServiceUnavailable).JSON(Error{Code: ErrTaskStorageUnavailable, Message: "We couldn't save your searchable PDF. Please try again."})
 	}
 	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
@@ -287,7 +294,7 @@ func (c *Controller) ReplaySearchableJob(cctx *fiber.Ctx, record idempotency.Rec
 func (c *Controller) SearchableJobResult(cctx *fiber.Ctx) error {
 	artifact, err := c.service.GetOwnedSearchableArtifact(cctx.UserContext(), cctx.Params("job_id"), c.owner(cctx))
 	if err != nil {
-		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: publicMessage(err)})
+		return cctx.Status(errorStatus(err)).JSON(Error{Code: errorCode(err), Message: searchablePublicMessage(err)})
 	}
 	cctx.Type("pdf")
 	cctx.Set("Content-Type", "application/pdf")
@@ -427,7 +434,19 @@ func publicJobError(job *JobStatus) *Error {
 	if job.ErrorCode == "" || (strings.ToUpper(job.Status) != "FAILED" && strings.ToUpper(job.Status) != "CANCELLED") {
 		return nil
 	}
-	return &Error{Code: job.ErrorCode, Message: publicMessage(&WorkerError{Code: job.ErrorCode})}
+	err := &WorkerError{Code: job.ErrorCode}
+	message := publicMessage(err)
+	if job.Profile == ProfileSearchablePDFV2 && job.ErrorCode == ErrTaskStorageUnavailable {
+		message = "We couldn't save your searchable PDF. Please try again."
+	}
+	return &Error{Code: job.ErrorCode, Message: message}
+}
+
+func searchablePublicMessage(err error) string {
+	if errorCode(err) == ErrTaskStorageUnavailable {
+		return "We couldn't save your searchable PDF. Please try again."
+	}
+	return publicMessage(err)
 }
 
 func validPolicy(policy RoutingPolicy) bool {

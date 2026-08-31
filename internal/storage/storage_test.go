@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -31,5 +32,44 @@ func TestSaveLocalFileUsesDevelopmentLocalNamespace(t *testing.T) {
 	}
 	if !ObjectExists(context.Background(), "jobs/test.txt") {
 		t.Fatal("expected saved development object to exist")
+	}
+}
+
+func TestRemoteStorageSelectionIsExplicitInDevelopment(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("R2_BUCKET", "stale-development-bucket")
+	t.Setenv("STORAGE_MODE", "")
+	if RemoteStorageEnabled() {
+		t.Fatal("expected development storage to remain local without explicit STORAGE_MODE")
+	}
+
+	t.Setenv("STORAGE_MODE", "r2")
+	if !RemoteStorageEnabled() {
+		t.Fatal("expected explicit development STORAGE_MODE=r2 to enable remote storage")
+	}
+}
+
+func TestRemoteStorageRemainsRequiredInManagedEnvironments(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("STORAGE_MODE", "local")
+	if !RemoteStorageEnabled() {
+		t.Fatal("expected managed environments to require remote storage")
+	}
+}
+
+func TestDefaultLocalStorageMatchesWorkerContract(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("STORAGE_MODE", "local")
+	localRoot := t.TempDir()
+	t.Setenv("LOCAL_STORAGE_DIR", localRoot)
+	t.Setenv("ANALYZER_STORAGE_DIR", t.TempDir())
+	if got := GetLocalStorageDir(); got != localRoot {
+		t.Fatalf("expected shared local storage root %q to win over analyzer override, got %q", localRoot, got)
+	}
+
+	t.Setenv("LOCAL_STORAGE_DIR", "")
+	t.Setenv("ANALYZER_STORAGE_DIR", "")
+	if got, want := GetLocalStorageDir(), filepath.Join(os.TempDir(), "pdfnest-storage"); got != want {
+		t.Fatalf("expected shared default root %q, got %q", want, got)
 	}
 }

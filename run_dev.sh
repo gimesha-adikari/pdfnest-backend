@@ -28,6 +28,11 @@ fi
 
 PORT="${PORT:-${ENV_PORT:-8080}}"
 
+# OCR V2 local uploads and the Python worker resolve the same relative object
+# keys under one filesystem root. Remote storage remains an explicit mode.
+export STORAGE_MODE="${STORAGE_MODE:-local}"
+export LOCAL_STORAGE_DIR="${LOCAL_STORAGE_DIR:-/tmp/pdfnest-storage}"
+
 #############################################
 # Helpers
 #############################################

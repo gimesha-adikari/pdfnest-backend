@@ -47,6 +47,9 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found; using Render environment variables.")
 	}
+	if !storage.RemoteStorageEnabled() {
+		log.Printf("[OCR V2 STORAGE] local filesystem storage enabled at %s", storage.GetLocalStorageDir())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "migrate" {
 		if err := config.RunManagedMigrations(); err != nil {
 			log.Fatalf("Managed schema migration failed: %v", err)

@@ -27,16 +27,37 @@ func managedStorageRequired() bool {
 	}
 }
 
+// RemoteStorageEnabled makes development storage selection explicit. Local
+// development remains filesystem-backed even if a developer's dotenv file
+// contains stale R2 values; remote storage is opt-in locally and mandatory in
+// managed environments. This prevents a local run from unexpectedly sending
+// benchmark artifacts to a remote bucket without changing managed semantics.
+func RemoteStorageEnabled() bool {
+	if managedStorageRequired() {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("STORAGE_MODE"))) {
+	case "r2", "s3", "remote":
+		return true
+	case "local", "filesystem":
+		return false
+	default:
+		return false
+	}
+}
+
 // GetLocalStorageDir returns the absolute directory for local file persistence.
 // It is guaranteed to be absolute and independent of caller working directory.
 func GetLocalStorageDir() string {
-	dir := strings.TrimSpace(os.Getenv("ANALYZER_STORAGE_DIR"))
+	// OCR V2 backend and worker share this deterministic local namespace. Keep
+	// the general local storage override first so a stale analyzer-specific
+	// path cannot split the upload handoff from worker resolution.
+	dir := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_DIR"))
 	if dir == "" {
-		dir = strings.TrimSpace(os.Getenv("LOCAL_STORAGE_DIR"))
+		dir = strings.TrimSpace(os.Getenv("ANALYZER_STORAGE_DIR"))
 	}
 	if dir == "" {
-		// Default to a deterministic directory in /tmp/platen_storage or relative to binary
-		dir = filepath.Join(os.TempDir(), "platen_storage")
+		dir = filepath.Join(os.TempDir(), "pdfnest-storage")
 	}
 
 	absDir, err := filepath.Abs(dir)
@@ -118,7 +139,7 @@ func SaveLocalFile(ctx context.Context, key, sourcePath string) error {
 // store. It is used only to roll back a failed database registration after a
 // source file was safely persisted.
 func DeleteLocalObject(key string) error {
-	if managedStorageRequired() {
+	if RemoteStorageEnabled() {
 		return nil
 	}
 	sanitizedKey, err := sanitizeObjectKey(key)
@@ -135,7 +156,7 @@ func DeleteLocalObject(key string) error {
 // DeleteObject removes a server-created source or result object from the
 // configured durable store, with the existing local development fallback.
 func DeleteObject(ctx context.Context, key string) error {
-	if !managedStorageRequired() {
+	if !RemoteStorageEnabled() {
 		return DeleteLocalObject(key)
 	}
 	store, err := Default()
@@ -152,7 +173,7 @@ func ObjectExists(ctx context.Context, key string) bool {
 		return false
 	}
 
-	if !managedStorageRequired() {
+	if !RemoteStorageEnabled() {
 		// 1. Check local storage directory
 		localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
 		if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
@@ -170,7 +191,11 @@ func ObjectExists(ctx context.Context, key string) bool {
 		}
 	}
 
-	// 3. Check R2 if configured
+	if !RemoteStorageEnabled() {
+		return false
+	}
+
+	// 3. Check R2 when remote storage is explicitly enabled or required.
 	store, err := Default()
 	if err == nil && store != nil {
 		_, statErr := store.client.StatObject(ctx, store.bucket, sanitizedKey, minio.StatObjectOptions{})
@@ -201,7 +226,7 @@ func ResolveObject(ctx context.Context, key, prefix, suffix string) (string, fun
 		return "", nil, fmt.Errorf("invalid storage key: %w", err)
 	}
 
-	if !managedStorageRequired() {
+	if !RemoteStorageEnabled() {
 		// 1. Check local storage directory
 		localPath := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
 		if fi, err := os.Stat(localPath); err == nil && !fi.IsDir() {
@@ -217,7 +242,11 @@ func ResolveObject(ctx context.Context, key, prefix, suffix string) (string, fun
 		}
 	}
 
-	// 3. Check R2 if configured
+	if !RemoteStorageEnabled() {
+		return "", nil, fmt.Errorf("%w: object key '%s' could not be found locally", ErrObjectNotFound, key)
+	}
+
+	// 3. Check R2 when remote storage is explicitly enabled or required.
 	store, err := Default()
 	if err == nil && store != nil {
 		tmpPath, dlErr := store.DownloadToTemp(sanitizedKey, prefix, suffix)

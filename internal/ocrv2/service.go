@@ -257,7 +257,7 @@ type ArtifactStore interface {
 type objectArtifactStore struct{}
 
 func (objectArtifactStore) UploadFile(path, key, contentType string) error {
-	if strings.TrimSpace(os.Getenv("R2_BUCKET")) == "" {
+	if !storage.RemoteStorageEnabled() {
 		return storage.SaveLocalFile(context.Background(), key, path)
 	}
 	store, err := storage.Default()

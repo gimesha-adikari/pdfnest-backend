@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -15,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/middleware"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/uploads"
 	"pdfnest-backend/internal/worker"
 
@@ -43,6 +47,7 @@ type fakeAsyncInvoker struct {
 	result    *TextResponse
 	submitted JobSubmitRequest
 	cancelled bool
+	duringGet func()
 }
 
 func (f *fakeAsyncInvoker) SubmitJob(_ context.Context, request JobSubmitRequest) (*JobStatus, error) {
@@ -54,7 +59,12 @@ func (f *fakeAsyncInvoker) SubmitJob(_ context.Context, request JobSubmitRequest
 	return f.job, nil
 }
 
-func (f *fakeAsyncInvoker) GetJob(context.Context, string) (*JobStatus, error) { return f.job, nil }
+func (f *fakeAsyncInvoker) GetJob(context.Context, string) (*JobStatus, error) {
+	if f.duringGet != nil {
+		f.duringGet()
+	}
+	return f.job, nil
+}
 
 func (f *fakeAsyncInvoker) GetResult(context.Context, string) (*TextResponse, error) {
 	return f.result, nil
@@ -106,7 +116,7 @@ func TestServiceCapabilitiesExposeOnlyProductSafeProjection(t *testing.T) {
 func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 	service := NewService(&fakeCapabilitiesInvoker{
 		capabilities: &Capabilities{
-			Languages:    []LanguageCapability{{Code: "eng", Name: "English"}},
+			Languages:    []LanguageCapability{{Code: "eng", Name: "English"}, {Code: "sin", Name: "Sinhala"}, {Code: "tam", Name: "Tamil"}, {Code: "jpn", Name: "Japanese"}},
 			RoutingModes: []RoutingCapability{{ID: RoutingAuto, Label: "Balanced", Description: "Balanced", Available: true}},
 		},
 	})
@@ -114,6 +124,8 @@ func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 	app := fiber.New()
 	app.Get("/api/v2/ocr/text/capabilities", controller.Capabilities)
 	app.Get("/api/v2/ocr/structured/capabilities", controller.StructuredCapabilities)
+	app.Get("/api/v2/ocr/searchable-pdf/capabilities", controller.SearchableCapabilities)
+	app.Get("/api/v2/ocr/markup/capabilities", controller.MarkupCapabilities)
 
 	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/ocr/text/capabilities", nil))
 	if err != nil {
@@ -126,7 +138,7 @@ func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Languages) != 1 || len(payload.RoutingModes) != 1 {
+	if len(payload.Languages) != 4 || len(payload.RoutingModes) != 1 {
 		t.Fatalf("unexpected capability response: %+v", payload)
 	}
 	structuredResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/v2/ocr/structured/capabilities", nil))
@@ -142,6 +154,26 @@ func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 	}
 	if structuredPayload["native_first"] != true {
 		t.Fatalf("expected native-first structured capability response: %+v", structuredPayload)
+	}
+	structuredLanguages, ok := structuredPayload["languages"].([]any)
+	if !ok || len(structuredLanguages) != 3 {
+		t.Fatalf("expected bounded structured language projection, got %+v", structuredPayload["languages"])
+	}
+	for _, raw := range structuredLanguages {
+		code, _ := raw.(map[string]any)["code"].(string)
+		if code != "eng" && code != "sin" && code != "tam" {
+			t.Fatalf("unexpected structured language %q", code)
+		}
+	}
+	for _, path := range []string{"/api/v2/ocr/searchable-pdf/capabilities", "/api/v2/ocr/markup/capabilities"} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != fiber.StatusOK {
+			t.Fatalf("expected public %s response, got %d", path, response.StatusCode)
+		}
+		_ = response.Body.Close()
 	}
 }
 
@@ -235,6 +267,52 @@ func TestSearchableServicePersistsOrderedImageInputs(t *testing.T) {
 	}
 }
 
+func TestSearchableServicePersistsFourInputsInSharedLocalNamespace(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	t.Setenv("ANALYZER_STORAGE_DIR", t.TempDir())
+
+	async := &fakeAsyncInvoker{}
+	service := NewService(&fakeInvoker{})
+	service.jobs = async
+	service.artifacts = objectArtifactStore{}
+	inputs := make([]*uploads.File, 0, 4)
+	for index := 0; index < 4; index++ {
+		name := fmt.Sprintf("page-%d.png", index+1)
+		path := filepath.Join(t.TempDir(), name)
+		content := append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, make([]byte, 8)...)
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+		header := &multipart.FileHeader{Filename: name, Size: int64(len(content)), Header: make(textproto.MIMEHeader)}
+		header.Header.Set("Content-Type", "image/png")
+		inputs = append(inputs, &uploads.File{Path: path, Header: header})
+	}
+
+	job, err := service.CreateSearchablePDFJob(context.Background(), inputs, TextRequest{RequestID: "searchable-four", Profile: ProfileSearchablePDFV2, Language: "auto", RoutingPolicy: RoutingAuto}, "guest:four-inputs")
+	if err != nil || job == nil {
+		t.Fatalf("expected four-input submission, job=%+v err=%v", job, err)
+	}
+	if len(async.submitted.SourceFiles) != 4 {
+		t.Fatalf("expected four ordered source files, got %d", len(async.submitted.SourceFiles))
+	}
+	defer func() {
+		for _, source := range async.submitted.SourceFiles {
+			_ = storage.DeleteLocalObject(source.SourceKey)
+		}
+	}()
+	for index, source := range async.submitted.SourceFiles {
+		if source.SourceName != fmt.Sprintf("page-%d.png", index+1) {
+			t.Fatalf("source order changed at %d: %+v", index, async.submitted.SourceFiles)
+		}
+		path := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(source.SourceKey))
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("worker could not resolve persisted source %q at %q: %v", source.SourceKey, path, statErr)
+		}
+	}
+}
+
 func TestPublicJobStatusDoesNotExposeWorkerIdentityOrStorageKey(t *testing.T) {
 	now := time.Now().UTC()
 	page := 2
@@ -270,6 +348,43 @@ func TestControllerRejectsAsyncJobAccessForDifferentAuthenticatedUser(t *testing
 	}
 	if resp.StatusCode != fiber.StatusForbidden {
 		t.Fatalf("expected cross-user job access to be forbidden, got %d", resp.StatusCode)
+	}
+}
+
+func TestSearchableStatusReadDoesNotAcquireExecutionLease(t *testing.T) {
+	t.Setenv("JWT_SECRET", "status-read-test-secret")
+	now := time.Now().UTC()
+	observedActive := -1
+	async := &fakeAsyncInvoker{
+		job: &JobStatus{
+			JobID: "123e4567-e89b-12d3-a456-426614174000", Status: "running", Profile: ProfileSearchablePDFV2,
+			Language: "eng", RoutingPolicy: RoutingAuto, CreatedAt: now, UpdatedAt: now,
+			OwnerIdentity: "user:alice", TotalPages: 1,
+		},
+	}
+	async.duringGet = func() { observedActive = limiter.Default.ActiveCount() }
+	service := NewService(&fakeInvoker{})
+	service.jobs = async
+	app := fiber.New()
+	RegisterRoutes(app, NewController(service), &identity.Store{})
+
+	claims := jwt.MapClaims{"user_id": "user:alice", "role": "user", "exp": time.Now().Add(time.Hour).Unix()}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("status-read-test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v2/ocr/searchable-pdf/jobs/123e4567-e89b-12d3-a456-426614174000", nil)
+	request.AddCookie(&http.Cookie{Name: "auth_token", Value: token})
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected owner-scoped status read, got %d", response.StatusCode)
+	}
+	if observedActive != 0 {
+		t.Fatalf("expected status read to hold no execution lease, observed active=%d", observedActive)
 	}
 }
 
