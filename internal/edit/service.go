@@ -11,9 +11,16 @@ type Service interface {
 }
 
 // OCRV2Service is an explicit opt-in seam for the V2 editor integration. The
-// legacy Service contract remains unchanged for V1 callers.
+// Studio path uses this method and remains on the worker's internal engine.
 type OCRV2Service interface {
 	ExtractLayoutV2(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error)
+}
+
+// GeneralEditorOCRV2Service is the General Editor-specific V2 seam. It is
+// separate from OCRV2Service because Studio shares the worker endpoint but is
+// intentionally not part of this consumer migration.
+type GeneralEditorOCRV2Service interface {
+	ExtractLayoutV2ForGeneralEditor(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error)
 }
 
 type service struct{}

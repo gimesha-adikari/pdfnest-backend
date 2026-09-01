@@ -67,8 +67,53 @@ type TextResponse struct {
 	Error         *Error       `json:"error,omitempty"`
 }
 
+// MarkupPreviewWord is the minimal authorized projection needed to select
+// OCR-backed text in the browser. It contains no engine or storage details.
+type MarkupPreviewWord struct {
+	ID         string   `json:"id"`
+	Text       string   `json:"text"`
+	X          float64  `json:"x"`
+	Y          float64  `json:"y"`
+	Width      float64  `json:"width"`
+	Height     float64  `json:"height"`
+	Order      int      `json:"order"`
+	Confidence *float64 `json:"confidence,omitempty"`
+}
+
+type MarkupPreviewPage struct {
+	PageIndex         int                 `json:"page_index"`
+	PageNumber        int                 `json:"page_number"`
+	PageID            string              `json:"page_id"`
+	Width             float64             `json:"width"`
+	Height            float64             `json:"height"`
+	Rotation          int                 `json:"rotation"`
+	CoordinateSpace   string              `json:"coordinate_space"`
+	CropBox           []float64           `json:"crop_box,omitempty"`
+	Classification    string              `json:"classification"`
+	Kind              string              `json:"kind"`
+	SelectionMode     string              `json:"selection_mode"`
+	Status            string              `json:"status"`
+	HasSelectableText bool                `json:"has_selectable_text"`
+	WordCount         int                 `json:"word_count"`
+	ReadingOrder      []string            `json:"reading_order"`
+	Words             []MarkupPreviewWord `json:"words"`
+	Language          map[string]any      `json:"language,omitempty"`
+}
+
+type MarkupPreviewResponse struct {
+	SchemaVersion string              `json:"schema_version"`
+	Profile       string              `json:"profile"`
+	Status        string              `json:"status"`
+	PageCount     int                 `json:"page_count"`
+	Pages         []MarkupPreviewPage `json:"pages"`
+}
+
 type WorkerInvoker interface {
 	Execute(ctx context.Context, inputPath string, request TextRequest) (*TextResponse, error)
+}
+
+type MarkupPreviewInvoker interface {
+	Preview(ctx context.Context, inputPath string, request TextRequest) (*MarkupPreviewResponse, error)
 }
 
 type LanguageCapability struct {

@@ -3,6 +3,7 @@ package conversion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -156,7 +157,15 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 		scale = 2.0
 	}
 
-	imgBytes, err := cc.service.ConvertPageToImageStream(c.UserContext(), upload.Header, pageNum, scale)
+	ownerID := previewOwnerID(c)
+	if ownerID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"code":    "PREVIEW_IDENTITY_REQUIRED",
+			"message": "A preview identity is required.",
+		})
+	}
+
+	imgBytes, err := cc.service.ConvertPageToImageStream(c.UserContext(), upload.Header, pageNum, scale, ownerID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
 			"code":    "RASTER_ENGINE_CRASH",
@@ -166,7 +175,7 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "image/jpeg")
 	c.Set("Content-Length", strconv.Itoa(length(imgBytes)))
-	c.Set("Cache-Control", "public, max-age=60")
+	c.Set("Cache-Control", "private, max-age=60")
 
 	return c.Send(imgBytes)
 }
@@ -180,9 +189,18 @@ func (cc *Controller) CreatePreviewSessionHandler(c *fiber.Ctx) error {
 		})
 	}
 
+	ownerID := previewOwnerID(c)
+	if ownerID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"code":    "PREVIEW_IDENTITY_REQUIRED",
+			"message": "A preview identity is required.",
+		})
+	}
+
 	session, err := cc.service.CreatePreviewSession(
 		c.UserContext(),
 		upload.Header,
+		ownerID,
 	)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{
@@ -217,20 +235,32 @@ func (cc *Controller) StreamPreviewSessionPageHandler(c *fiber.Ctx) error {
 		scale = 2.0
 	}
 
+	ownerID := previewOwnerID(c)
+	if ownerID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"code":    "PREVIEW_IDENTITY_REQUIRED",
+			"message": "A preview identity is required.",
+		})
+	}
+
 	imgBytes, err := cc.service.GetPreviewSessionPage(
 		c.UserContext(),
 		sessionID,
 		pageNum,
 		scale,
+		ownerID,
 	)
 	if err != nil {
-		if strings.Contains(
-			err.Error(),
-			"preview session not found",
-		) {
+		if errors.Is(err, ErrPreviewSessionForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"code":    "PREVIEW_SESSION_FORBIDDEN",
+				"message": "This preview is not available to this identity.",
+			})
+		}
+		if errors.Is(err, ErrPreviewSessionNotFound) {
 			return c.Status(404).JSON(fiber.Map{
 				"code":    "SESSION_NOT_FOUND",
-				"message": err.Error(),
+				"message": "This preview session is no longer available.",
 			})
 		}
 
@@ -262,10 +292,25 @@ func (cc *Controller) DeletePreviewSessionHandler(c *fiber.Ctx) error {
 		})
 	}
 
+	ownerID := previewOwnerID(c)
+	if ownerID == "" {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"code":    "PREVIEW_IDENTITY_REQUIRED",
+			"message": "A preview identity is required.",
+		})
+	}
+
 	if err := cc.service.DeletePreviewSession(
 		c.UserContext(),
 		sessionID,
+		ownerID,
 	); err != nil {
+		if errors.Is(err, ErrPreviewSessionForbidden) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"code":    "PREVIEW_SESSION_FORBIDDEN",
+				"message": "This preview is not available to this identity.",
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{
 			"code":    "PREVIEW_SESSION_DELETE_FAILED",
 			"message": err.Error(),
@@ -273,6 +318,11 @@ func (cc *Controller) DeletePreviewSessionHandler(c *fiber.Ctx) error {
 	}
 
 	return c.SendStatus(204)
+}
+
+func previewOwnerID(c *fiber.Ctx) string {
+	ownerID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	return strings.TrimSpace(ownerID)
 }
 
 func length(b []byte) int {

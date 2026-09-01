@@ -153,6 +153,30 @@ func (c *Controller) MarkupCapabilities(cctx *fiber.Ctx) error {
 	})
 }
 
+func (c *Controller) MarkupPreview(cctx *fiber.Ctx) error {
+	upload, err := uploads.MustPDFFile(cctx, "file")
+	if err != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "A valid PDF upload is required."})
+	}
+	requestID := strings.TrimSpace(cctx.Get("X-Request-ID"))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	if len(requestID) > 128 {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Invalid request identifier."})
+	}
+	policy := RoutingPolicy(strings.ToUpper(strings.TrimSpace(cctx.FormValue("routing_policy", string(RoutingFast)))))
+	if !validPolicy(policy) {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR routing policy."})
+	}
+	request := textRequestFromContext(cctx, requestID, ProfileMarkupV2, policy)
+	preview, execErr := c.service.PreviewMarkup(cctx.UserContext(), upload.Path, request)
+	if execErr != nil {
+		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: previewPublicMessage(execErr)})
+	}
+	return cctx.Status(fiber.StatusOK).JSON(preview)
+}
+
 func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
 	upload, err := uploads.MustPDFFile(cctx, "file")
 	if err != nil {
@@ -547,5 +571,24 @@ func publicMessage(err error) string {
 		return "You are not authorized to access this OCR V2 job."
 	default:
 		return "OCR V2 could not process the document."
+	}
+}
+
+func previewPublicMessage(err error) string {
+	switch errorCode(err) {
+	case ErrUnsupportedLanguage:
+		return "The selected language is not available for selectable text."
+	case ErrEngineUnavailable:
+		return "Selectable text is temporarily unavailable."
+	case ErrTimeout:
+		return "Preparing selectable text took too long."
+	case ErrCancelled:
+		return "Selectable text preparation was cancelled."
+	case ErrWordGeometryUnavailable:
+		return "Selectable text is not available for this document."
+	case ErrInvalidInput:
+		return "Choose a readable PDF to prepare selectable text."
+	default:
+		return "Selectable text could not be prepared."
 	}
 }

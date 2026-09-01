@@ -86,11 +86,11 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	var submission *WorkerJobSubmission
 	if strings.EqualFold(strings.TrimSpace(c.FormValue("ocr_v2")), "true") {
-		v2, ok := cr.service.(OCRV2Service)
+		v2, ok := cr.service.(GeneralEditorOCRV2Service)
 		if !ok {
 			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "OCR V2 editor extraction is unavailable"})
 		}
-		submission, err = v2.ExtractLayoutV2(sourceKey, filePassword, upload.Header.Filename)
+		submission, err = v2.ExtractLayoutV2ForGeneralEditor(sourceKey, filePassword, upload.Header.Filename)
 	} else {
 		submission, err = cr.service.ExtractLayout(sourceKey, filePassword, upload.Header.Filename)
 	}

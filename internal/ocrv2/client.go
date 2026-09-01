@@ -102,6 +102,65 @@ func (c *Client) Execute(ctx context.Context, inputPath string, request TextRequ
 	return &decoded, nil
 }
 
+func (c *Client) Preview(ctx context.Context, inputPath string, request TextRequest) (*MarkupPreviewResponse, error) {
+	if c == nil || c.HTTP == nil {
+		return nil, &WorkerError{Code: ErrWorkerAuthentication, Message: "worker client is not configured"}
+	}
+	fields := map[string]string{
+		"request_id":     request.RequestID,
+		"profile":        request.Profile,
+		"language":       request.Language,
+		"routing_policy": string(request.RoutingPolicy),
+	}
+	if request.LanguageMode != "" {
+		fields["language_mode"] = request.LanguageMode
+	}
+	body, contentType, err := worker.CreateMultipartRequest(inputPath, func(writer *multipart.Writer) error {
+		for key, value := range fields {
+			if err := writer.WriteField(key, value); err != nil {
+				return err
+			}
+		}
+		for _, language := range request.Languages {
+			if err := writer.WriteField("languages", language); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/internal/ocr/v2/markup/preview", body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Request-ID", request.RequestID)
+	if c.Signer != nil {
+		if err := c.Signer(req); err != nil {
+			return nil, err
+		}
+	}
+	response, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, decodeWorkerJSONError(data, response.StatusCode)
+	}
+	var decoded MarkupPreviewResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, &WorkerError{Code: ErrInvalidEngineOutput, HTTPStatus: response.StatusCode, Message: "worker returned malformed OCR markup preview"}
+	}
+	return &decoded, nil
+}
+
 func (c *Client) GetCapabilities(ctx context.Context) (*Capabilities, error) {
 	data, status, err := c.doJSON(ctx, http.MethodGet, "/internal/ocr/v2/capabilities", "", nil)
 	if err != nil {

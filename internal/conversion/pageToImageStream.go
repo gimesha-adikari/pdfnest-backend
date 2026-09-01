@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"io"
@@ -24,10 +25,17 @@ import (
 
 type previewWorkerSession struct {
 	ID           string
+	OwnerID      string
 	SourceHash   string
+	PageCount    int
 	CreatedAt    time.Time
 	LastAccessed time.Time
 }
+
+var (
+	ErrPreviewSessionNotFound  = errors.New("preview session not found")
+	ErrPreviewSessionForbidden = errors.New("preview session belongs to another identity")
+)
 
 type previewSessionCache struct {
 	mu       sync.RWMutex
@@ -40,19 +48,29 @@ var globalPreviewSessions = &previewSessionCache{
 	byHash:   make(map[string]string),
 }
 
-func (s *previewSessionCache) getByID(id string) (*previewWorkerSession, bool) {
+func previewSessionHashKey(ownerID, sourceHash string) string {
+	return ownerID + "\x00" + sourceHash
+}
+
+func (s *previewSessionCache) getByIDForOwner(id, ownerID string) (*previewWorkerSession, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	session, ok := s.sessions[id]
-	return session, ok
+	if !ok {
+		return nil, ErrPreviewSessionNotFound
+	}
+	if session.OwnerID != ownerID {
+		return nil, ErrPreviewSessionForbidden
+	}
+	return session, nil
 }
 
-func (s *previewSessionCache) getByHash(hash string) (*previewWorkerSession, bool) {
+func (s *previewSessionCache) getByHash(ownerID, hash string) (*previewWorkerSession, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	sessionID, ok := s.byHash[hash]
+	sessionID, ok := s.byHash[previewSessionHashKey(ownerID, hash)]
 	if !ok {
 		return nil, false
 	}
@@ -66,7 +84,7 @@ func (s *previewSessionCache) put(session *previewWorkerSession) {
 	defer s.mu.Unlock()
 
 	s.sessions[session.ID] = session
-	s.byHash[session.SourceHash] = session.ID
+	s.byHash[previewSessionHashKey(session.OwnerID, session.SourceHash)] = session.ID
 }
 
 func (s *previewSessionCache) touch(id string) {
@@ -89,21 +107,23 @@ func (s *previewSessionCache) deleteByID(id string) {
 
 	delete(s.sessions, id)
 
-	if mappedID, ok := s.byHash[session.SourceHash]; ok && mappedID == id {
-		delete(s.byHash, session.SourceHash)
+	cacheKey := previewSessionHashKey(session.OwnerID, session.SourceHash)
+	if mappedID, ok := s.byHash[cacheKey]; ok && mappedID == id {
+		delete(s.byHash, cacheKey)
 	}
 }
 
-func (s *previewSessionCache) deleteByHash(hash string) {
+func (s *previewSessionCache) deleteByHash(ownerID, hash string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	sessionID, ok := s.byHash[hash]
+	cacheKey := previewSessionHashKey(ownerID, hash)
+	sessionID, ok := s.byHash[cacheKey]
 	if !ok {
 		return
 	}
 
-	delete(s.byHash, hash)
+	delete(s.byHash, cacheKey)
 	delete(s.sessions, sessionID)
 }
 
@@ -112,6 +132,7 @@ func (s *ConversionService) ConvertPageToImageStream(
 	fileHeader *multipart.FileHeader,
 	pageNum int,
 	scale float64,
+	ownerID string,
 ) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -127,6 +148,10 @@ func (s *ConversionService) ConvertPageToImageStream(
 
 	if scale <= 0 {
 		return nil, fmt.Errorf("preview scale must be greater than 0")
+	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return nil, fmt.Errorf("preview identity is required")
 	}
 
 	_, targetPdfPath, cleanup, err := s.preparePreviewPdf(
@@ -151,10 +176,10 @@ func (s *ConversionService) ConvertPageToImageStream(
 		workerBaseURL = "http://localhost:8000"
 	}
 
-	session, ok := globalPreviewSessions.getByHash(sourceHash)
+	session, ok := globalPreviewSessions.getByHash(ownerID, sourceHash)
 
 	if !ok {
-		sessionID, createErr := s.createWorkerPreviewSession(
+		workerSession, createErr := s.createWorkerPreviewSession(
 			ctx,
 			workerBaseURL,
 			targetPdfPath,
@@ -164,8 +189,10 @@ func (s *ConversionService) ConvertPageToImageStream(
 		}
 
 		session = &previewWorkerSession{
-			ID:           sessionID,
+			ID:           workerSession.ID,
+			OwnerID:      ownerID,
 			SourceHash:   sourceHash,
+			PageCount:    workerSession.PageCount,
 			CreatedAt:    time.Now(),
 			LastAccessed: time.Now(),
 		}
@@ -189,9 +216,9 @@ func (s *ConversionService) ConvertPageToImageStream(
 		return imageBytes, nil
 	}
 
-	globalPreviewSessions.deleteByHash(sourceHash)
+	globalPreviewSessions.deleteByHash(ownerID, sourceHash)
 
-	sessionID, recreateErr := s.createWorkerPreviewSession(
+	workerSession, recreateErr := s.createWorkerPreviewSession(
 		ctx,
 		workerBaseURL,
 		targetPdfPath,
@@ -201,8 +228,10 @@ func (s *ConversionService) ConvertPageToImageStream(
 	}
 
 	newSession := &previewWorkerSession{
-		ID:           sessionID,
+		ID:           workerSession.ID,
+		OwnerID:      ownerID,
 		SourceHash:   sourceHash,
+		PageCount:    workerSession.PageCount,
 		CreatedAt:    time.Now(),
 		LastAccessed: time.Now(),
 	}
@@ -212,7 +241,7 @@ func (s *ConversionService) ConvertPageToImageStream(
 	return s.renderWorkerSessionPage(
 		ctx,
 		workerBaseURL,
-		sessionID,
+		workerSession.ID,
 		pageNum,
 		dpi,
 	)
@@ -330,10 +359,11 @@ func (s *ConversionService) createWorkerPreviewSession(
 	ctx context.Context,
 	workerBaseURL string,
 	pdfPath string,
-) (string, error) {
+) (previewRenderSessionInfo, error) {
+	var empty previewRenderSessionInfo
 	pdfFile, err := os.Open(pdfPath)
 	if err != nil {
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"failed to open preview PDF: %w",
 			err,
 		)
@@ -380,7 +410,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 		pr,
 	)
 	if err != nil {
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"failed to build render session request: %w",
 			err,
 		)
@@ -393,7 +423,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 
 	resp, err := worker.Client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"render session creation failed: %w",
 			err,
 		)
@@ -404,7 +434,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"render session creation failed: status=%s body=%s",
 			resp.Status,
 			strings.TrimSpace(string(body)),
@@ -420,19 +450,27 @@ func (s *ConversionService) createWorkerPreviewSession(
 	if err := json.NewDecoder(
 		resp.Body,
 	).Decode(&response); err != nil {
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"failed to decode render session response: %w",
 			err,
 		)
 	}
 
 	if response.SessionID == "" {
-		return "", fmt.Errorf(
+		return empty, fmt.Errorf(
 			"render worker returned an empty session ID",
 		)
 	}
 
-	return response.SessionID, nil
+	return previewRenderSessionInfo{
+		ID:        response.SessionID,
+		PageCount: response.PageCount,
+	}, nil
+}
+
+type previewRenderSessionInfo struct {
+	ID        string
+	PageCount int
 }
 
 func (s *ConversionService) renderWorkerSessionPage(
@@ -523,6 +561,7 @@ func hashFile(path string) (string, error) {
 func (s *ConversionService) CreatePreviewSession(
 	ctx context.Context,
 	fileHeader *multipart.FileHeader,
+	ownerID string,
 ) (map[string]any, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -530,6 +569,10 @@ func (s *ConversionService) CreatePreviewSession(
 
 	if fileHeader == nil {
 		return nil, fmt.Errorf("preview file is required")
+	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return nil, fmt.Errorf("preview identity is required")
 	}
 
 	_, targetPdfPath, cleanup, err := s.preparePreviewPdf(
@@ -554,15 +597,16 @@ func (s *ConversionService) CreatePreviewSession(
 		workerBaseURL = "http://localhost:8000"
 	}
 
-	if existing, ok := globalPreviewSessions.getByHash(sourceHash); ok {
+	if existing, ok := globalPreviewSessions.getByHash(ownerID, sourceHash); ok {
 		globalPreviewSessions.touch(existing.ID)
 
 		return map[string]any{
 			"session_id": existing.ID,
+			"page_count": existing.PageCount,
 		}, nil
 	}
 
-	sessionID, err := s.createWorkerPreviewSession(
+	workerSession, err := s.createWorkerPreviewSession(
 		ctx,
 		workerBaseURL,
 		targetPdfPath,
@@ -575,15 +619,18 @@ func (s *ConversionService) CreatePreviewSession(
 
 	globalPreviewSessions.put(
 		&previewWorkerSession{
-			ID:           sessionID,
+			ID:           workerSession.ID,
+			OwnerID:      ownerID,
 			SourceHash:   sourceHash,
+			PageCount:    workerSession.PageCount,
 			CreatedAt:    now,
 			LastAccessed: now,
 		},
 	)
 
 	return map[string]any{
-		"session_id": sessionID,
+		"session_id": workerSession.ID,
+		"page_count": workerSession.PageCount,
 	}, nil
 }
 
@@ -592,6 +639,7 @@ func (s *ConversionService) GetPreviewSessionPage(
 	sessionID string,
 	pageNum int,
 	scale float64,
+	ownerID string,
 ) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -612,13 +660,14 @@ func (s *ConversionService) GetPreviewSessionPage(
 			"preview scale must be greater than 0",
 		)
 	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return nil, fmt.Errorf("preview identity is required")
+	}
 
-	session, ok := globalPreviewSessions.getByID(sessionID)
-	if !ok {
-		return nil, fmt.Errorf(
-			"preview session not found: %s",
-			sessionID,
-		)
+	session, err := globalPreviewSessions.getByIDForOwner(sessionID, ownerID)
+	if err != nil {
+		return nil, err
 	}
 
 	workerBaseURL := os.Getenv("PDFNEST_WORKER_URL")
@@ -651,6 +700,7 @@ func (s *ConversionService) GetPreviewSessionPage(
 func (s *ConversionService) DeletePreviewSession(
 	ctx context.Context,
 	sessionID string,
+	ownerID string,
 ) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -659,10 +709,17 @@ func (s *ConversionService) DeletePreviewSession(
 	if sessionID == "" {
 		return fmt.Errorf("preview session ID is required")
 	}
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return fmt.Errorf("preview identity is required")
+	}
 
-	session, ok := globalPreviewSessions.getByID(sessionID)
-	if !ok {
+	session, err := globalPreviewSessions.getByIDForOwner(sessionID, ownerID)
+	if errors.Is(err, ErrPreviewSessionNotFound) {
 		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	workerBaseURL := os.Getenv("PDFNEST_WORKER_URL")

@@ -15,11 +15,13 @@ type Service interface {
 		fileHeader *multipart.FileHeader,
 		pageNum int,
 		scale float64,
+		ownerID string,
 	) ([]byte, error)
 
 	CreatePreviewSession(
 		ctx context.Context,
 		fileHeader *multipart.FileHeader,
+		ownerID string,
 	) (map[string]any, error)
 
 	GetPreviewSessionPage(
@@ -27,11 +29,13 @@ type Service interface {
 		sessionID string,
 		pageNum int,
 		scale float64,
+		ownerID string,
 	) ([]byte, error)
 
 	DeletePreviewSession(
 		ctx context.Context,
 		sessionID string,
+		ownerID string,
 	) error
 
 	OfficeToPdf(ctx context.Context, inputPath string) (string, error)

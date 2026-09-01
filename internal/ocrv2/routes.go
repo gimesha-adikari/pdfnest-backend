@@ -65,6 +65,7 @@ func RegisterRoutes(router fiber.Router, controller *Controller, stores ...*iden
 	router.Post("/v2/ocr/markup/highlight/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
 	router.Post("/v2/ocr/markup/underline/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
 	router.Post("/v2/ocr/markup/strikeout/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
+	router.Post("/v2/ocr/markup/preview", protected, protectedBindIdentity, protectedUpload, protectedExecution, controller.MarkupPreview)
 	router.Get("/v2/ocr/markup/jobs/:job_id", protected, protectedBindIdentity, controller.JobStatus)
 	router.Get("/v2/ocr/markup/jobs/:job_id/result", protected, protectedBindIdentity, controller.MarkupJobResult)
 	router.Delete("/v2/ocr/markup/jobs/:job_id", protected, protectedBindIdentity, controller.CancelJob)

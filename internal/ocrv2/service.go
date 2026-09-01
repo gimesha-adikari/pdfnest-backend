@@ -313,6 +313,32 @@ func (s *Service) ExecuteText(ctx context.Context, inputPath string, request Tex
 	return s.worker.Execute(ctx, inputPath, request)
 }
 
+func (s *Service) PreviewMarkup(ctx context.Context, inputPath string, request TextRequest) (*MarkupPreviewResponse, error) {
+	if s == nil || s.worker == nil {
+		return nil, &WorkerError{Code: ErrEngineUnavailable, Message: "OCR markup preview is not configured"}
+	}
+	previewer, ok := s.worker.(MarkupPreviewInvoker)
+	if !ok {
+		return nil, &WorkerError{Code: ErrEngineUnavailable, Message: "OCR markup preview is not configured"}
+	}
+	if strings.TrimSpace(request.Profile) != ProfileMarkupV2 {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if strings.TrimSpace(request.Language) == "" {
+		return nil, &RequestError{Code: ErrUnsupportedLanguage}
+	}
+	if _, err := os.Stat(inputPath); err != nil {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if err := uploads.ValidatePDFHeader(inputPath); err != nil {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if _, err := uploads.CheckPDFPageLimit(inputPath, "OCR_V2_MAX_PAGES", s.maxPages); err != nil {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	return previewer.Preview(ctx, inputPath, request)
+}
+
 func (s *Service) CreateJob(ctx context.Context, inputPath string, request TextRequest, ownerIdentity string) (*JobStatus, error) {
 	if s == nil || s.jobs == nil || s.artifacts == nil {
 		return nil, &WorkerError{Code: ErrTaskStorageUnavailable, Message: "OCR V2 job service is not configured"}

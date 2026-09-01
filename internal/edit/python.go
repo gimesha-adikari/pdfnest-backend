@@ -35,6 +35,7 @@ type editorExtractRequest struct {
 	FilePassword string `json:"file_password,omitempty"`
 	SourceName   string `json:"source_name,omitempty"`
 	OCRV2        bool   `json:"ocr_v2,omitempty"`
+	Consumer     string `json:"consumer,omitempty"`
 }
 
 type editorCompileRequest struct {
@@ -96,7 +97,13 @@ func (s *service) ExtractLayout(sourceKey string, filePassword string, sourceNam
 
 func (s *service) ExtractLayoutV2(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
-		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true,
+		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "studio",
+	})
+}
+
+func (s *service) ExtractLayoutV2ForGeneralEditor(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
+		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "general_editor",
 	})
 }
 
