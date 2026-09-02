@@ -35,7 +35,7 @@
 
 - `PORT=10000`
 - `PDFNEST_WORKER_URL=https://worker.platenpdf.com` (Railway Worker)
-- `ALLOWED_ORIGINS=https://www.platenpdf.com`
+- `ALLOWED_ORIGINS=https://platenpdf.com`
 - `DATABASE_URL=...` (Neon PostgreSQL)
 - `REDIS_URL=...` (Railway Redis)
 - `JWT_SECRET=...`

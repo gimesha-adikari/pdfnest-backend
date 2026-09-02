@@ -1,6 +1,7 @@
 package markup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,6 +19,46 @@ import (
 
 type Controller struct {
 	service Service
+}
+
+// LegacyMarkupConsumer is carried in the staged payload so the shared worker
+// markup actor can distinguish the public legacy routes from Studio's
+// separately marked ocr_v2 payloads.
+const LegacyMarkupConsumer = "legacy_markup"
+
+func legacyMarkupPayload(boxes []Box, mode, filePassword string, action Action) map[string]any {
+	return map[string]any{
+		"boxes":         boxes,
+		"mode":          mode,
+		"file_password": filePassword,
+		"action":        action,
+		"consumer":      LegacyMarkupConsumer,
+	}
+}
+
+func persistMarkupSource(ctx context.Context, key, sourcePath string) error {
+	if !storage.RemoteStorageEnabled() {
+		return storage.SaveLocalFile(ctx, key, sourcePath)
+	}
+
+	store, err := storage.Default()
+	if err != nil {
+		return err
+	}
+	return store.UploadFile(sourcePath, key, "application/pdf")
+}
+
+func persistMarkupPayload(ctx context.Context, key string, payload []byte) error {
+	if !storage.RemoteStorageEnabled() {
+		_, _, err := storage.SaveLocalStream(ctx, key, bytes.NewReader(payload))
+		return err
+	}
+
+	store, err := storage.Default()
+	if err != nil {
+		return err
+	}
+	return store.UploadBytes(payload, key, "application/json")
 }
 
 func NewController(s Service) *Controller {
@@ -69,37 +110,19 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 		})
 	}
 
-	store, err := storage.Default()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"success": false,
-			"error":   err.Error(),
-		})
-	}
-
-	contentType := upload.Header.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/pdf"
-	}
-
 	sourceKey := storage.BuildKey(
 		"markup/source",
 		filepath.Ext(upload.Header.Filename),
 	)
 
-	if err := store.UploadFile(upload.Path, sourceKey, contentType); err != nil {
+	if err := persistMarkupSource(c.Context(), sourceKey, upload.Path); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to upload original PDF to R2: %v", err),
+			"error":   fmt.Sprintf("Failed to store original PDF: %v", err),
 		})
 	}
 
-	payloadBytes, err := json.Marshal(map[string]any{
-		"boxes":         boxes,
-		"mode":          mode,
-		"file_password": filePassword,
-		"action":        action,
-	})
+	payloadBytes, err := json.Marshal(legacyMarkupPayload(boxes, mode, filePassword, action))
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -108,10 +131,10 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 	}
 
 	payloadKey := storage.BuildKey("markup/payload", ".json")
-	if err := store.UploadBytes(payloadBytes, payloadKey, "application/json"); err != nil {
+	if err := persistMarkupPayload(c.Context(), payloadKey, payloadBytes); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
-			"error":   fmt.Sprintf("Failed to upload markup payload to R2: %v", err),
+			"error":   fmt.Sprintf("Failed to store markup payload: %v", err),
 		})
 	}
 
