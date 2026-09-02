@@ -28,19 +28,24 @@ func TestEditorV2RequestsCarryConsumerBoundary(t *testing.T) {
 	t.Setenv("PDFNEST_WORKER_URL", server.URL)
 
 	svc := &service{}
-	_, err := svc.ExtractLayoutV2("jobs/studio/source.pdf", "", "source.pdf")
+	_, err := svc.ExtractLayoutForLegacyEditor("jobs/legacy-editor/source.pdf", "", "source.pdf")
+	require.NoError(t, err)
+	_, err = svc.ExtractLayoutV2("jobs/studio/source.pdf", "", "source.pdf")
 	require.NoError(t, err)
 	_, err = svc.ExtractLayoutV2ForGeneralEditor("jobs/editor/source.pdf", "", "source.pdf")
 	require.NoError(t, err)
 
-	require.Len(t, payloads, 2)
-	require.Equal(t, true, payloads[0]["ocr_v2"])
-	require.Equal(t, "studio", payloads[0]["consumer"])
+	require.Len(t, payloads, 3)
+	require.NotContains(t, payloads[0], "ocr_v2")
+	require.Equal(t, "legacy_editor", payloads[0]["consumer"])
 	require.Equal(t, true, payloads[1]["ocr_v2"])
-	require.Equal(t, "general_editor", payloads[1]["consumer"])
+	require.Equal(t, "studio", payloads[1]["consumer"])
+	require.Equal(t, true, payloads[2]["ocr_v2"])
+	require.Equal(t, "general_editor", payloads[2]["consumer"])
 }
 
 func TestServiceExposesBothEditorV2Seams(t *testing.T) {
 	var _ OCRV2Service = (*service)(nil)
 	var _ GeneralEditorOCRV2Service = (*service)(nil)
+	var _ LegacyEditorService = (*service)(nil)
 }

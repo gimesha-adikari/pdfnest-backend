@@ -95,6 +95,15 @@ func (s *service) ExtractLayout(sourceKey string, filePassword string, sourceNam
 	})
 }
 
+func (s *service) ExtractLayoutForLegacyEditor(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
+		SourceKey:    sourceKey,
+		FilePassword: filePassword,
+		SourceName:   sourceName,
+		Consumer:     "legacy_editor",
+	})
+}
+
 func (s *service) ExtractLayoutV2(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
 		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "studio",

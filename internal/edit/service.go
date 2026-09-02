@@ -10,6 +10,13 @@ type Service interface {
 	GetJobDownload(jobID string) (*http.Response, error)
 }
 
+// LegacyEditorService is the explicit seam for the ordinary /edit-pdf
+// product. It is separate from the generic ExtractLayout method so Studio
+// compatibility callers cannot inherit the legacy editor selector.
+type LegacyEditorService interface {
+	ExtractLayoutForLegacyEditor(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error)
+}
+
 // OCRV2Service is an explicit opt-in seam for the V2 editor integration. The
 // Studio path uses this method and remains on the worker's internal engine.
 type OCRV2Service interface {

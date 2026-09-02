@@ -92,7 +92,11 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		}
 		submission, err = v2.ExtractLayoutV2ForGeneralEditor(sourceKey, filePassword, upload.Header.Filename)
 	} else {
-		submission, err = cr.service.ExtractLayout(sourceKey, filePassword, upload.Header.Filename)
+		legacy, ok := cr.service.(LegacyEditorService)
+		if !ok {
+			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "Legacy Editor extraction is unavailable"})
+		}
+		submission, err = legacy.ExtractLayoutForLegacyEditor(sourceKey, filePassword, upload.Header.Filename)
 	}
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
