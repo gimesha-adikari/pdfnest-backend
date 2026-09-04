@@ -31,6 +31,9 @@ type TextRequest struct {
 	Languages     []string
 	LanguageUsage map[string]float64
 	RoutingPolicy RoutingPolicy
+	// PageIndex scopes the temporary markup preview to one zero-based source
+	// page. It is intentionally not part of durable job requests.
+	PageIndex *int
 }
 
 type MarkupRequest struct {

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"pdfnest-backend/config"
+	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/middleware"
@@ -23,8 +25,10 @@ import (
 	"pdfnest-backend/internal/uploads"
 	"pdfnest-backend/internal/worker"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 type fakeInvoker struct {
@@ -68,6 +72,10 @@ func (f *fakeAsyncInvoker) GetJob(context.Context, string) (*JobStatus, error) {
 
 func (f *fakeAsyncInvoker) GetResult(context.Context, string) (*TextResponse, error) {
 	return f.result, nil
+}
+
+func (f *fakeAsyncInvoker) GetStructuredResult(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"schema_version":"test"}`), nil
 }
 
 func (f *fakeAsyncInvoker) CancelJob(_ context.Context, _ string, _ string) (*JobStatus, error) {
@@ -472,6 +480,138 @@ func TestControllerRequiresAuthenticatedUserWhenProtected(t *testing.T) {
 	}
 }
 
+func TestGuestV2StructuredAndMarkupRoutesUseOwnerScopedIdentity(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer rdb.Close()
+	previousRedis := config.Redis
+	previousGuestQuota := billing.GuestQuota
+	config.Redis = rdb
+	billing.GuestQuota = billing.NewGuestQuotaStore(rdb, time.Hour)
+	t.Cleanup(func() {
+		config.Redis = previousRedis
+		billing.GuestQuota = previousGuestQuota
+	})
+
+	store := identity.NewStore(rdb, time.Hour)
+	async := &fakeAsyncInvoker{}
+	service := NewService(&fakeInvoker{})
+	service.jobs = async
+	service.artifacts = &fakeArtifactStore{}
+	service.maxPages = 10
+	service.maxBytes = 10 * 1024 * 1024
+	app := fiber.New()
+	RegisterRoutes(app.Group("/api"), NewController(service), store)
+
+	cases := []struct {
+		path    string
+		profile string
+	}{
+		{path: "/api/v2/ocr/pdf-to-markdown-v2/jobs", profile: ProfilePDFMarkdownV2},
+		{path: "/api/v2/ocr/markup/highlight/jobs", profile: ProfileMarkupV2},
+		{path: "/api/v2/ocr/markup/underline/jobs", profile: ProfileMarkupV2},
+		{path: "/api/v2/ocr/markup/strikeout/jobs", profile: ProfileMarkupV2},
+	}
+
+	for index, testCase := range cases {
+		body, contentType := multipartPDFWithFields(t, map[string]string{
+			"language":       "eng",
+			"language_mode":  "EXPLICIT",
+			"routing_policy": "AUTO",
+			"profile":        testCase.profile,
+			"query":          "sample",
+			"mode":           "smart",
+			"color":          "#FFFF00",
+		})
+		req := httptest.NewRequest(http.MethodPost, testCase.path, body)
+		req.Header.Set("Content-Type", contentType)
+		req.Header.Set("X-Platen-Fingerprint", fmt.Sprintf("guest-route-%d", index))
+		req.Header.Set("User-Agent", fmt.Sprintf("guest-route-test-%d", index))
+		response, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != fiber.StatusAccepted {
+			t.Fatalf("guest route %s was not accepted: status=%d body=%s", testCase.path, response.StatusCode, readResponseBody(t, response))
+		}
+		if async.submitted.OwnerIdentity == "" || async.submitted.OwnerIdentity == "user:anonymous" {
+			t.Fatalf("guest route %s did not submit an owner identity: %+v", testCase.path, async.submitted)
+		}
+		if async.submitted.Profile != testCase.profile {
+			t.Fatalf("guest route %s submitted profile %q, want %q", testCase.path, async.submitted.Profile, testCase.profile)
+		}
+		_ = response.Body.Close()
+	}
+
+	async.job.Status = "SUCCEEDED"
+	async.job.ResultKey = "jobs/ocr_v2/result.pdf"
+	owner := async.job.OwnerIdentity
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v2/ocr/markup/jobs/123e4567-e89b-12d3-a456-426614174000", nil)
+	statusRequest.Header.Set("X-Platen-Fingerprint", "guest-owner-a")
+	statusRequest.Header.Set("X-Platen-Guest", owner)
+	statusResponse, err := app.Test(statusRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statusResponse.StatusCode != fiber.StatusOK {
+		t.Fatalf("same guest could not read its job status: status=%d body=%s", statusResponse.StatusCode, readResponseBody(t, statusResponse))
+	}
+	_ = statusResponse.Body.Close()
+
+	foreignRequest := httptest.NewRequest(http.MethodGet, "/api/v2/ocr/markup/jobs/123e4567-e89b-12d3-a456-426614174000", nil)
+	foreignRequest.Header.Set("X-Platen-Fingerprint", "guest-owner-b")
+	foreignRequest.Header.Set("User-Agent", "guest-owner-b")
+	foreignResponse, err := app.Test(foreignRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foreignResponse.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("foreign guest could read the job status: status=%d body=%s", foreignResponse.StatusCode, readResponseBody(t, foreignResponse))
+	}
+	_ = foreignResponse.Body.Close()
+}
+
+func multipartPDFWithFields(t *testing.T, fields map[string]string) (*bytes.Buffer, string) {
+	t.Helper()
+	data, err := os.ReadFile(samplePDFPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	filePart, err := writer.CreateFormFile("file", "sample.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filePart.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &body, writer.FormDataContentType()
+}
+
+func readResponseBody(t *testing.T, response *http.Response) string {
+	t.Helper()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	return string(data)
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
@@ -498,6 +638,46 @@ func TestClientSerializesV2RequestAndMapsTypedWorkerFailure(t *testing.T) {
 	var workerErr *WorkerError
 	if !errors.As(err, &workerErr) || workerErr.Code != ErrEngineUnavailable {
 		t.Fatalf("expected typed engine-unavailable error, got %v", err)
+	}
+}
+
+func TestClientSerializesMarkupPreviewPageIndex(t *testing.T) {
+	path := samplePDFPath(t)
+	pageIndex := 2
+	previewPayload, _ := json.Marshal(MarkupPreviewResponse{Status: "SUCCEEDED", Profile: ProfileMarkupV2, PageCount: 3})
+	client := NewClientForTest(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/internal/ocr/v2/markup/preview" || request.Header.Get("X-Request-ID") != "preview-page-index" {
+			t.Errorf("unexpected markup preview request: %s %s", request.Method, request.URL.String())
+		}
+		reader, err := request.MultipartReader()
+		if err != nil {
+			t.Fatalf("read preview multipart body: %v", err)
+		}
+		found := false
+		for {
+			part, nextErr := reader.NextPart()
+			if nextErr == io.EOF {
+				break
+			}
+			if nextErr != nil {
+				t.Fatalf("read preview multipart field: %v", nextErr)
+			}
+			value, readErr := io.ReadAll(part)
+			if readErr != nil {
+				t.Fatalf("read preview multipart value: %v", readErr)
+			}
+			if part.FormName() == "page_index" {
+				found = bytes.Equal(bytes.TrimSpace(value), []byte("2"))
+			}
+		}
+		if !found {
+			t.Error("markup preview page_index was not serialized as 2")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(bytes.NewReader(previewPayload)), Header: make(http.Header)}, nil
+	})}, "http://worker", nil)
+	preview, err := client.Preview(context.Background(), path, TextRequest{RequestID: "preview-page-index", Profile: ProfileMarkupV2, Language: "eng", RoutingPolicy: RoutingFast, PageIndex: &pageIndex})
+	if err != nil || preview == nil || preview.PageCount != 3 {
+		t.Fatalf("expected page-scoped preview response, preview=%+v err=%v", preview, err)
 	}
 }
 

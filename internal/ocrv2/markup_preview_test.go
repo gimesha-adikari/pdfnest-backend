@@ -18,6 +18,7 @@ func (f *fakeMarkupPreviewInvoker) Preview(_ context.Context, _ string, request 
 }
 
 func TestServicePreviewMarkupUsesTheAuthorizedPreviewProjection(t *testing.T) {
+	pageIndex := 1
 	fake := &fakeMarkupPreviewInvoker{
 		response: &MarkupPreviewResponse{
 			SchemaVersion: "ocr_v2_markup_preview.v1",
@@ -50,6 +51,7 @@ func TestServicePreviewMarkupUsesTheAuthorizedPreviewProjection(t *testing.T) {
 		LanguageMode:  "EXPLICIT",
 		Languages:     []string{"eng", "sin"},
 		RoutingPolicy: RoutingFast,
+		PageIndex:     &pageIndex,
 	})
 	if err != nil {
 		t.Fatalf("expected markup preview, got %v", err)
@@ -59,5 +61,8 @@ func TestServicePreviewMarkupUsesTheAuthorizedPreviewProjection(t *testing.T) {
 	}
 	if fake.received.Profile != ProfileMarkupV2 || fake.received.Language != "eng+sin" || fake.received.RoutingPolicy != RoutingFast {
 		t.Fatalf("preview request was not forwarded intact: %+v", fake.received)
+	}
+	if fake.received.PageIndex == nil || *fake.received.PageIndex != pageIndex {
+		t.Fatalf("preview page index was not forwarded intact: %+v", fake.received.PageIndex)
 	}
 }

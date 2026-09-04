@@ -62,17 +62,29 @@ func RegisterRoutes(router fiber.Router, controller *Controller, stores ...*iden
 	protectedExecution := limiter.Default.Middleware()
 	protectedUpload := uploads.Prepare()
 	router.Post("/v2/ocr/text", protected, protectedBindIdentity, protectedUpload, protectedExecution, controller.Text)
-	router.Post("/v2/ocr/markup/highlight/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
-	router.Post("/v2/ocr/markup/underline/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
-	router.Post("/v2/ocr/markup/strikeout/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), controller.CreateMarkupJob)
-	router.Post("/v2/ocr/markup/preview", protected, protectedBindIdentity, protectedUpload, protectedExecution, controller.MarkupPreview)
-	router.Get("/v2/ocr/markup/jobs/:job_id", protected, protectedBindIdentity, controller.JobStatus)
-	router.Get("/v2/ocr/markup/jobs/:job_id/result", protected, protectedBindIdentity, controller.MarkupJobResult)
-	router.Delete("/v2/ocr/markup/jobs/:job_id", protected, protectedBindIdentity, controller.CancelJob)
-	router.Post("/v2/ocr/pdf-to-markdown-v2/jobs", protected, protectedBindIdentity, protectedUpload, protectedExecution, idempotency.UseWithReplay(nil, controller.ReplayStructuredJob), controller.CreateStructuredJob)
-	router.Get("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id", protected, protectedBindIdentity, controller.JobStatus)
-	router.Get("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id/result", protected, protectedBindIdentity, controller.StructuredJobResult)
-	router.Delete("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id", protected, protectedBindIdentity, controller.CancelJob)
+
+	// Markup V2 and PDF-to-Markdown V2 use the established owner-scoped guest
+	// identity contract. Compute POSTs retain the guest quota boundary; status,
+	// result, and cancellation remain identity-only control-plane operations.
+	guestStructuredIdentity := identity.Resolve(identityStore)
+	guestStructuredBindIdentity := bindAuthenticatedIdentity()
+	guestStructuredUpload := uploads.Prepare()
+	guestStructuredExecution := limiter.Default.Middleware()
+	// The V2 products use their own existing product billing profiles. Markup's
+	// default Smart-mode operation is bounded at four units; neither route is
+	// charged as generic full OCR extraction. Processing mode remains a worker
+	// concern and does not change the guest identity or quota boundary.
+	router.Post("/v2/ocr/markup/highlight/jobs", guestStructuredIdentity, guestStructuredBindIdentity, guestStructuredUpload, guestStructuredExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), billing.UseGuestOnly(billing.HighlightSmartPDF), controller.CreateMarkupJob)
+	router.Post("/v2/ocr/markup/underline/jobs", guestStructuredIdentity, guestStructuredBindIdentity, guestStructuredUpload, guestStructuredExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), billing.UseGuestOnly(billing.UnderlineSmartPDF), controller.CreateMarkupJob)
+	router.Post("/v2/ocr/markup/strikeout/jobs", guestStructuredIdentity, guestStructuredBindIdentity, guestStructuredUpload, guestStructuredExecution, idempotency.UseWithReplay(nil, controller.ReplayMarkupJob), billing.UseGuestOnly(billing.StrikeoutSmartPDF), controller.CreateMarkupJob)
+	router.Post("/v2/ocr/markup/preview", guestStructuredIdentity, guestStructuredBindIdentity, guestStructuredUpload, guestStructuredExecution, controller.MarkupPreview)
+	router.Get("/v2/ocr/markup/jobs/:job_id", guestStructuredIdentity, guestStructuredBindIdentity, controller.JobStatus)
+	router.Get("/v2/ocr/markup/jobs/:job_id/result", guestStructuredIdentity, guestStructuredBindIdentity, controller.MarkupJobResult)
+	router.Delete("/v2/ocr/markup/jobs/:job_id", guestStructuredIdentity, guestStructuredBindIdentity, controller.CancelJob)
+	router.Post("/v2/ocr/pdf-to-markdown-v2/jobs", guestStructuredIdentity, guestStructuredBindIdentity, guestStructuredUpload, guestStructuredExecution, idempotency.UseWithReplay(nil, controller.ReplayStructuredJob), billing.UseGuestOnly(billing.ConvertPDFToMarkdown), controller.CreateStructuredJob)
+	router.Get("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id", guestStructuredIdentity, guestStructuredBindIdentity, controller.JobStatus)
+	router.Get("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id/result", guestStructuredIdentity, guestStructuredBindIdentity, controller.StructuredJobResult)
+	router.Delete("/v2/ocr/pdf-to-markdown-v2/jobs/:job_id", guestStructuredIdentity, guestStructuredBindIdentity, controller.CancelJob)
 }
 
 func bindAuthenticatedIdentity() fiber.Handler {

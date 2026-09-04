@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"pdfnest-backend/internal/idempotency"
@@ -170,11 +171,28 @@ func (c *Controller) MarkupPreview(cctx *fiber.Ctx) error {
 		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Unsupported OCR routing policy."})
 	}
 	request := textRequestFromContext(cctx, requestID, ProfileMarkupV2, policy)
+	pageIndex, pageErr := optionalPreviewPageIndex(cctx)
+	if pageErr != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Invalid preview page."})
+	}
+	request.PageIndex = pageIndex
 	preview, execErr := c.service.PreviewMarkup(cctx.UserContext(), upload.Path, request)
 	if execErr != nil {
 		return cctx.Status(errorStatus(execErr)).JSON(Error{Code: errorCode(execErr), Message: previewPublicMessage(execErr)})
 	}
 	return cctx.Status(fiber.StatusOK).JSON(preview)
+}
+
+func optionalPreviewPageIndex(cctx *fiber.Ctx) (*int, error) {
+	raw := strings.TrimSpace(cctx.FormValue("page_index"))
+	if raw == "" {
+		return nil, nil
+	}
+	pageIndex, err := strconv.Atoi(raw)
+	if err != nil || pageIndex < 0 {
+		return nil, errors.New("invalid preview page")
+	}
+	return &pageIndex, nil
 }
 
 func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {

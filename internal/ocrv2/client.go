@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"pdfnest-backend/internal/worker"
@@ -43,6 +44,9 @@ func (c *Client) Execute(ctx context.Context, inputPath string, request TextRequ
 	}
 	if request.LanguageMode != "" {
 		fields["language_mode"] = request.LanguageMode
+	}
+	if request.PageIndex != nil {
+		fields["page_index"] = strconv.Itoa(*request.PageIndex)
 	}
 	body, contentType, err := worker.CreateMultipartRequest(inputPath, func(writer *multipart.Writer) error {
 		for key, value := range fields {
@@ -114,6 +118,9 @@ func (c *Client) Preview(ctx context.Context, inputPath string, request TextRequ
 	}
 	if request.LanguageMode != "" {
 		fields["language_mode"] = request.LanguageMode
+	}
+	if request.PageIndex != nil {
+		fields["page_index"] = strconv.Itoa(*request.PageIndex)
 	}
 	body, contentType, err := worker.CreateMultipartRequest(inputPath, func(writer *multipart.Writer) error {
 		for key, value := range fields {
