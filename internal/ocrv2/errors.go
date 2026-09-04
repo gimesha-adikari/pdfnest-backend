@@ -5,6 +5,7 @@ import "fmt"
 const (
 	ErrInvalidInput                 = "INVALID_INPUT"
 	ErrUnsupportedLanguage          = "UNSUPPORTED_LANGUAGE"
+	ErrLanguageDetectionUncertain   = "LANGUAGE_DETECTION_UNCERTAIN"
 	ErrEngineUnavailable            = "ENGINE_UNAVAILABLE"
 	ErrEngineFailure                = "ENGINE_FAILURE"
 	ErrTimeout                      = "TIMEOUT"

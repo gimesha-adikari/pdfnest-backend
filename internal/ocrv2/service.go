@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +117,10 @@ func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, requ
 	if strings.TrimSpace(request.Language) == "" {
 		return nil, &RequestError{Code: ErrUnsupportedLanguage}
 	}
-	if err := validatePDFInput(input); err != nil || strings.TrimSpace(markup.Query) == "" {
+	if err := validatePDFInput(input); err != nil || (markup.Selection == nil && strings.TrimSpace(markup.Query) == "") {
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
+	if err := validateMarkupSelection(markup.Selection); err != nil {
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
 	if markup.Action != "highlight" && markup.Action != "underline" && markup.Action != "strikeout" {
@@ -143,6 +147,10 @@ func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, requ
 		_ = s.artifacts.DeleteObject(context.Background(), key)
 		return nil, &RequestError{Code: ErrInvalidInput}
 	}
+	if markup.Selection != nil && markup.Selection.Page > pageCount {
+		_ = s.artifacts.DeleteObject(context.Background(), key)
+		return nil, &RequestError{Code: ErrInvalidInput}
+	}
 	asyncJobs, ok := s.jobs.(AsyncJobInvoker)
 	if !ok {
 		_ = s.artifacts.DeleteObject(context.Background(), key)
@@ -158,6 +166,38 @@ func (s *Service) CreateMarkupJob(ctx context.Context, input *uploads.File, requ
 		return nil, err
 	}
 	return job, nil
+}
+
+func validateMarkupSelection(selection *MarkupSelection) error {
+	if selection == nil {
+		return nil
+	}
+	if selection.Page < 1 || selection.Source != "native" && selection.Source != "ocr" {
+		return fmt.Errorf("invalid markup selection page or source")
+	}
+	if selection.CoordinateSpace != "pdf_points_visible_cropbox_top_left" {
+		return fmt.Errorf("unsupported markup selection coordinate space")
+	}
+	if !finitePositive(selection.PageWidth) || !finitePositive(selection.PageHeight) || len(selection.Rects) == 0 || len(selection.Rects) > 256 {
+		return fmt.Errorf("invalid markup selection geometry")
+	}
+	if len(selection.Text) > 500 || len(selection.WordIDs) > 1000 {
+		return fmt.Errorf("markup selection is too large")
+	}
+	for _, rect := range selection.Rects {
+		if !finitePositive(rect.Width) || !finitePositive(rect.Height) || !finite(rect.X) || !finite(rect.Y) || rect.X < -0.5 || rect.Y < -0.5 || rect.X+rect.Width > selection.PageWidth+0.5 || rect.Y+rect.Height > selection.PageHeight+0.5 {
+			return fmt.Errorf("markup selection rectangle is outside the page")
+		}
+	}
+	return nil
+}
+
+func finite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func finitePositive(value float64) bool {
+	return finite(value) && value > 0
 }
 
 func validatePDFInput(input *uploads.File) error {

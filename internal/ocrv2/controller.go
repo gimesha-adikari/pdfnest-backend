@@ -2,6 +2,7 @@ package ocrv2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strconv"
@@ -212,7 +213,11 @@ func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
 	}
 	owner, _ := cctx.Locals("user_id").(string)
 	request := textRequestFromContext(cctx, requestID, ProfileMarkupV2, policy)
-	markup := MarkupRequest{Action: action, Mode: strings.ToLower(strings.TrimSpace(cctx.FormValue("mode"))), Query: cctx.FormValue("query"), Color: strings.TrimSpace(cctx.FormValue("color"))}
+	selection, selectionErr := parseMarkupSelection(cctx.FormValue("selection"))
+	if selectionErr != nil {
+		return cctx.Status(fiber.StatusBadRequest).JSON(Error{Code: ErrInvalidInput, Message: "Invalid text selection."})
+	}
+	markup := MarkupRequest{Action: action, Mode: strings.ToLower(strings.TrimSpace(cctx.FormValue("mode"))), Query: cctx.FormValue("query"), Color: strings.TrimSpace(cctx.FormValue("color")), Selection: selection}
 	if markup.Mode == "" {
 		markup.Mode = "smart"
 	}
@@ -227,6 +232,18 @@ func (c *Controller) CreateMarkupJob(cctx *fiber.Ctx) error {
 	}
 	RecordLanguageSelection(owner, request.Language, false)
 	return cctx.Status(fiber.StatusAccepted).JSON(publicJobStatus(job))
+}
+
+func parseMarkupSelection(raw string) (*MarkupSelection, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, nil
+	}
+	var selection MarkupSelection
+	if err := json.Unmarshal([]byte(value), &selection); err != nil {
+		return nil, err
+	}
+	return &selection, nil
 }
 
 func (c *Controller) ReplayMarkupJob(cctx *fiber.Ctx, record idempotency.Record) error {
@@ -518,6 +535,8 @@ func errorStatus(err error) int {
 		return fiber.StatusBadRequest
 	case ErrUnsupportedLanguage:
 		return fiber.StatusUnprocessableEntity
+	case ErrLanguageDetectionUncertain:
+		return fiber.StatusUnprocessableEntity
 	case ErrWorkerAuthentication, ErrEngineFailure, ErrInvalidEngineOutput, ErrPDFRenderFailure, ErrStructuredEngineUnavailable:
 		return fiber.StatusBadGateway
 	case ErrStructuredOutputInvalid, ErrStructuredProfileNotEligible, ErrTableStructureUnavailable, ErrFormulaStructureUnavailable:
@@ -549,6 +568,8 @@ func publicMessage(err error) string {
 	switch errorCode(err) {
 	case ErrUnsupportedLanguage:
 		return "The requested OCR language is unsupported or not installed."
+	case ErrLanguageDetectionUncertain:
+		return "We couldn't determine the document language reliably. Choose a language manually."
 	case ErrEngineUnavailable:
 		return "The requested OCR engine is currently unavailable."
 	case ErrTimeout:
@@ -596,6 +617,8 @@ func previewPublicMessage(err error) string {
 	switch errorCode(err) {
 	case ErrUnsupportedLanguage:
 		return "The selected language is not available for selectable text."
+	case ErrLanguageDetectionUncertain:
+		return "We couldn't determine the document language reliably. Choose a language manually."
 	case ErrEngineUnavailable:
 		return "Selectable text is temporarily unavailable."
 	case ErrTimeout:

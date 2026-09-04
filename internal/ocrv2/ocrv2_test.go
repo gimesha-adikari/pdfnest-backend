@@ -681,6 +681,57 @@ func TestClientSerializesMarkupPreviewPageIndex(t *testing.T) {
 	}
 }
 
+func TestClientSerializesMarkupSelectionGeometry(t *testing.T) {
+	responsePayload, _ := json.Marshal(JobStatus{JobID: "123e4567-e89b-12d3-a456-426614174000", Status: "queued", Profile: ProfileMarkupV2})
+	selection := &MarkupSelection{
+		Page:            2,
+		Source:          "ocr",
+		CoordinateSpace: "pdf_points_visible_cropbox_top_left",
+		PageWidth:       800,
+		PageHeight:      600,
+		Rotation:        90,
+		WordIDs:         []string{"word-1", "word-2"},
+		Rects:           []MarkupSelectionRect{{X: 80, Y: 180, Width: 200, Height: 30}},
+		Text:            "Rotated OCR",
+	}
+	client := NewClientForTest(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/internal/ocr/v2/jobs" {
+			t.Errorf("unexpected worker request: %s", request.URL.Path)
+		}
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("decode worker job payload: %v", err)
+		}
+		selectionPayload, ok := payload["markup_selection"].(map[string]any)
+		if !ok {
+			t.Fatalf("markup selection was not serialized: %#v", payload["markup_selection"])
+		}
+		if selectionPayload["page"] != float64(2) || selectionPayload["coordinate_space"] != selection.CoordinateSpace {
+			t.Fatalf("unexpected serialized selection: %#v", selectionPayload)
+		}
+		return &http.Response{StatusCode: http.StatusAccepted, Status: "202 Accepted", Body: io.NopCloser(bytes.NewReader(responsePayload)), Header: make(http.Header)}, nil
+	})}, "http://worker", nil)
+
+	job, err := client.SubmitJob(context.Background(), JobSubmitRequest{
+		RequestID:     "selection-job",
+		Profile:       ProfileMarkupV2,
+		Language:      "eng",
+		RoutingPolicy: RoutingFast,
+		SourceKey:     "jobs/input.pdf",
+		SourceName:    "input.pdf",
+		OwnerIdentity: "guest:test",
+		TotalPages:    3,
+		Markup:        &MarkupRequest{Action: "highlight", Mode: "ocr", Query: "Rotated OCR", Color: "#FFFF00", Selection: selection},
+	})
+	if err != nil || job == nil || job.Profile != ProfileMarkupV2 {
+		t.Fatalf("expected serialized markup selection job, job=%+v err=%v", job, err)
+	}
+}
+
 func TestClientMapsMalformedAndTimeoutResponses(t *testing.T) {
 	path := samplePDFPath(t)
 	malformed := NewClientForTest(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

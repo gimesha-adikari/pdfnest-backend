@@ -66,3 +66,20 @@ func TestServicePreviewMarkupUsesTheAuthorizedPreviewProjection(t *testing.T) {
 		t.Fatalf("preview page index was not forwarded intact: %+v", fake.received.PageIndex)
 	}
 }
+
+func TestMarkupPreviewLanguageUncertaintyIsARecoverablePublicError(t *testing.T) {
+	err := &WorkerError{Code: ErrLanguageDetectionUncertain, Message: "private detector detail"}
+
+	if got := errorStatus(err); got != 422 {
+		t.Fatalf("expected language uncertainty to be a 422 recovery response, got %d", got)
+	}
+	if got := previewPublicMessage(err); got != "We couldn't determine the document language reliably. Choose a language manually." {
+		t.Fatalf("unexpected public preview message: %q", got)
+	}
+	if got := publicMessage(err); got != "We couldn't determine the document language reliably. Choose a language manually." {
+		t.Fatalf("unexpected public OCR message: %q", got)
+	}
+	if got := previewPublicMessage(&WorkerError{Code: ErrEngineFailure, Message: "private engine detail"}); got == "We couldn't determine the document language reliably. Choose a language manually." {
+		t.Fatal("generic engine failures must not be mislabeled as language uncertainty")
+	}
+}

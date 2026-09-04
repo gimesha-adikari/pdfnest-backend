@@ -37,10 +37,31 @@ type TextRequest struct {
 }
 
 type MarkupRequest struct {
-	Action string
-	Mode   string
-	Query  string
-	Color  string
+	Action    string
+	Mode      string
+	Query     string
+	Color     string
+	Selection *MarkupSelection
+}
+
+type MarkupSelectionRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+type MarkupSelection struct {
+	Page            int                   `json:"page"`
+	Source          string                `json:"source"`
+	CoordinateSpace string                `json:"coordinate_space"`
+	PageWidth       float64               `json:"page_width"`
+	PageHeight      float64               `json:"page_height"`
+	Rotation        int                   `json:"rotation"`
+	CropBox         []float64             `json:"crop_box,omitempty"`
+	WordIDs         []string              `json:"word_ids"`
+	Rects           []MarkupSelectionRect `json:"rects"`
+	Text            string                `json:"text"`
 }
 
 type PageResult struct {
