@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -34,6 +35,26 @@ var (
 )
 
 const r2DeleteTimeout = 2 * time.Minute
+
+const r2RetentionLockedErrorCode = "ObjectLockedByBucketPolicy"
+
+// RetentionLockedError means the provider intentionally retained an object.
+// Callers must defer physical cleanup rather than treating it as a successful
+// delete or a generic storage outage.
+type RetentionLockedError struct {
+	ProviderCode string
+}
+
+func (e *RetentionLockedError) Error() string {
+	return "object deletion deferred by provider retention"
+}
+
+// IsRetentionLockedError distinguishes a provider retention policy from
+// permission, network, malformed-key, and other storage failures.
+func IsRetentionLockedError(err error) bool {
+	var retentionErr *RetentionLockedError
+	return errors.As(err, &retentionErr)
+}
 
 func getEncryptionKey() []byte {
 	key := strings.TrimSpace(os.Getenv("FILE_ENCRYPTION_KEY"))
@@ -292,6 +313,9 @@ func (s *Store) DeleteObject(ctx context.Context, key string) error {
 		if isMissingObjectError(err) {
 			return nil
 		}
+		if isRetentionLockedObjectError(err) {
+			return &RetentionLockedError{ProviderCode: r2RetentionLockedErrorCode}
+		}
 		return fmt.Errorf("delete from r2 failed: %w", err)
 	}
 	return nil
@@ -308,6 +332,13 @@ func isMissingObjectError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isRetentionLockedObjectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return minio.ToErrorResponse(err).Code == r2RetentionLockedErrorCode
 }
 
 type PresignFile struct {

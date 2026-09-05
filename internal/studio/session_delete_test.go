@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -118,4 +119,52 @@ func TestStorageCleanupAlreadyMissingObjectResolves(t *testing.T) {
 	worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error { return nil }))
 	assert.Equal(t, 1, worker.RunOnceAt(ctx, time.Now().UTC()))
 	assert.Zero(t, cleanupTaskCountForKeys(t, repo, "studio/test/already-missing.pdf"))
+}
+
+func TestStorageCleanupRetentionLockIsDeferredWithoutHotRetry(t *testing.T) {
+	_, repo := getTestServiceAndRepository(t)
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 5, 20, 0, 0, 0, time.UTC)
+	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{"studio/test/retention-locked.pdf"})
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error {
+		return &storage.RetentionLockedError{ProviderCode: "ObjectLockedByBucketPolicy"}
+	}))
+	assert.Zero(t, worker.RunOnceAt(ctx, now))
+
+	var deferred models.StudioStorageCleanupTask
+	require.NoError(t, repo.(*gormRepository).db.Where("id = ?", tasks[0].ID).First(&deferred).Error)
+	assert.Equal(t, 1, deferred.AttemptCount)
+	assert.Equal(t, storageCleanupRetentionDeferredError, deferred.LastError)
+	assert.True(t, deferred.NextAttemptAt.Equal(now.Add(storageCleanupRetentionRetryDelay)))
+	assert.Nil(t, deferred.LeaseExpiresAt)
+}
+
+func TestStorageCleanupPermissionAndNetworkFailuresKeepNormalBackoff(t *testing.T) {
+	for name, deleteErr := range map[string]error{
+		"permission": errors.New("access denied"),
+		"network":    errors.New("temporary network failure"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, repo := getTestServiceAndRepository(t)
+			ctx := context.Background()
+			now := time.Date(2026, time.September, 5, 20, 0, 0, 0, time.UTC)
+			key := "studio/test/" + name + ".pdf"
+			tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{key})
+			require.NoError(t, err)
+
+			worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error {
+				return deleteErr
+			}))
+			assert.Zero(t, worker.RunOnceAt(ctx, now))
+
+			var pending models.StudioStorageCleanupTask
+			require.NoError(t, repo.(*gormRepository).db.Where("id = ?", tasks[0].ID).First(&pending).Error)
+			assert.Equal(t, 1, pending.AttemptCount)
+			assert.Equal(t, "physical storage deletion failed", pending.LastError)
+			assert.True(t, pending.NextAttemptAt.Equal(now.Add(30*time.Second)))
+		})
+	}
 }

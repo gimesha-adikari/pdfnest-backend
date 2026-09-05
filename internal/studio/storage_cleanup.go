@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	storageCleanupBatchSize  = 50
-	storageCleanupLease      = 5 * time.Minute
-	storageCleanupInterval   = 30 * time.Second
-	storageCleanupMaxBackoff = 15 * time.Minute
+	storageCleanupBatchSize           = 50
+	storageCleanupLease               = 5 * time.Minute
+	storageCleanupInterval            = 30 * time.Second
+	storageCleanupMaxBackoff          = 15 * time.Minute
+	storageCleanupRetentionRetryDelay = 24 * time.Hour
 )
+
+const storageCleanupRetentionDeferredError = "physical storage deletion deferred by provider retention"
 
 // StorageObjectDeleter is deliberately narrower than the storage subsystem so
 // failure-injection tests can exercise durable cleanup without a live object
@@ -95,6 +98,12 @@ func (w *storageCleanupWorker) RunTaskAt(ctx context.Context, task models.Studio
 			return false
 		}
 		return true
+	} else if storage.IsRetentionLockedError(err) {
+		attempts := task.AttemptCount + 1
+		if rescheduleErr := w.repo.RescheduleStorageCleanupTask(ctx, task.ID, attempts, now.Add(storageCleanupRetentionRetryDelay), storageCleanupRetentionDeferredError); rescheduleErr != nil {
+			log.Printf("[STUDIO STORAGE CLEANUP] retention deferral failed: %v", rescheduleErr)
+		}
+		return false
 	}
 	attempts := task.AttemptCount + 1
 	if err := w.repo.RescheduleStorageCleanupTask(ctx, task.ID, attempts, now.Add(storageCleanupBackoff(attempts)), "physical storage deletion failed"); err != nil {
