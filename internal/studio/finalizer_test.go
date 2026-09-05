@@ -192,6 +192,48 @@ func finalizerFixture(t *testing.T) (Service, Repository, StudioFinalizer, ident
 	return service, repo, NewFinalizer(repo, processor), ident, session, version, initial
 }
 
+func TestStudioFinalizerMaterializesSourcePersistedInLocalModeWithR2Environment(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("STORAGE_MODE", "local")
+	localRoot := t.TempDir()
+	t.Setenv("LOCAL_STORAGE_DIR", localRoot)
+	t.Setenv("R2_BUCKET", "stale-development-bucket")
+	t.Setenv("R2_ACCESS_KEY", "stale-access-key")
+	t.Setenv("R2_SECRET_KEY", "stale-secret-key")
+	t.Setenv("R2_ENDPOINT", "127.0.0.1:1")
+
+	service, repo := getTestServiceAndRepository(t)
+	ctx := context.Background()
+	ident := identity.Identity{ID: "finalizer-local-selector-" + uuid.NewString(), Type: identity.TypeGuest}
+	assetID := "studio-finalizer-local-selector-" + uuid.NewString()
+	sourceKey := storage.BuildKey("studio/sources", ".pdf")
+	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "rendering", "corpus", "standard_a4_10p.pdf")
+	require.NoError(t, persistStudioSource(ctx, fixturePath, sourceKey, "application/pdf"))
+
+	dimensions, err := api.PageDimsFile(fixturePath)
+	require.NoError(t, err)
+	initial := vdm.DocumentModel{
+		DocumentID: "finalizer-local-selector-doc-" + uuid.NewString(),
+		PageCount:  1,
+		Pages: []vdm.PageDescriptor{{
+			PageID:           "page-local-selector-" + uuid.NewString(),
+			SourceAssetID:    &assetID,
+			SourcePageNumber: 1,
+			Dimensions:       &vdm.Dimensions{Width: dimensions[0].Width, Height: dimensions[0].Height},
+			Overlays:         []vdm.Overlay{},
+		}},
+	}
+	_, session, _, err := service.CreateDocument(ctx, ident, "local-selector.pdf", 1, 1, assetID, sourceKey, initial)
+	require.NoError(t, err)
+
+	materialized, err := NewFinalizer(repo, &finalizerTestProcessor{}).MaterializeVersion(ctx, session.ID, ident)
+	require.NoError(t, err)
+	defer materialized.Cleanup()
+	require.True(t, strings.HasPrefix(materialized.Path, localRoot+string(os.PathSeparator)), "snapshot must resolve from the active local root")
+	require.True(t, storage.ObjectExists(ctx, sourceKey))
+	require.True(t, storage.ObjectExists(ctx, materialized.Asset.R2Key))
+}
+
 func executeFinalizerCommand(t *testing.T, coordinator OperationCoordinator, sessionID uuid.UUID, ident identity.Identity, baseVersionID uuid.UUID, operation CommandName, parameters interface{}) *ApplyOperationResult {
 	t.Helper()
 	raw, err := json.Marshal(parameters)

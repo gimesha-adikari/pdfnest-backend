@@ -272,23 +272,9 @@ func containsEncryptedPDFError(message string) bool {
 }
 
 func persistStudioSource(ctx context.Context, sourcePath, key, contentType string) error {
-	if store, err := storage.Default(); err == nil && store != nil {
-		return store.UploadFile(sourcePath, key, contentType)
-	}
-
-	source, err := os.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-	_, _, err = storage.SaveLocalStream(ctx, key, source)
-	return err
+	return storage.SaveObjectFile(ctx, key, sourcePath, contentType)
 }
 
 func cleanupStudioSource(ctx context.Context, key string) {
-	if store, err := storage.Default(); err == nil && store != nil {
-		_ = store.DeleteObject(ctx, key)
-		return
-	}
-	_ = storage.DeleteLocalObject(key)
+	_ = storage.DeleteObject(ctx, key)
 }

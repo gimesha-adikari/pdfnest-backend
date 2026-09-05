@@ -840,24 +840,11 @@ func validateFinalOutput(path string, expectedPageCount int) (os.FileInfo, error
 }
 
 func persistStudioPDF(ctx context.Context, outputPath, key string) error {
-	if store, err := storage.Default(); err == nil && store != nil {
-		return store.UploadFile(outputPath, key, "application/pdf")
-	}
-	file, err := os.Open(outputPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	_, _, err = storage.SaveLocalStream(ctx, key, file)
-	return err
+	return storage.SaveObjectFile(ctx, key, outputPath, "application/pdf")
 }
 
 func cleanupStudioObject(ctx context.Context, key string) {
-	if store, err := storage.Default(); err == nil && store != nil {
-		_ = store.DeleteObject(ctx, key)
-		return
-	}
-	_ = storage.DeleteLocalObject(key)
+	_ = storage.DeleteObject(ctx, key)
 }
 
 func exportExpiry(now, sessionExpiresAt time.Time) time.Time {

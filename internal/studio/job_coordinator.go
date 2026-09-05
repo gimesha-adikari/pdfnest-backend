@@ -358,11 +358,7 @@ func stageStudioJobSource(ctx context.Context, path string, documentID uuid.UUID
 }
 func stageStudioJobBytes(ctx context.Context, data []byte, documentID uuid.UUID, kind string) (string, error) {
 	key := storage.BuildKey(filepath.ToSlash(filepath.Join("studio", "jobs", "staging", documentID.String(), kind)), ".json")
-	if store, err := storage.Default(); err == nil && store != nil {
-		return key, store.UploadBytes(data, key, "application/json")
-	}
-	_, _, err := storage.SaveLocalStream(ctx, key, bytes.NewReader(data))
-	return key, err
+	return key, storage.SaveObjectBytes(ctx, key, data, "application/json")
 }
 
 func (c *studioJobCoordinator) Get(ctx context.Context, sessionID, jobID uuid.UUID, ident identity.Identity) (*models.StudioJob, error) {

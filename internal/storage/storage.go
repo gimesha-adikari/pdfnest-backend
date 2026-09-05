@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -135,6 +136,51 @@ func SaveLocalFile(ctx context.Context, key, sourcePath string) error {
 	return nil
 }
 
+// SaveObjectFile persists a server-created file through the active storage
+// selector. Callers must use this instead of consulting Default directly so a
+// local development run cannot be redirected by incidental R2 dotenv values.
+func SaveObjectFile(ctx context.Context, key, sourcePath, contentType string) error {
+	sanitizedKey, err := sanitizeObjectKey(key)
+	if err != nil {
+		return fmt.Errorf("invalid storage key: %w", err)
+	}
+	if !RemoteStorageEnabled() {
+		return SaveLocalFile(ctx, sanitizedKey, sourcePath)
+	}
+
+	store, err := Default()
+	if err != nil {
+		return err
+	}
+	if store == nil {
+		return errors.New("configured remote storage is unavailable")
+	}
+	return store.UploadFile(sourcePath, sanitizedKey, contentType)
+}
+
+// SaveObjectBytes persists server-created bytes through the active storage
+// selector. It is the bytes counterpart to SaveObjectFile and preserves the
+// same local/remote invariant for staged Studio job payloads.
+func SaveObjectBytes(ctx context.Context, key string, data []byte, contentType string) error {
+	sanitizedKey, err := sanitizeObjectKey(key)
+	if err != nil {
+		return fmt.Errorf("invalid storage key: %w", err)
+	}
+	if !RemoteStorageEnabled() {
+		_, _, err := SaveLocalStream(ctx, sanitizedKey, bytes.NewReader(data))
+		return err
+	}
+
+	store, err := Default()
+	if err != nil {
+		return err
+	}
+	if store == nil {
+		return errors.New("configured remote storage is unavailable")
+	}
+	return store.UploadBytes(data, sanitizedKey, contentType)
+}
+
 // DeleteLocalObject removes a canonical object from the local development
 // store. It is used only to roll back a failed database registration after a
 // source file was safely persisted.
@@ -163,7 +209,10 @@ func DeleteObject(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	return store.client.RemoveObject(ctx, store.bucket, key, minio.RemoveObjectOptions{})
+	if store == nil {
+		return errors.New("configured remote storage is unavailable")
+	}
+	return store.DeleteObject(ctx, key)
 }
 
 // ObjectExists verifies whether a canonical storage key exists in local storage or R2.
