@@ -10,6 +10,19 @@ type Service interface {
 	GetJobDownload(jobID string) (*http.Response, error)
 }
 
+type EditorLanguageRequest struct {
+	Mode      string   `json:"language_mode"`
+	Languages []string `json:"languages"`
+}
+
+type StudioEditorLanguageService interface {
+	ExtractLayoutV2WithLanguage(sourceKey, filePassword, sourceName string, language EditorLanguageRequest) (*WorkerJobSubmission, error)
+}
+
+type GeneralEditorOCRV2LanguageService interface {
+	ExtractLayoutV2ForGeneralEditorWithLanguage(sourceKey, filePassword, sourceName string, language EditorLanguageRequest) (*WorkerJobSubmission, error)
+}
+
 // LegacyEditorService is the explicit seam for the ordinary /edit-pdf
 // product. It is separate from the generic ExtractLayout method so Studio
 // compatibility callers cannot inherit the legacy editor selector.

@@ -26,16 +26,29 @@ type WorkerJobRecord struct {
 	Message         string         `json:"message"`
 	Result          map[string]any `json:"result"`
 	Error           string         `json:"error"`
+	ErrorCode       string         `json:"error_code"`
 	CancelRequested bool           `json:"cancel_requested"`
 	Payload         map[string]any `json:"payload"`
 }
 
 type editorExtractRequest struct {
-	SourceKey    string `json:"source_key"`
-	FilePassword string `json:"file_password,omitempty"`
-	SourceName   string `json:"source_name,omitempty"`
-	OCRV2        bool   `json:"ocr_v2,omitempty"`
-	Consumer     string `json:"consumer,omitempty"`
+	SourceKey    string   `json:"source_key"`
+	FilePassword string   `json:"file_password,omitempty"`
+	SourceName   string   `json:"source_name,omitempty"`
+	OCRV2        bool     `json:"ocr_v2,omitempty"`
+	Consumer     string   `json:"consumer,omitempty"`
+	LanguageMode string   `json:"language_mode,omitempty"`
+	Languages    []string `json:"languages,omitempty"`
+}
+
+func normalizedEditorLanguage(language EditorLanguageRequest) EditorLanguageRequest {
+	if language.Mode == "" {
+		language.Mode = "EXPLICIT"
+	}
+	if len(language.Languages) == 0 {
+		language.Languages = []string{"eng"}
+	}
+	return language
 }
 
 type editorCompileRequest struct {
@@ -105,15 +118,21 @@ func (s *service) ExtractLayoutForLegacyEditor(sourceKey string, filePassword st
 }
 
 func (s *service) ExtractLayoutV2(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
-	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
-		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "studio",
-	})
+	return s.ExtractLayoutV2WithLanguage(sourceKey, filePassword, sourceName, EditorLanguageRequest{Mode: "EXPLICIT", Languages: []string{"eng"}})
+}
+
+func (s *service) ExtractLayoutV2WithLanguage(sourceKey string, filePassword string, sourceName string, language EditorLanguageRequest) (*WorkerJobSubmission, error) {
+	language = normalizedEditorLanguage(language)
+	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "studio", LanguageMode: language.Mode, Languages: language.Languages})
 }
 
 func (s *service) ExtractLayoutV2ForGeneralEditor(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {
-	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{
-		SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "general_editor",
-	})
+	return s.ExtractLayoutV2ForGeneralEditorWithLanguage(sourceKey, filePassword, sourceName, EditorLanguageRequest{Mode: "EXPLICIT", Languages: []string{"eng"}})
+}
+
+func (s *service) ExtractLayoutV2ForGeneralEditorWithLanguage(sourceKey string, filePassword string, sourceName string, language EditorLanguageRequest) (*WorkerJobSubmission, error) {
+	language = normalizedEditorLanguage(language)
+	return postJSON(workerBaseURL()+"/api/v1/editor/extract", editorExtractRequest{SourceKey: sourceKey, FilePassword: filePassword, SourceName: sourceName, OCRV2: true, Consumer: "general_editor", LanguageMode: language.Mode, Languages: language.Languages})
 }
 
 func (s *service) CompileLayout(sourceKey string, pagesJSONKey string, sourceName string) (*WorkerJobSubmission, error) {

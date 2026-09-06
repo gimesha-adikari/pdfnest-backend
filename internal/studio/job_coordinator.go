@@ -59,7 +59,10 @@ func validStudioMarkupMode(mode StudioMarkupMode) bool {
 	}
 }
 
-type EditExtractJobParameters struct{}
+type EditExtractJobParameters struct {
+	LanguageMode string   `json:"language_mode"`
+	Languages    []string `json:"languages"`
+}
 type EditCompileJobParameters struct {
 	EditorStateID uuid.UUID       `json:"editor_state_id"`
 	Layout        json.RawMessage `json:"layout"`
@@ -77,6 +80,7 @@ type StudioJobResult struct {
 }
 type workerJobStatus struct {
 	ID, Status, Message, Error string
+	ErrorCode                  string
 	Progress                   int
 	Result                     map[string]any
 }
@@ -90,6 +94,9 @@ type StudioWorkerGateway interface {
 	Status(context.Context, StudioJobName, string) (workerJobStatus, error)
 	Cancel(context.Context, StudioJobName, string) (workerJobStatus, error)
 	Download(context.Context, StudioJobName, string) (*http.Response, error)
+}
+type StudioLanguageWorkerGateway interface {
+	SubmitEditWithLanguage(context.Context, StudioJobName, string, string, string, edit.EditorLanguageRequest) (workerJobStatus, error)
 }
 
 type studioWorkerGateway struct {
@@ -121,13 +128,16 @@ func (g *studioWorkerGateway) SubmitMarkup(_ context.Context, op StudioJobName, 
 	}
 	return workerStatusFrom(s.JobID, s.Status, 0, "", "", nil), nil
 }
-func (g *studioWorkerGateway) SubmitEdit(_ context.Context, op StudioJobName, source, payload, name string) (workerJobStatus, error) {
+func (g *studioWorkerGateway) SubmitEdit(ctx context.Context, op StudioJobName, source, payload, name string) (workerJobStatus, error) {
+	return g.SubmitEditWithLanguage(ctx, op, source, payload, name, edit.EditorLanguageRequest{Mode: "EXPLICIT", Languages: []string{"eng"}})
+}
+func (g *studioWorkerGateway) SubmitEditWithLanguage(_ context.Context, op StudioJobName, source, payload, name string, language edit.EditorLanguageRequest) (workerJobStatus, error) {
 	var s *edit.WorkerJobSubmission
 	var e error
 	switch op {
 	case StudioJobEditExtract:
-		if v2, ok := g.edit.(edit.OCRV2Service); ok {
-			s, e = v2.ExtractLayoutV2(source, "", name)
+		if v2, ok := g.edit.(edit.StudioEditorLanguageService); ok {
+			s, e = v2.ExtractLayoutV2WithLanguage(source, "", name, language)
 		} else {
 			s, e = g.edit.ExtractLayout(source, "", name)
 		}
@@ -153,7 +163,9 @@ func (g *studioWorkerGateway) Status(_ context.Context, op StudioJobName, id str
 	if e != nil {
 		return workerJobStatus{}, e
 	}
-	return workerStatusFrom(r.ID, r.Status, r.Progress, r.Message, r.Error, r.Result), nil
+	status := workerStatusFrom(r.ID, r.Status, r.Progress, r.Message, r.Error, r.Result)
+	status.ErrorCode = r.ErrorCode
+	return status, nil
 }
 func (g *studioWorkerGateway) Cancel(_ context.Context, op StudioJobName, id string) (workerJobStatus, error) {
 	if strings.HasPrefix(string(op), "markup_") {
@@ -273,6 +285,20 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 	var submitted workerJobStatus
 	if strings.HasPrefix(string(req.Operation), "markup_") {
 		submitted, err = c.gateway.SubmitMarkup(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
+	} else if req.Operation == StudioJobEditExtract {
+		var parameters EditExtractJobParameters
+		_ = decodeStrictParameters(canonical, &parameters)
+		language, languageErr := validateStudioEditorLanguage(parameters)
+		if languageErr != nil {
+			cleanupStudioObject(ctx, sourceKey)
+			cleanupStudioObject(ctx, payloadKey)
+			return nil, languageErr
+		}
+		if gateway, ok := c.gateway.(StudioLanguageWorkerGateway); ok {
+			submitted, err = gateway.SubmitEditWithLanguage(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName, language)
+		} else {
+			submitted, err = c.gateway.SubmitEdit(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
+		}
 	} else {
 		submitted, err = c.gateway.SubmitEdit(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
 	}
@@ -292,6 +318,27 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 		return nil, err
 	}
 	return &StudioJobResult{Job: job}, nil
+}
+
+func validateStudioEditorLanguage(parameters EditExtractJobParameters) (edit.EditorLanguageRequest, error) {
+	mode := strings.ToUpper(strings.TrimSpace(parameters.LanguageMode))
+	if mode != "AUTO" && mode != "EXPLICIT" {
+		return edit.EditorLanguageRequest{}, ErrInvalidJob
+	}
+	if len(parameters.Languages) == 0 || len(parameters.Languages) > 3 {
+		return edit.EditorLanguageRequest{}, ErrInvalidJob
+	}
+	seen := map[string]bool{}
+	languages := make([]string, 0, len(parameters.Languages))
+	for _, raw := range parameters.Languages {
+		code := strings.ToLower(strings.TrimSpace(raw))
+		if code != "eng" && code != "sin" && code != "tam" || seen[code] {
+			return edit.EditorLanguageRequest{}, ErrInvalidJob
+		}
+		seen[code] = true
+		languages = append(languages, code)
+	}
+	return edit.EditorLanguageRequest{Mode: mode, Languages: languages}, nil
 }
 
 func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobName, canonical []byte, documentID uuid.UUID) (string, error) {
@@ -425,6 +472,7 @@ func applyWorkerStatus(job *models.StudioJob, s workerJobStatus) {
 	job.Progress = s.Progress
 	job.Message = s.Message
 	job.Error = s.Error
+	job.ErrorCode = s.ErrorCode
 	if s.Result != nil {
 		b, _ := json.Marshal(s.Result)
 		job.Result = models.JSON(b)

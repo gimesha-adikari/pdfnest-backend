@@ -86,11 +86,15 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 
 	var submission *WorkerJobSubmission
 	if strings.EqualFold(strings.TrimSpace(c.FormValue("ocr_v2")), "true") {
-		v2, ok := cr.service.(GeneralEditorOCRV2Service)
+		v2, ok := cr.service.(GeneralEditorOCRV2LanguageService)
 		if !ok {
 			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "OCR V2 editor extraction is unavailable"})
 		}
-		submission, err = v2.ExtractLayoutV2ForGeneralEditor(sourceKey, filePassword, upload.Header.Filename)
+		language, languageErr := parseEditorLanguage(c.FormValue("language_mode"), c.FormValue("languages"))
+		if languageErr != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": languageErr.Error()})
+		}
+		submission, err = v2.ExtractLayoutV2ForGeneralEditorWithLanguage(sourceKey, filePassword, upload.Header.Filename, language)
 	} else {
 		legacy, ok := cr.service.(LegacyEditorService)
 		if !ok {
@@ -113,6 +117,40 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		"source_tracker": sourceKey,
 		"source_name":    upload.Header.Filename,
 	})
+}
+
+func parseEditorLanguage(mode string, rawLanguages string) (EditorLanguageRequest, error) {
+	mode = strings.ToUpper(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "EXPLICIT"
+	}
+	if mode != "AUTO" && mode != "EXPLICIT" {
+		return EditorLanguageRequest{}, fmt.Errorf("unsupported editor language mode")
+	}
+	parts := strings.Split(rawLanguages, ",")
+	languages := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, raw := range parts {
+		code := strings.ToLower(strings.TrimSpace(raw))
+		if code == "" {
+			continue
+		}
+		if code != "eng" && code != "sin" && code != "tam" {
+			return EditorLanguageRequest{}, fmt.Errorf("unsupported editor language")
+		}
+		if !seen[code] {
+			seen[code] = true
+			languages = append(languages, code)
+		}
+	}
+	if len(languages) == 0 {
+		if mode == "AUTO" {
+			languages = []string{"eng", "sin", "tam"}
+		} else {
+			languages = []string{"eng"}
+		}
+	}
+	return EditorLanguageRequest{Mode: mode, Languages: languages}, nil
 }
 
 func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {

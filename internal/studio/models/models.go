@@ -141,6 +141,7 @@ type StudioJob struct {
 	Progress        int        `gorm:"not null;default:0" json:"progress"`
 	Message         string     `gorm:"type:text" json:"message"`
 	Error           string     `gorm:"type:text" json:"error,omitempty"`
+	ErrorCode       string     `gorm:"type:varchar(64)" json:"error_code,omitempty"`
 	IdempotencyKey  string     `gorm:"type:varchar(128);uniqueIndex:idx_studio_job_idempotency;not null" json:"idempotency_key"`
 	Parameters      JSON       `gorm:"type:jsonb;not null" json:"parameters"`
 	// Result is internal reconciliation metadata. It may contain worker/R2

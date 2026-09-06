@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"pdfnest-backend/internal/studio/models"
 )
@@ -75,4 +76,44 @@ func TestEditedEditorLayoutCannotAddOrDropBaselineElements(t *testing.T) {
 	b, _, _ := decodeEditorLayout(base)
 	a, _, _ := decodeEditorLayout(added)
 	assert.ErrorIs(t, validateEditedEditorLayout(b, a), ErrInvalidJob)
+}
+
+func TestEditorLayoutAcceptsTypedStylesAndRejectsUnknownOrInvalidStyles(t *testing.T) {
+	valid := []byte(`{"success":true,"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"e1","text":"base","original_text":"base","target_substring":"as","selection_start":1,"selection_end":3,"x":10,"y":20,"width":30,"height":12,"size":10,"font":"helv","style":{"fontFamily":"cour","fontSize":14,"bold":true,"italic":true,"underline":true,"strikethrough":true,"color":"#112233","background":"#fef08a"}}]}]}`)
+	_, _, err := decodeEditorLayout(valid)
+	assert.NoError(t, err)
+	invalidFamily := []byte(`{"success":true,"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"e1","text":"x","x":1,"y":1,"width":1,"height":1,"size":10,"font":"helv","style":{"fontFamily":"arbitrary"}}]}]}`)
+	_, _, err = decodeEditorLayout(invalidFamily)
+	assert.ErrorIs(t, err, ErrInvalidJob)
+	unknown := []byte(`{"success":true,"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"e1","text":"x","x":1,"y":1,"width":1,"height":1,"size":10,"font":"helv","style":{"provider_payload":"no"}}]}]}`)
+	_, _, err = decodeEditorLayout(unknown)
+	assert.ErrorIs(t, err, ErrInvalidJob)
+	invalidRange := []byte(`{"success":true,"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"e1","text":"base","original_text":"base","target_substring":"wrong","selection_start":1,"selection_end":3,"x":1,"y":1,"width":1,"height":1,"size":10,"font":"helv"}]}]}`)
+	_, _, err = decodeEditorLayout(invalidRange)
+	assert.ErrorIs(t, err, ErrInvalidJob)
+}
+
+func TestEditedEditorLayoutPreservesImmutableIdentityAndGeometry(t *testing.T) {
+	baseRaw := []byte(`{"success":true,"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"e1","text":"base","original_text":"base","x":10,"y":20,"width":30,"height":12,"size":10,"font":"helv"}]}]}`)
+	base, _, err := decodeEditorLayout(baseRaw)
+	require.NoError(t, err)
+	edited, _, err := decodeEditorLayout(baseRaw)
+	require.NoError(t, err)
+	edited.Pages[0].Elements[0].Text = "edited"
+	assert.NoError(t, validateEditedEditorLayout(base, edited))
+	edited.Pages[0].Elements[0].X++
+	assert.ErrorIs(t, validateEditedEditorLayout(base, edited), ErrInvalidJob)
+}
+
+func TestStudioEditorLanguageContractIsExplicitAndBounded(t *testing.T) {
+	value, err := validateStudioEditorLanguage(EditExtractJobParameters{LanguageMode: "AUTO", Languages: []string{"eng", "sin", "tam"}})
+	assert.NoError(t, err)
+	assert.Equal(t, "AUTO", value.Mode)
+	assert.Equal(t, []string{"eng", "sin", "tam"}, value.Languages)
+	_, err = validateStudioEditorLanguage(EditExtractJobParameters{LanguageMode: "EXPLICIT", Languages: []string{"sin"}})
+	assert.NoError(t, err)
+	_, err = validateStudioEditorLanguage(EditExtractJobParameters{LanguageMode: "AUTO", Languages: []string{"eng", "fra"}})
+	assert.ErrorIs(t, err, ErrInvalidJob)
+	_, err = validateStudioEditorLanguage(EditExtractJobParameters{})
+	assert.ErrorIs(t, err, ErrInvalidJob)
 }

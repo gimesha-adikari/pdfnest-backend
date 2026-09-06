@@ -47,6 +47,7 @@ func getTestServiceAndRepository(t *testing.T) (Service, Repository) {
 		&models.StudioExport{},
 		&models.StudioStorageCleanupTask{},
 		&models.StudioEditorState{},
+		&models.StudioJob{},
 	)
 	require.NoError(t, err)
 
