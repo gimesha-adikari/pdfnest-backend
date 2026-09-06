@@ -65,6 +65,7 @@ func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
 
 	now := time.Now()
 	evictionCount := 0
+	dedicatedDir := filepath.Clean(temp.GetDir())
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -73,6 +74,11 @@ func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
 		}
 
 		fullPath := filepath.Join(dirPath, name)
+
+		// Never delete the active dedicated temp directory itself or any pdfnest-temp workspace directory
+		if filepath.Clean(fullPath) == dedicatedDir || strings.HasPrefix(name, "pdfnest-temp") {
+			continue
+		}
 
 		lstatInfo, err := os.Lstat(fullPath)
 		if err != nil {

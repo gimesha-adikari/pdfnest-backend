@@ -68,3 +68,35 @@ func TestJanitor_SymlinkSafety(t *testing.T) {
 		t.Errorf("CRITICAL SECURITY DEFECT: Janitor followed symlink and deleted target file %s", targetFile)
 	}
 }
+
+func TestJanitor_NeverDeletesDedicatedTempDir(t *testing.T) {
+	tmpDir := temp.GetDir()
+
+	// Simulate that the dedicated temp directory was created hours ago
+	oldTime := time.Now().Add(-5 * time.Hour)
+	if err := os.Chtimes(tmpDir, oldTime, oldTime); err != nil {
+		t.Fatalf("Failed to chtimes on tempDir: %v", err)
+	}
+
+	// Create a test file inside dedicated dir
+	probeFile := filepath.Join(tmpDir, "active-probe.pdf")
+	_ = os.WriteFile(probeFile, []byte("probe content"), 0600)
+	defer os.Remove(probeFile)
+
+	// Run janitor sweep with TTL = 30 minutes
+	sweepExpiredTempFiles(30 * time.Minute)
+
+	// Assert the dedicated directory itself was NOT evicted
+	info, err := os.Stat(tmpDir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("REGRESSION DEFECT: Dedicated temp directory %s was evicted by janitor: %v", tmpDir, err)
+	}
+
+	// Assert that we can still write inside the dedicated directory
+	testFile := filepath.Join(tmpDir, "post-sweep-test.pdf")
+	if err := os.WriteFile(testFile, []byte("writable"), 0600); err != nil {
+		t.Fatalf("Failed to write to dedicated temp directory after janitor sweep: %v", err)
+	}
+	defer os.Remove(testFile)
+}
+
