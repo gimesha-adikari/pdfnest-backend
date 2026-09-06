@@ -63,7 +63,7 @@ func (p *studioMarkupAnalysisProvider) AnalyzeMarkup(ctx context.Context, sessio
 	if err != nil {
 		return nil, err
 	}
-	if asset.DocumentID != sess.DocumentID || asset.AssetType != "source_pdf" {
+	if asset.DocumentID != sess.DocumentID || (asset.AssetType != "source_pdf" && asset.AssetType != "job_result" && asset.AssetType != "materialized" && asset.AssetType != "snapshot") {
 		return nil, ErrUnauthorized
 	}
 	path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "studio-markup-analysis", ".pdf")
