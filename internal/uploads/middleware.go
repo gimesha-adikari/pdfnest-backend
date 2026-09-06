@@ -75,6 +75,13 @@ func Prepare() fiber.Handler {
 				path, saveErr := saveHeader(c, fh)
 				if saveErr != nil {
 					cleanup()
+					log.Printf(
+						"[UPLOAD_STAGE_FAILURE] field=%q filename=%q temp_dir=%q err=%v",
+						field,
+						filepath.Base(fh.Filename),
+						temp.GetDir(),
+						saveErr,
+					)
 					return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 						"code":    "UPLOAD_STAGE_FAILURE",
 						"message": "Failed to stage uploaded file into workspace.",
