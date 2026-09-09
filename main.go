@@ -77,9 +77,10 @@ func main() {
 
 	app := fiber.New(fiber.Config{
 		BodyLimit:    100 * 1024 * 1024,
-		ReadTimeout:  60 * time.Second,
+		ReadTimeout:  backendReadTimeout,
 		WriteTimeout: 120 * time.Second,
 	})
+	app.Server().HeaderReceived = requestReadConfig
 
 	app.Use(func(c *fiber.Ctx) error {
 		log.Printf(">>> %s %s", c.Method(), c.OriginalURL())
