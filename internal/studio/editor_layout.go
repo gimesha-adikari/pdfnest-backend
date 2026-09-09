@@ -14,6 +14,7 @@ import (
 type EditorLayout struct {
 	SchemaVersion  string         `json:"schema_version,omitempty"`
 	OCRV2          bool           `json:"ocr_v2,omitempty"`
+	GeometrySpace  string         `json:"geometry_space,omitempty"`
 	Success        bool           `json:"success"`
 	Pages          []EditorPage   `json:"pages"`
 	Source         map[string]any `json:"source,omitempty"`
@@ -116,6 +117,9 @@ func validateEditorLayout(layout EditorLayout) error {
 	if layout.LanguageMode != "" && layout.LanguageMode != "AUTO" && layout.LanguageMode != "EXPLICIT" {
 		return ErrInvalidJob
 	}
+	if layout.GeometrySpace != "" && layout.GeometrySpace != "studio_visible" {
+		return ErrInvalidJob
+	}
 	if len(layout.Languages) > 3 {
 		return ErrInvalidJob
 	}
@@ -193,7 +197,7 @@ func validateEditedEditorLayout(base EditorLayout, edited EditorLayout) error {
 	if len(base.Pages) != len(edited.Pages) {
 		return ErrInvalidJob
 	}
-	if base.LanguageMode != edited.LanguageMode || strings.Join(base.Languages, "+") != strings.Join(edited.Languages, "+") {
+	if base.LanguageMode != edited.LanguageMode || strings.Join(base.Languages, "+") != strings.Join(edited.Languages, "+") || base.GeometrySpace != edited.GeometrySpace {
 		return ErrInvalidJob
 	}
 	for i := range base.Pages {

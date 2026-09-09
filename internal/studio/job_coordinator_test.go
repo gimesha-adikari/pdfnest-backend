@@ -68,6 +68,17 @@ func TestEditorLayoutValidationRequiresStableIDsAndFiniteGeometry(t *testing.T) 
 	assert.ErrorIs(t, err, ErrInvalidJob)
 }
 
+func TestEditorLayoutAcceptsStudioVisibleGeometrySpace(t *testing.T) {
+	valid := []byte(`{"geometry_space":"studio_visible","pages":[{"page_num":1,"width":612,"height":792,"kind":"scanned","elements":[{"id":"p1-ocr-1","text":"edited","original_text":"source","x":10,"y":20,"width":40,"height":12,"size":10,"font":"tiro"}]}]}`)
+	layout, _, err := decodeEditorLayout(valid)
+	require.NoError(t, err)
+	assert.Equal(t, "studio_visible", layout.GeometrySpace)
+
+	invalid := []byte(`{"geometry_space":"native_pdf","pages":[{"page_num":1,"width":612,"height":792,"kind":"scanned","elements":[{"id":"p1-ocr-1","text":"edited","original_text":"source","x":10,"y":20,"width":40,"height":12,"size":10,"font":"tiro"}]}]}`)
+	_, _, err = decodeEditorLayout(invalid)
+	assert.ErrorIs(t, err, ErrInvalidJob)
+}
+
 func TestEditedEditorLayoutCannotAddOrDropBaselineElements(t *testing.T) {
 	base := []byte(`{"pages":[{"page_num":1,"width":612,"height":792,"kind":"text","elements":[{"id":"p1-text-1","text":"Before","x":10,"y":20,"width":40,"height":12,"size":10,"font":"Helvetica"}]}]}`)
 	_, _, err := decodeEditorLayout(base)
