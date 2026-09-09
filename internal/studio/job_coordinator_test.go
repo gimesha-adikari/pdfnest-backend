@@ -10,7 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"pdfnest-backend/internal/markup"
 	"pdfnest-backend/internal/studio/models"
+	"pdfnest-backend/internal/studio/vdm"
 )
 
 func TestStudioJobNamesAreClosed(t *testing.T) {
@@ -25,6 +27,25 @@ func TestStudioMarkupModesExposeOnlyPublicModes(t *testing.T) {
 	assert.True(t, validStudioMarkupMode(StudioMarkupModeOCR))
 	assert.False(t, validStudioMarkupMode("text"), "worker-internal text mode must not cross the Studio boundary")
 	assert.False(t, validStudioMarkupMode("unexpected"))
+}
+
+func TestMarkupTargetPageIDsAreStableAndDeduplicated(t *testing.T) {
+	base := &vdm.DocumentModel{Pages: []vdm.PageDescriptor{
+		{PageID: "page-one"},
+		{PageID: "page-two"},
+		{PageID: "page-three"},
+	}}
+	raw, err := json.Marshal(MarkupJobParameters{Boxes: []markup.Box{
+		{Page: 3}, {Page: 1}, {Page: 3},
+	}})
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `["page-three","page-one"]`, string(markupTargetPageIDs(base, models.JSON(raw))))
+}
+
+func TestMarkupTargetPageIDsFailClosedForInvalidPayload(t *testing.T) {
+	base := &vdm.DocumentModel{Pages: []vdm.PageDescriptor{{PageID: "page-one"}}}
+	assert.Nil(t, markupTargetPageIDs(base, models.JSON([]byte(`{"boxes":[{"page":2}]}`))))
 }
 
 func TestStudioStagePayloadRejectsWorkerInternalMarkupMode(t *testing.T) {

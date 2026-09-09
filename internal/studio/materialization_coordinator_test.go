@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -91,6 +92,32 @@ func copyPDFForMaterializationTest(inputPath, outputPath string) error {
 		return err
 	}
 	return out.Close()
+}
+
+func TestMarkupMaterializedVDMPreservesPageIDs(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "rendering", "corpus", "standard_a4_10p.pdf")
+	dimensions, err := api.PageDimsFile(fixturePath)
+	require.NoError(t, err)
+	assetID := "source-asset"
+	base := &vdm.DocumentModel{DocumentID: "markup-doc", PageCount: len(dimensions)}
+	for index, dimension := range dimensions {
+		base.Pages = append(base.Pages, vdm.PageDescriptor{
+			PageID: "stable-page-" + strconv.Itoa(index+1), SourceAssetID: &assetID,
+			SourcePageNumber: index + 1, Dimensions: &vdm.Dimensions{Width: dimension.Width, Height: dimension.Height},
+			Rotation: 90, CropBox: []float64{1, 2, 3, 4}, Overlays: []vdm.Overlay{{ID: "overlay-" + strconv.Itoa(index+1), Type: "highlight"}},
+		})
+	}
+
+	derived, err := deriveMaterializedVDMForJob(base, fixturePath, len(dimensions), StudioJobMarkupHighlight)
+	require.NoError(t, err)
+	assert.Equal(t, base.PageCount, derived.PageCount)
+	for index, page := range derived.Pages {
+		assert.Equal(t, base.Pages[index].PageID, page.PageID)
+		assert.Equal(t, index+1, page.SourcePageNumber)
+		assert.Equal(t, 0, page.Rotation)
+		assert.Empty(t, page.CropBox)
+		assert.Empty(t, page.Overlays)
+	}
 }
 
 func materializationRequest(t *testing.T, base uuid.UUID, key string, operation MaterializationName, params interface{}) MaterializationRequest {

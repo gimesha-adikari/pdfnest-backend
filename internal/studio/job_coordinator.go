@@ -408,6 +408,37 @@ func stageStudioJobBytes(ctx context.Context, data []byte, documentID uuid.UUID,
 	return key, storage.SaveObjectBytes(ctx, key, data, "application/json")
 }
 
+func markupTargetPageIDs(base *vdm.DocumentModel, raw models.JSON) models.JSON {
+	var parameters MarkupJobParameters
+	if err := json.Unmarshal(raw, &parameters); err != nil || len(parameters.Boxes) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(parameters.Boxes))
+	seen := make(map[string]struct{}, len(parameters.Boxes))
+	for _, box := range parameters.Boxes {
+		if box.Page < 1 || box.Page > len(base.Pages) {
+			return nil
+		}
+		pageID := base.Pages[box.Page-1].PageID
+		if pageID == "" {
+			return nil
+		}
+		if _, exists := seen[pageID]; exists {
+			continue
+		}
+		seen[pageID] = struct{}{}
+		ids = append(ids, pageID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return nil
+	}
+	return models.JSON(data)
+}
+
 func (c *studioJobCoordinator) Get(ctx context.Context, sessionID, jobID uuid.UUID, ident identity.Identity) (*models.StudioJob, error) {
 	job, err := c.repo.GetJob(ctx, jobID)
 	if err != nil {
@@ -525,7 +556,7 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 	if err != nil {
 		return err
 	}
-	modelState, err := deriveMaterializedVDM(baseModel, path, pages)
+	modelState, err := deriveMaterializedVDMForJob(baseModel, path, pages, StudioJobName(job.JobType))
 	if err != nil {
 		return err
 	}
@@ -558,7 +589,11 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 	snap := &models.StudioSnapshot{ID: uuid.New(), VersionID: versionID, AssetID: assetID, PageCount: pages, CreatedAt: now}
 	asset := &models.StudioAsset{ID: assetID, DocumentID: job.DocumentID, AssetType: "job_result", R2Key: key, ByteSize: info.Size(), MimeType: "application/pdf"}
 	ver := &models.StudioVersion{ID: versionID, DocumentID: job.DocumentID, ParentVersionID: &job.BaseVersionID, VersionNumber: base.VersionNumber + 1, Status: "ready", OperationType: job.JobType, VirtualModel: models.JSON(vdmBytes), SnapshotID: &snap.ID, IsMaterialized: true, CreatedAt: now}
-	op := &models.StudioOperation{ID: uuid.New(), DocumentID: job.DocumentID, VersionID: versionID, IdempotencyKey: job.IdempotencyKey, OperationName: job.JobType, Parameters: job.Parameters, CreatedAt: now}
+	var targetPageIDs models.JSON
+	if strings.HasPrefix(job.JobType, "markup_") {
+		targetPageIDs = markupTargetPageIDs(baseModel, job.Parameters)
+	}
+	op := &models.StudioOperation{ID: uuid.New(), DocumentID: job.DocumentID, VersionID: versionID, IdempotencyKey: job.IdempotencyKey, OperationName: job.JobType, Parameters: job.Parameters, TargetPageIDs: targetPageIDs, CreatedAt: now}
 	err = c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
 		locked, err := tx.LockSession(ctx, job.SessionID)
 		if err != nil {

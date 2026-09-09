@@ -602,6 +602,35 @@ func deriveMaterializedVDM(base *vdm.DocumentModel, outputPath string, pageCount
 	return &vdm.DocumentModel{DocumentID: base.DocumentID, PageCount: pageCount, Pages: pages, Metadata: metadata}, nil
 }
 
+// deriveMaterializedVDMForJob preserves page identity for page-local markup.
+// The worker output is a complete PDF, so transformations and overlays are
+// reset just like the general materialization path; stable PageIDs let the
+// preview client reuse unaffected ancestor-version tiles.
+func deriveMaterializedVDMForJob(base *vdm.DocumentModel, outputPath string, pageCount int, operation StudioJobName) (*vdm.DocumentModel, error) {
+	if !strings.HasPrefix(string(operation), "markup_") || len(base.Pages) != pageCount {
+		return deriveMaterializedVDM(base, outputPath, pageCount)
+	}
+	dimensions, err := api.PageDimsFile(outputPath)
+	if err != nil || len(dimensions) != pageCount {
+		return nil, fmt.Errorf("%w: inspect materialized page dimensions: %v", ErrMaterializationFailed, err)
+	}
+	assetID := "pending-materialized-asset"
+	pages := make([]vdm.PageDescriptor, 0, pageCount)
+	for i, dimension := range dimensions {
+		pages = append(pages, vdm.PageDescriptor{
+			PageID: base.Pages[i].PageID, SourceAssetID: &assetID, SourcePageNumber: i + 1,
+			IsBlank:    base.Pages[i].IsBlank,
+			Dimensions: &vdm.Dimensions{Width: dimension.Width, Height: dimension.Height},
+			Rotation:   0, Overlays: []vdm.Overlay{},
+		})
+	}
+	metadata := make(map[string]string, len(base.Metadata))
+	for key, value := range base.Metadata {
+		metadata[key] = value
+	}
+	return &vdm.DocumentModel{DocumentID: base.DocumentID, PageCount: pageCount, Pages: pages, Metadata: metadata}, nil
+}
+
 func validateMaterializedOutput(path string) (int, error) {
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() || info.Size() <= 0 {
