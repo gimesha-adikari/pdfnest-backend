@@ -137,6 +137,7 @@ type limitedWriter struct {
 }
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
+	consumed := len(p)
 	remaining := w.limit - w.buf.Len()
 	if remaining <= 0 {
 		return len(p), nil // discard silently
@@ -144,7 +145,8 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	if len(p) > remaining {
 		p = p[:remaining]
 	}
-	return w.buf.Write(p)
+	_, err := w.buf.Write(p)
+	return consumed, err
 }
 
 // NewHardenedExecAllocator configures chromedp to run Chromium inside an isolated
