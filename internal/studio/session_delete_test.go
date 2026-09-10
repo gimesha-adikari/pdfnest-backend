@@ -124,15 +124,15 @@ func TestStorageCleanupAlreadyMissingObjectResolves(t *testing.T) {
 func TestStorageCleanupRetentionLockIsDeferredWithoutHotRetry(t *testing.T) {
 	_, repo := getTestServiceAndRepository(t)
 	ctx := context.Background()
-	now := time.Date(2026, time.September, 5, 20, 0, 0, 0, time.UTC)
 	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{"studio/test/retention-locked.pdf"})
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
+	now := tasks[0].NextAttemptAt
 
 	worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error {
 		return &storage.RetentionLockedError{ProviderCode: "ObjectLockedByBucketPolicy"}
 	}))
-	assert.Zero(t, worker.RunOnceAt(ctx, now))
+	assert.False(t, worker.RunTaskAt(ctx, tasks[0], now))
 
 	var deferred models.StudioStorageCleanupTask
 	require.NoError(t, repo.(*gormRepository).db.Where("id = ?", tasks[0].ID).First(&deferred).Error)
@@ -150,15 +150,16 @@ func TestStorageCleanupPermissionAndNetworkFailuresKeepNormalBackoff(t *testing.
 		t.Run(name, func(t *testing.T) {
 			_, repo := getTestServiceAndRepository(t)
 			ctx := context.Background()
-			now := time.Date(2026, time.September, 5, 20, 0, 0, 0, time.UTC)
 			key := "studio/test/" + name + ".pdf"
 			tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{key})
 			require.NoError(t, err)
+			require.Len(t, tasks, 1)
+			now := tasks[0].NextAttemptAt
 
 			worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error {
 				return deleteErr
 			}))
-			assert.Zero(t, worker.RunOnceAt(ctx, now))
+			assert.False(t, worker.RunTaskAt(ctx, tasks[0], now))
 
 			var pending models.StudioStorageCleanupTask
 			require.NoError(t, repo.(*gormRepository).db.Where("id = ?", tasks[0].ID).First(&pending).Error)
