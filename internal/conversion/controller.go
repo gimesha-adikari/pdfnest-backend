@@ -480,7 +480,7 @@ func reserveAsyncBilling(
 		}
 
 		reserveCtx := identity.RequestContext(c)
-		reservation, err := billing.GuestQuota.Reserve(reserveCtx, identityID, tool, pages, images, path)
+		reservation, err := billing.GuestQuota.Reserve(reserveCtx, identity.GuestQuotaKey(c, identityID), tool, pages, images, path)
 		if err != nil {
 			return nil, err
 		}

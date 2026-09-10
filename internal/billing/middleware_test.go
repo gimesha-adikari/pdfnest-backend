@@ -7,9 +7,36 @@ import (
 	"net/http/httptest"
 	"pdfnest-backend/internal/identity"
 	"testing"
+	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/require"
 )
+
+func TestGuestOwnershipIsolationPreservesQuota(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	oldQuota, oldStore := GuestQuota, identity.DefaultStore
+	t.Cleanup(func() { GuestQuota = oldQuota; identity.DefaultStore = oldStore; _ = client.Close() })
+	GuestQuota = NewGuestQuotaStore(client, 90*24*time.Hour)
+	app := fiber.New()
+	app.Use(identity.Resolve(identity.NewStore(client, 0)))
+	app.Post("/operation", UseGuestOnly(ConvertURLToPDF), func(c *fiber.Ctx) error { return c.SendStatus(200) })
+	for i := 0; i < 10; i++ {
+		req := httptest.NewRequest("POST", "/operation", nil)
+		req.Header.Set("User-Agent", "shared-test-browser")
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		if resp.StatusCode == 429 {
+			return
+		}
+		require.Equal(t, 200, resp.StatusCode)
+	}
+	t.Fatal("changing guest ownership must not reset shared anonymous quota")
+}
 
 func TestBillingMiddleware_Unauthorized(t *testing.T) {
 	app := fiber.New()

@@ -58,15 +58,22 @@ func Resolve(store *Store) fiber.Handler {
 			}
 		}
 
+		// Browser/network properties may group quota usage, but must never
+		// recover a document owner's identity without its opaque credential.
+		quotaID := ""
 		if guest == nil && fpHash != "" {
 			if g, err := store.LoadByFingerprint(ctx, fpHash); err == nil {
-				guest = g
+				quotaID = g.QuotaID
+				if quotaID == "" {
+					quotaID = g.ID
+				}
 			}
 		}
 
 		if guest == nil {
 			guest = &GuestRecord{
 				ID:              uuid.NewString(),
+				QuotaID:         quotaID,
 				FingerprintHash: fpHash,
 				UserAgentHash:   uaHash,
 				IPHash:          ipHash,
@@ -89,6 +96,9 @@ func Resolve(store *Store) fiber.Handler {
 			}
 		}
 
+		if guest.QuotaID == "" {
+			guest.QuotaID = guest.ID
+		}
 		if err := store.Touch(ctx, guest); err != nil {
 			log.Warnf("guest touch failed: %v", err)
 		}
@@ -97,6 +107,7 @@ func Resolve(store *Store) fiber.Handler {
 
 		ident := Identity{
 			ID:              guest.ID,
+			QuotaID:         guest.QuotaID,
 			Type:            TypeGuest,
 			GuestCookie:     guest.ID,
 			FingerprintHash: guest.FingerprintHash,

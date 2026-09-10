@@ -25,6 +25,14 @@ func MustFromContext(c *fiber.Ctx) Identity {
 	return ident
 }
 
+// GuestQuotaKey preserves anonymous usage grouping independently of ownership.
+func GuestQuotaKey(c *fiber.Ctx, fallback string) string {
+	if ident, ok := FromContext(c); ok && ident.IsGuest() && ident.QuotaID != "" {
+		return ident.QuotaID
+	}
+	return fallback
+}
+
 func UserIDFromContext(c *fiber.Ctx) (string, bool) {
 	v, ok := c.Locals(LocalUserIDKey).(string)
 	if !ok || v == "" {
