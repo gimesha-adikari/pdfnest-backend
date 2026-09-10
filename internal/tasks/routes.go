@@ -13,6 +13,16 @@ func RegisterRoutes(router fiber.Router) {
 	router.Get("/v1/download/:id", HandleTaskDownload)
 
 	router.Use("/v1/tasks/:id/progress", func(c *fiber.Ctx) error {
+		task, err := Registry.Get(c.Params("id"))
+		if err != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"code": "TASK_STORAGE_UNAVAILABLE"})
+		}
+		if task == nil {
+			return c.SendStatus(fiber.StatusNotFound)
+		}
+		if !canReadTask(c, task) {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"code": "FORBIDDEN"})
+		}
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}

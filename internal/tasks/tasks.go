@@ -506,7 +506,18 @@ func handleGetTaskStatus(c *fiber.Ctx) error {
 	if task == nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Task not found"})
 	}
+	if !canReadTask(c, task) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"code": "FORBIDDEN", "message": "You are not authorized to view this task."})
+	}
 	return c.JSON(task)
+}
+
+func canReadTask(c *fiber.Ctx, task *TaskStatus) bool {
+	requesterID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
+	if requesterID == "" {
+		requesterID = c.IP()
+	}
+	return isAuthorizedOwner(c, task, requesterID)
 }
 
 func handleCancelTask(c *fiber.Ctx) error {
