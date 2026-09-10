@@ -9,16 +9,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/redis/go-redis/v9"
 )
 
 func setupTestRedis(t *testing.T) *redis.Client {
-	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 15})
-	if err := client.Ping(context.Background()).Err(); err != nil {
-		t.Skip("Local Redis server not running on 127.0.0.1:6379, skipping test")
-	}
-	_ = client.FlushDB(context.Background()).Err()
+	t.Helper()
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
 	return client
 }
 
