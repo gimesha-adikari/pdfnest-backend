@@ -49,6 +49,14 @@ func TestPublicStudioJobResponsePreservesFrontendContract(t *testing.T) {
 		assert.Contains(t, decoded.Job, key)
 	}
 	assert.NotContains(t, decoded.Job, "parameters")
+
+	var getDecoded struct {
+		Job map[string]any `json:"job"`
+	}
+	require.NoError(t, json.Unmarshal(mustMarshal(t, map[string]any{"job": publicStudioJob(job)}), &getDecoded))
+	assert.Equal(t, decoded.Job["id"], getDecoded.Job["id"])
+	assert.NotContains(t, getDecoded.Job, "parameters")
+	assert.NotContains(t, getDecoded.Job, "worker_job_id")
 }
 
 func mustMarshal(t *testing.T, value any) []byte {
