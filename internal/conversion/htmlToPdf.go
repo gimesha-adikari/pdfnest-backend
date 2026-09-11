@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/netguard"
 	"pdfnest-backend/internal/process"
 	"strconv"
 	"strings"
@@ -125,6 +126,14 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 		ctx = context.Background()
 	}
 
+	if err := netguard.CheckURL(ctx, targetURL); err != nil {
+		return "", err
+	}
+	proxy, err := netguard.Start(ctx)
+	if err != nil {
+		return "", fmt.Errorf("start render network guard: %w", err)
+	}
+	defer proxy.Close()
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
 
@@ -149,6 +158,11 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 		chromedp.DisableGPU,
 
 		chromedp.Flag("headless", true),
+		chromedp.Flag("proxy-server", proxy.URL),
+		chromedp.Flag("proxy-bypass-list", "<-loopback>"),
+		chromedp.Flag("disable-quic", true),
+		chromedp.Flag("force-webrtc-ip-handling-policy", "disable_non_proxied_udp"),
+		chromedp.Flag("host-resolver-rules", "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"),
 		chromedp.Flag("disable-dev-shm-usage", true),
 
 		chromedp.UserAgent(
@@ -179,7 +193,7 @@ func (s *ConversionService) HtmlToPdf(ctx context.Context, targetURL string, opt
 		screenshot []byte
 	)
 
-	err := chromedp.Run(
+	err = chromedp.Run(
 		chromeCtx,
 
 		emulation.SetDeviceMetricsOverride(
