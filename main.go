@@ -19,6 +19,7 @@ import (
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/landing"
 	"pdfnest-backend/internal/markup"
+	"pdfnest-backend/internal/middleware"
 	"pdfnest-backend/internal/ocr"
 	ocrv2 "pdfnest-backend/internal/ocrv2"
 	"pdfnest-backend/internal/optimize"
@@ -83,7 +84,7 @@ func main() {
 	app.Server().HeaderReceived = requestReadConfig
 
 	app.Use(func(c *fiber.Ctx) error {
-		log.Printf(">>> %s %s", c.Method(), c.OriginalURL())
+		log.Printf(">>> %s %s", c.Method(), c.Path())
 		return c.Next()
 	})
 
@@ -97,6 +98,7 @@ func main() {
 		allowedOrigins = "http://localhost:3000"
 	}
 
+	app.Use(middleware.BrowserOriginGuard(allowedOrigins))
 	app.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins,
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Platen-Fingerprint,Idempotency-Key,X-Request-ID",
