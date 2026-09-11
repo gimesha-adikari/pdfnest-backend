@@ -234,6 +234,31 @@ func TestStudioFinalizerMaterializesSourcePersistedInLocalModeWithR2Environment(
 	require.True(t, storage.ObjectExists(ctx, materialized.Asset.R2Key))
 }
 
+func TestStudioFinalizerMaterializeVersionByIDReusesVerifiedSnapshot(t *testing.T) {
+	_, repo, finalizer, ident, session, version, _ := finalizerFixture(t)
+	ctx := context.Background()
+
+	// Editor extraction materializes the active immutable version first. A
+	// subsequent Editor compile resolves that exact version by ID, so it must use
+	// the same verified snapshot rather than rebuild every source page.
+	warmed, err := finalizer.MaterializeVersion(ctx, session.ID, ident)
+	require.NoError(t, err)
+	warmed.Cleanup()
+
+	cachedVersion, err := repo.GetVersion(ctx, version.ID)
+	require.NoError(t, err)
+	require.NotNil(t, cachedVersion.SnapshotID)
+	snapshot, err := repo.GetSnapshot(ctx, *cachedVersion.SnapshotID)
+	require.NoError(t, err)
+
+	byID, err := finalizer.(StudioVersionMaterializerByID).MaterializeVersionByID(ctx, session.ID, version.ID, ident)
+	require.NoError(t, err)
+	defer byID.Cleanup()
+	require.NotNil(t, byID.Asset)
+	assert.Equal(t, snapshot.AssetID, byID.Asset.ID)
+	assert.True(t, strings.HasPrefix(byID.Path, storage.GetLocalStorageDir()+string(os.PathSeparator)), "version-by-ID must resolve the verified snapshot instead of rebuilding the VDM")
+}
+
 func executeFinalizerCommand(t *testing.T, coordinator OperationCoordinator, sessionID uuid.UUID, ident identity.Identity, baseVersionID uuid.UUID, operation CommandName, parameters interface{}) *ApplyOperationResult {
 	t.Helper()
 	raw, err := json.Marshal(parameters)

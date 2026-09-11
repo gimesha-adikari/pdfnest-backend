@@ -177,11 +177,46 @@ func (f *studioFinalizer) MaterializeVersionByID(ctx context.Context, sessionID,
 	if err != nil {
 		return nil, fmt.Errorf("%w: version VDM: %v", ErrFinalizationFailed, err)
 	}
+	if asset, path, cleanup, ok := f.resolveVersionSnapshot(ctx, doc.ID, version, model.PageCount); ok {
+		return &MaterializedVersion{
+			SessionExpiresAt: sess.ExpiresAt,
+			Session:          sess,
+			Document:         doc,
+			Version:          version,
+			Asset:            asset,
+			Model:            model,
+			Path:             path,
+			Cleanup:          cleanup,
+		}, nil
+	}
 	path, cleanup, err := f.materialize(ctx, doc.ID, model)
 	if err != nil {
 		return nil, err
 	}
 	return &MaterializedVersion{SessionExpiresAt: sess.ExpiresAt, Session: sess, Document: doc, Version: version, Model: model, Path: path, Cleanup: cleanup}, nil
+}
+
+// resolveVersionSnapshot returns the immutable PDF already recorded for a
+// version when it is still structurally valid and available in the configured
+// storage. Callers may safely fall back to source materialization on a cache
+// miss, just as ensureSnapshot does.
+func (f *studioFinalizer) resolveVersionSnapshot(ctx context.Context, documentID uuid.UUID, version *models.StudioVersion, pageCount int) (*models.StudioAsset, string, func(), bool) {
+	if version == nil || version.SnapshotID == nil || *version.SnapshotID == uuid.Nil {
+		return nil, "", nil, false
+	}
+	snapshot, err := f.repo.GetSnapshot(ctx, *version.SnapshotID)
+	if err != nil || snapshot.VersionID != version.ID || snapshot.PageCount != pageCount {
+		return nil, "", nil, false
+	}
+	asset, err := f.repo.GetAsset(ctx, snapshot.AssetID)
+	if err != nil || asset.DocumentID != documentID {
+		return nil, "", nil, false
+	}
+	path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-materialized", ".pdf")
+	if err != nil {
+		return nil, "", nil, false
+	}
+	return asset, path, cleanup, true
 }
 
 func (f *studioFinalizer) ResolveDownload(ctx context.Context, sessionID, exportID uuid.UUID, ident identity.Identity) (*ExportDownload, error) {
