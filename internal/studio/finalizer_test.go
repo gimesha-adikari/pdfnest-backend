@@ -1,6 +1,7 @@
 package studio
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -257,6 +258,101 @@ func TestStudioFinalizerMaterializeVersionByIDReusesVerifiedSnapshot(t *testing.
 	require.NotNil(t, byID.Asset)
 	assert.Equal(t, snapshot.AssetID, byID.Asset.ID)
 	assert.True(t, strings.HasPrefix(byID.Path, storage.GetLocalStorageDir()+string(os.PathSeparator)), "version-by-ID must resolve the verified snapshot instead of rebuilding the VDM")
+}
+
+func registerFinalizerTestSnapshot(t *testing.T, service Service, docID, versionID uuid.UUID, assetID, key string, pageCount int, object []byte) *models.StudioSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	if object != nil {
+		_, _, err := storage.SaveLocalStream(ctx, key, bytes.NewReader(object))
+		require.NoError(t, err)
+	}
+	snapshot, err := service.RegisterSnapshot(ctx, docID, versionID, assetID, key, int64(len(object)), pageCount)
+	require.NoError(t, err)
+	return snapshot
+}
+
+func materializeVersionByIDForTest(t *testing.T, finalizer StudioFinalizer, sessionID, versionID uuid.UUID, ident identity.Identity) *MaterializedVersion {
+	t.Helper()
+	byID, err := finalizer.(StudioVersionMaterializerByID).MaterializeVersionByID(context.Background(), sessionID, versionID, ident)
+	require.NoError(t, err)
+	return byID
+}
+
+func TestStudioFinalizerMaterializeVersionByIDFallsBackForInvalidSnapshots(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "rendering", "corpus", "standard_a4_10p.pdf")
+	validObject, err := os.ReadFile(fixturePath)
+	require.NoError(t, err)
+
+	t.Run("no snapshot", func(t *testing.T) {
+		_, _, finalizer, ident, session, version, _ := finalizerFixture(t)
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
+
+	t.Run("missing object", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "missing-snapshot-"+uuid.NewString(), "studio/snapshots/missing-"+uuid.NewString()+".pdf", initial.PageCount, validObject)
+		cachedVersion, err := repo.GetVersion(context.Background(), version.ID)
+		require.NoError(t, err)
+		snapshot, err := repo.GetSnapshot(context.Background(), *cachedVersion.SnapshotID)
+		require.NoError(t, err)
+		asset, err := repo.GetAsset(context.Background(), snapshot.AssetID)
+		require.NoError(t, err)
+		require.NoError(t, storage.DeleteLocalObject(asset.R2Key))
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
+
+	t.Run("foreign document asset", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		foreignVDM := *initial
+		foreignVDM.DocumentID = "foreign-finalizer-doc-" + uuid.NewString()
+		foreignDoc, _, _, err := service.CreateDocument(context.Background(), ident, "foreign.pdf", int64(len(validObject)), initial.PageCount, "foreign-source-"+uuid.NewString(), "studio/sources/foreign-"+uuid.NewString()+".pdf", foreignVDM)
+		require.NoError(t, err)
+		registerFinalizerTestSnapshot(t, service, foreignDoc.ID, version.ID, "foreign-snapshot-"+uuid.NewString(), "studio/snapshots/foreign-"+uuid.NewString()+".pdf", initial.PageCount, validObject)
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
+
+	t.Run("wrong page count", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "wrong-pages-"+uuid.NewString(), "studio/snapshots/wrong-pages-"+uuid.NewString()+".pdf", initial.PageCount+1, validObject)
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
+
+	t.Run("mismatched snapshot version", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		child := executeFinalizerCommand(t, NewOperationCoordinator(repo), session.ID, ident, version.ID, CommandRotatePage, RotatePageParameters{PageIDs: []string{initial.Pages[0].PageID}, DeltaDegrees: 90})
+		childSnapshot := registerFinalizerTestSnapshot(t, service, session.DocumentID, child.Version.ID, "child-snapshot-"+uuid.NewString(), "studio/snapshots/child-"+uuid.NewString()+".pdf", initial.PageCount, validObject)
+		gormRepo, ok := repo.(*gormRepository)
+		require.True(t, ok)
+		require.NoError(t, gormRepo.db.Model(&models.StudioVersion{}).Where("id = ?", version.ID).Update("snapshot_id", childSnapshot.ID).Error)
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
+
+	t.Run("non-file storage object", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		key := "studio/snapshots/non-file-" + uuid.NewString() + ".pdf"
+		require.NoError(t, os.MkdirAll(filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(key)), 0o755))
+		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "non-file-snapshot-"+uuid.NewString(), key, initial.PageCount, nil)
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset)
+		assert.FileExists(t, byID.Path)
+	})
 }
 
 func executeFinalizerCommand(t *testing.T, coordinator OperationCoordinator, sessionID uuid.UUID, ident identity.Identity, baseVersionID uuid.UUID, operation CommandName, parameters interface{}) *ApplyOperationResult {
