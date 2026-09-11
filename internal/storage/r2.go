@@ -98,17 +98,33 @@ func decryptData(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	nonceSize := gcm.NonceSize()
-	if len(data) < nonceSize {
-		return data, nil
+	if len(data) < nonceSize+gcm.Overhead() {
+		if recognizablePlaintext(data) {
+			return data, nil
+		}
+		return nil, fmt.Errorf("stored object is too short for authenticated decryption")
 	}
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 
 	decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		// Accept only recognizable legacy plaintext; never mask an encryption failure as success.
-		return data, nil
+		// Direct presigned uploads and legacy objects can be plaintext. Unknown
+		// ciphertext must never become a successful corrupted download.
+		if recognizablePlaintext(data) {
+			return data, nil
+		}
+		return nil, fmt.Errorf("stored object authentication failed")
 	}
 	return decrypted, nil
+}
+
+func recognizablePlaintext(data []byte) bool {
+	for _, signature := range [][]byte{[]byte("%PDF-"), []byte("{"), []byte("["), []byte("PK\x03\x04"), []byte("PK\x05\x06"), []byte("\xff\xd8\xff"), []byte("\x89PNG\r\n\x1a\n"), []byte("GIF8"), []byte("RIFF"), []byte("II*\x00"), []byte("MM\x00*")} {
+		if bytes.HasPrefix(data, signature) {
+			return true
+		}
+	}
+	return false
 }
 
 func Default() (*Store, error) {
