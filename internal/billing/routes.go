@@ -18,6 +18,4 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 
 	billingGroup.Post("/portal-session", ctrl.CreatePortalSession)
 
-	billingGroup.Post("/upgrade-mock", ctrl.UpgradeMock)
-	billingGroup.Post("/buy-credits-mock", ctrl.BuyCreditsMock)
 }
