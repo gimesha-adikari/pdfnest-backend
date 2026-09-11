@@ -113,18 +113,19 @@ func TestStorageCleanupFailurePersistsAndRetrySurvivesWorkerRecreation(t *testin
 func TestStorageCleanupAlreadyMissingObjectResolves(t *testing.T) {
 	_, repo := getTestServiceAndRepository(t)
 	ctx := context.Background()
-	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{"studio/test/already-missing.pdf"})
+	key := "studio/test/already-missing-" + uuid.NewString() + ".pdf"
+	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{key})
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	worker := NewStorageCleanupWorker(repo, StorageObjectDeleterFunc(func(context.Context, string) error { return nil }))
-	assert.Equal(t, 1, worker.RunOnceAt(ctx, time.Now().UTC()))
-	assert.Zero(t, cleanupTaskCountForKeys(t, repo, "studio/test/already-missing.pdf"))
+	assert.True(t, worker.RunTaskAt(ctx, tasks[0], tasks[0].NextAttemptAt))
+	assert.Zero(t, cleanupTaskCountForKeys(t, repo, key))
 }
 
 func TestStorageCleanupRetentionLockIsDeferredWithoutHotRetry(t *testing.T) {
 	_, repo := getTestServiceAndRepository(t)
 	ctx := context.Background()
-	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{"studio/test/retention-locked.pdf"})
+	tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{"studio/test/retention-" + uuid.NewString() + ".pdf"})
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	now := tasks[0].NextAttemptAt
@@ -150,7 +151,7 @@ func TestStorageCleanupPermissionAndNetworkFailuresKeepNormalBackoff(t *testing.
 		t.Run(name, func(t *testing.T) {
 			_, repo := getTestServiceAndRepository(t)
 			ctx := context.Background()
-			key := "studio/test/" + name + ".pdf"
+			key := "studio/test/" + name + "-" + uuid.NewString() + ".pdf"
 			tasks, err := repo.CreateStorageCleanupTasks(ctx, []string{key})
 			require.NoError(t, err)
 			require.Len(t, tasks, 1)
