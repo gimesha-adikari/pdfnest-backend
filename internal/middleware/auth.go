@@ -1,12 +1,10 @@
 package middleware
 
 import (
-	"os"
-	"strings"
+	"errors"
+	"pdfnest-backend/internal/authn"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/log"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 func Protect() fiber.Handler {
@@ -16,37 +14,15 @@ func Protect() fiber.Handler {
 			return c.Status(401).JSON(fiber.Map{"error": "Access token authorization verification claims dropped"})
 		}
 
-		secret := os.Getenv("JWT_SECRET")
-		if secret == "" {
-			log.Fatal("CRITICAL SECURITY ERROR: JWT_SECRET is missing during auth check.")
-			return c.Status(500).JSON(fiber.Map{"error": "Internal server configuration error"})
+		user, err := authn.Verify(c.UserContext(), tokenString)
+		if err != nil {
+			if errors.Is(err, authn.ErrUnavailable) {
+				return c.Status(503).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+			}
+			return c.Status(401).JSON(fiber.Map{"error": "Invalid or unavailable account session"})
 		}
-
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
-		})
-
-		if err != nil || !token.Valid {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid signature authorization tracking tokens payload metrics"})
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid token claims structure"})
-		}
-
-		userID, ok := claims["user_id"].(string)
-		if !ok || strings.TrimSpace(userID) == "" {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid or missing user identity in token"})
-		}
-
-		role, ok := claims["role"].(string)
-		if !ok || strings.TrimSpace(role) == "" {
-			return c.Status(401).JSON(fiber.Map{"error": "Invalid or missing role claim in token"})
-		}
-
-		c.Locals("user_id", userID)
-		c.Locals("role", role)
+		c.Locals("user_id", user.ID)
+		c.Locals("role", user.Role)
 
 		return c.Next()
 	}

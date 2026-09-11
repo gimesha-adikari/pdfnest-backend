@@ -3,19 +3,27 @@ package identity
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
+	"pdfnest-backend/internal/authn"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/log"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
 func Resolve(store *Store) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		if id, role, ok := resolveAuthenticatedUser(c); ok {
+		id, role, ok, authErr := resolveAuthenticatedUser(c)
+		if authErr != nil {
+			if errors.Is(authErr, authn.ErrUnavailable) {
+				return c.Status(503).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+			}
+			return c.Status(401).JSON(fiber.Map{"error": "Account session is unavailable"})
+		}
+		if ok {
 			ident := Identity{
 				ID:         id,
 				Type:       TypeUser,
@@ -126,10 +134,10 @@ func Resolve(store *Store) fiber.Handler {
 	}
 }
 
-func resolveAuthenticatedUser(c *fiber.Ctx) (userID, role string, ok bool) {
+func resolveAuthenticatedUser(c *fiber.Ctx) (userID, role string, ok bool, err error) {
 	if id, ok := c.Locals(LocalUserIDKey).(string); ok && strings.TrimSpace(id) != "" {
 		role, _ = c.Locals(LocalUserRoleKey).(string)
-		return id, role, true
+		return id, role, true, nil
 	}
 
 	tokenString := strings.TrimSpace(c.Cookies("auth_token"))
@@ -140,33 +148,17 @@ func resolveAuthenticatedUser(c *fiber.Ctx) (userID, role string, ok bool) {
 		}
 	}
 	if tokenString == "" {
-		return "", "", false
+		return "", "", false, nil
 	}
 
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		return "", "", false
+	user, verifyErr := authn.Verify(c.UserContext(), tokenString)
+	if errors.Is(verifyErr, authn.ErrInvalid) {
+		return "", "", false, nil
 	}
-
-	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-		return []byte(secret), nil
-	})
-	if err != nil || !token.Valid {
-		return "", "", false
+	if verifyErr != nil {
+		return "", "", false, verifyErr
 	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return "", "", false
-	}
-
-	id, _ := claims["user_id"].(string)
-	role, _ = claims["role"].(string)
-	if strings.TrimSpace(id) == "" {
-		return "", "", false
-	}
-
-	return id, role, true
+	return user.ID, user.Role, true, nil
 }
 
 func fingerprintHash(c *fiber.Ctx) string {
