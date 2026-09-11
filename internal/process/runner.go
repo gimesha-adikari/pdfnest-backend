@@ -23,6 +23,12 @@ func (r Runner) Run(
 	args ...string,
 ) ([]byte, error) {
 	cmd := exec.Command(name, args...)
+	return r.RunCommand(ctx, timeout, cmd)
+}
+
+// RunCommand applies the same bounded output and process-tree lifecycle to a
+// caller-configured command, preserving its explicit environment and directory.
+func (r Runner) RunCommand(ctx context.Context, timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
 	}
@@ -66,7 +72,7 @@ func (r Runner) Run(
 			if ctx.Err() != nil {
 				return outBuf.Bytes(), fmt.Errorf("%w: %v", ErrProcessCancelled, ctx.Err())
 			}
-			return outBuf.Bytes(), fmt.Errorf("%w: %v", ErrProcessExit, waitErr)
+			return outBuf.Bytes(), fmt.Errorf("%w: %w", ErrProcessExit, waitErr)
 		}
 		return outBuf.Bytes(), nil
 
