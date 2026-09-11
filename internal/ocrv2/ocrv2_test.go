@@ -28,8 +28,41 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
+
+func authenticatedOCRTestUser(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		t.Skip("authenticated route fixtures require an isolated DATABASE_URL")
+	}
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.AutoMigrate(&config.User{}); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.NewString()
+	user := config.User{ID: id, Email: id + "@ocr-test.invalid", Role: "user", Status: "active", EmailVerified: true}
+	if err = db.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	previous := config.DB
+	config.DB = db
+	t.Cleanup(func() {
+		config.DB = previous
+		db.Unscoped().Delete(&user)
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	return id
+}
 
 type fakeInvoker struct {
 	response *TextResponse
@@ -336,6 +369,7 @@ func TestPublicJobStatusDoesNotExposeWorkerIdentityOrStorageKey(t *testing.T) {
 
 func TestControllerRejectsAsyncJobAccessForDifferentAuthenticatedUser(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
+	userID := authenticatedOCRTestUser(t)
 	now := time.Now().UTC()
 	async := &fakeAsyncInvoker{job: &JobStatus{JobID: "123e4567-e89b-12d3-a456-426614174000", Status: "running", Profile: ProfileOCRTextV2, Language: "eng", RoutingPolicy: RoutingAuto, CreatedAt: now, UpdatedAt: now, OwnerIdentity: "user:alice", TotalPages: 1}}
 	service := NewService(&fakeInvoker{})
@@ -343,7 +377,7 @@ func TestControllerRejectsAsyncJobAccessForDifferentAuthenticatedUser(t *testing
 	controller := NewController(service)
 	app := fiber.New()
 	app.Get("/api/v2/ocr/text/jobs/:job_id", middleware.Protect(), controller.JobStatus)
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": "user:bob", "role": "user"})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": userID, "role": "user", "exp": time.Now().Add(time.Hour).Unix()})
 	serialized, err := token.SignedString([]byte("test-secret"))
 	if err != nil {
 		t.Fatal(err)
@@ -361,22 +395,26 @@ func TestControllerRejectsAsyncJobAccessForDifferentAuthenticatedUser(t *testing
 
 func TestSearchableStatusReadDoesNotAcquireExecutionLease(t *testing.T) {
 	t.Setenv("JWT_SECRET", "status-read-test-secret")
+	userID := authenticatedOCRTestUser(t)
 	now := time.Now().UTC()
 	observedActive := -1
 	async := &fakeAsyncInvoker{
 		job: &JobStatus{
 			JobID: "123e4567-e89b-12d3-a456-426614174000", Status: "running", Profile: ProfileSearchablePDFV2,
 			Language: "eng", RoutingPolicy: RoutingAuto, CreatedAt: now, UpdatedAt: now,
-			OwnerIdentity: "user:alice", TotalPages: 1,
+			OwnerIdentity: userID, TotalPages: 1,
 		},
 	}
 	async.duringGet = func() { observedActive = limiter.Default.ActiveCount() }
 	service := NewService(&fakeInvoker{})
 	service.jobs = async
 	app := fiber.New()
-	RegisterRoutes(app, NewController(service), &identity.Store{})
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	RegisterRoutes(app, NewController(service), identity.NewStore(rdb, time.Hour))
 
-	claims := jwt.MapClaims{"user_id": "user:alice", "role": "user", "exp": time.Now().Add(time.Hour).Unix()}
+	claims := jwt.MapClaims{"user_id": userID, "role": "user", "exp": time.Now().Add(time.Hour).Unix()}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("status-read-test-secret"))
 	if err != nil {
 		t.Fatal(err)
@@ -438,6 +476,7 @@ func multipartPDF(t *testing.T) (*bytes.Buffer, string) {
 
 func TestControllerReturnsBackendSafeOCRTextResponse(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
+	userID := authenticatedOCRTestUser(t)
 	fake := &fakeInvoker{response: &TextResponse{RequestID: "req-controller", Profile: ProfileOCRTextV2, Status: "SUCCEEDED", Text: "safe text", Pages: []PageResult{{PageIndex: 0, PageID: "page-0", Status: "SUCCESS", Text: "safe text", Source: "pymupdf_native_extractor"}}}}
 	controller := NewController(NewService(fake))
 	app := fiber.New()
@@ -446,7 +485,7 @@ func TestControllerReturnsBackendSafeOCRTextResponse(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/ocr/text", body)
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("X-Request-ID", "req-controller")
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": "user-1", "role": "user"})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": userID, "role": "user", "exp": time.Now().Add(time.Hour).Unix()})
 	serialized, err := token.SignedString([]byte("test-secret"))
 	if err != nil {
 		t.Fatal(err)
