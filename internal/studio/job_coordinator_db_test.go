@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 // durableEditorGateway keeps the worker boundary deterministic while the test
 // exercises the real PostgreSQL repository, transactions, and durable records.
 type durableEditorGateway struct {
+	mu           sync.RWMutex
 	statuses     map[string]workerJobStatus
 	languages    map[string]edit.EditorLanguageRequest
 	download     []byte
@@ -49,6 +51,8 @@ func (g *durableEditorGateway) SubmitMarkup(context.Context, StudioJobName, stri
 }
 
 func (g *durableEditorGateway) SubmitEdit(_ context.Context, _ StudioJobName, _, _, _ string) (workerJobStatus, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	id := g.workerID()
 	g.editSubmits++
 	g.statuses[id] = workerJobStatus{ID: id, Status: "queued"}
@@ -56,6 +60,8 @@ func (g *durableEditorGateway) SubmitEdit(_ context.Context, _ StudioJobName, _,
 }
 
 func (g *durableEditorGateway) SubmitEditWithLanguage(_ context.Context, _ StudioJobName, _, _, _ string, language edit.EditorLanguageRequest) (workerJobStatus, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	id := g.workerID()
 	g.editSubmits++
 	g.languages[id] = language
@@ -64,10 +70,14 @@ func (g *durableEditorGateway) SubmitEditWithLanguage(_ context.Context, _ Studi
 }
 
 func (g *durableEditorGateway) Status(_ context.Context, _ StudioJobName, id string) (workerJobStatus, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
 	return g.statuses[id], nil
 }
 
 func (g *durableEditorGateway) Cancel(_ context.Context, _ StudioJobName, id string) (workerJobStatus, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.cancelledIDs = append(g.cancelledIDs, id)
 	status := workerJobStatus{ID: id, Status: "cancelled", Progress: 100, Message: "cancelled"}
 	g.statuses[id] = status
@@ -376,4 +386,109 @@ func TestStudioEditorDurability_PostgreSQL(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, string(baseState.Layout), string(unchangedState.Layout))
 	assert.WithinDuration(t, baseState.CreatedAt, unchangedState.CreatedAt, time.Millisecond)
+}
+
+func submitDurableCompileForReconciliation(t *testing.T, fixture durableEditorFixture) (*models.StudioJob, *models.StudioEditorState) {
+	t.Helper()
+	ctx := context.Background()
+	extract, err := fixture.coordinator.Submit(ctx, fixture.session.ID, fixture.identity, StudioJobRequest{
+		BaseVersionID: fixture.baseVersion.ID, IdempotencyKey: "reconcile-extract-" + uuid.NewString(),
+		Operation: StudioJobEditExtract, Parameters: rawJSON(t, EditExtractJobParameters{LanguageMode: "EXPLICIT", Languages: []string{"eng"}}),
+	})
+	require.NoError(t, err)
+	fixture.gateway.mu.Lock()
+	fixture.gateway.statuses[extract.Job.WorkerJobID] = workerJobStatus{ID: extract.Job.WorkerJobID, Status: "succeeded", Progress: 100, Result: layoutResult(t, durableEditorLayout("EXPLICIT", []string{"eng"}))}
+	fixture.gateway.mu.Unlock()
+	reconciledExtract, err := fixture.coordinator.Get(ctx, fixture.session.ID, extract.Job.ID, fixture.identity)
+	require.NoError(t, err)
+	require.NotNil(t, reconciledExtract.EditorStateID)
+	state, err := fixture.repository.GetEditorState(ctx, *reconciledExtract.EditorStateID)
+	require.NoError(t, err)
+	compile, err := fixture.coordinator.Submit(ctx, fixture.session.ID, fixture.identity, compileRequest(t, fixture.baseVersion.ID, state.ID, "reconcile-compile-"+uuid.NewString(), rawJSON(t, durableEditorLayout("EXPLICIT", []string{"eng"}))))
+	require.NoError(t, err)
+	return compile.Job, state
+}
+
+func TestStudioCompileReconcilesWithoutClientPolling_PostgreSQL(t *testing.T) {
+	fixture := newDurableEditorFixture(t)
+	ctx := context.Background()
+	job, _ := submitDurableCompileForReconciliation(t, fixture)
+	fixture.gateway.mu.Lock()
+	fixture.gateway.statuses[job.WorkerJobID] = workerJobStatus{ID: job.WorkerJobID, Status: "succeeded", Progress: 100}
+	fixture.gateway.mu.Unlock()
+
+	completed, err := fixture.coordinator.ReconcilePending(ctx, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, completed)
+	persisted, err := fixture.repository.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "succeeded", persisted.Status)
+	assert.NotNil(t, persisted.ResultVersionID)
+	assert.NotNil(t, persisted.ReconciledAt)
+	versions, operations, err := fixture.repository.GetVersionHistory(ctx, fixture.document.ID)
+	require.NoError(t, err)
+	assert.Len(t, versions, 2)
+	assert.Len(t, operations, 1)
+
+	// A later browser return sees the already-finalized job and does not create
+	// another version or require a special recovery path.
+	later, err := fixture.coordinator.Get(ctx, fixture.session.ID, job.ID, fixture.identity)
+	require.NoError(t, err)
+	assert.Equal(t, persisted.ResultVersionID, later.ResultVersionID)
+	versions, operations, err = fixture.repository.GetVersionHistory(ctx, fixture.document.ID)
+	require.NoError(t, err)
+	assert.Len(t, versions, 2)
+	assert.Len(t, operations, 1)
+}
+
+func TestStudioCompileGetAndBackgroundReconciliationCreateOneVersion_PostgreSQL(t *testing.T) {
+	fixture := newDurableEditorFixture(t)
+	ctx := context.Background()
+	job, _ := submitDurableCompileForReconciliation(t, fixture)
+	fixture.gateway.mu.Lock()
+	fixture.gateway.statuses[job.WorkerJobID] = workerJobStatus{ID: job.WorkerJobID, Status: "succeeded", Progress: 100}
+	fixture.gateway.mu.Unlock()
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		<-start
+		_, err := fixture.coordinator.Get(ctx, fixture.session.ID, job.ID, fixture.identity)
+		errs <- err
+	}()
+	go func() {
+		<-start
+		_, err := fixture.coordinator.ReconcilePending(ctx, 10)
+		errs <- err
+	}()
+	close(start)
+	assert.NoError(t, <-errs)
+	assert.NoError(t, <-errs)
+
+	persisted, err := fixture.repository.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted.ResultVersionID)
+	versions, operations, err := fixture.repository.GetVersionHistory(ctx, fixture.document.ID)
+	require.NoError(t, err)
+	assert.Len(t, versions, 2)
+	assert.Len(t, operations, 1, "GET and background reconciliation must register one operation")
+	assert.Equal(t, persisted.ResultVersionID, &operations[0].VersionID)
+}
+
+func TestStudioJobReconcilerPersistsWorkerFailureAndCancellation_PostgreSQL(t *testing.T) {
+	fixture := newDurableEditorFixture(t)
+	ctx := context.Background()
+	for _, status := range []string{"failed", "cancelled"} {
+		job, _ := submitDurableCompileForReconciliation(t, fixture)
+		fixture.gateway.mu.Lock()
+		fixture.gateway.statuses[job.WorkerJobID] = workerJobStatus{ID: job.WorkerJobID, Status: status, Progress: 100, Error: "worker stopped"}
+		fixture.gateway.mu.Unlock()
+		completed, err := fixture.coordinator.ReconcilePending(ctx, 10)
+		require.NoError(t, err)
+		assert.Equal(t, 1, completed)
+		persisted, err := fixture.repository.GetJob(ctx, job.ID)
+		require.NoError(t, err)
+		assert.Equal(t, status, persisted.Status)
+		assert.Nil(t, persisted.ResultVersionID)
+	}
 }

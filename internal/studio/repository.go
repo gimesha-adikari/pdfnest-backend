@@ -22,6 +22,7 @@ type Repository interface {
 	GetDocument(ctx context.Context, docID uuid.UUID) (*models.StudioDocument, error)
 	GetVersion(ctx context.Context, verID uuid.UUID) (*models.StudioVersion, error)
 	LockSession(ctx context.Context, sessionID uuid.UUID) (*models.StudioSession, error)
+	LockJob(ctx context.Context, jobID uuid.UUID) (*models.StudioJob, error)
 	FindOperationByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioOperation, *models.StudioVersion, error)
 	CreateVersionAndOperation(ctx context.Context, ver *models.StudioVersion, op *models.StudioOperation, sessID uuid.UUID, parentVerID *uuid.UUID) error
 	CreateDetachedVersionAndOperation(ctx context.Context, ver *models.StudioVersion, op *models.StudioOperation) error
@@ -37,6 +38,7 @@ type Repository interface {
 	TouchSession(ctx context.Context, sessID uuid.UUID) error
 	CreateJob(ctx context.Context, job *models.StudioJob) error
 	GetJob(ctx context.Context, jobID uuid.UUID) (*models.StudioJob, error)
+	ListReconciliationJobs(ctx context.Context, limit int) ([]models.StudioJob, error)
 	FindJobByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioJob, error)
 	SaveJob(ctx context.Context, job *models.StudioJob) error
 	CreateEditorState(ctx context.Context, state *models.StudioEditorState) error
@@ -320,6 +322,29 @@ func (r *gormRepository) GetJob(ctx context.Context, jobID uuid.UUID) (*models.S
 		return nil, err
 	}
 	return &job, nil
+}
+
+func (r *gormRepository) LockJob(ctx context.Context, jobID uuid.UUID) (*models.StudioJob, error) {
+	var job models.StudioJob
+	if err := r.db.WithContext(ctx).Clauses(clause.Locking{Strength: "UPDATE"}).First(&job, "id = ?", jobID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrJobNotFound
+		}
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (r *gormRepository) ListReconciliationJobs(ctx context.Context, limit int) ([]models.StudioJob, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	var jobs []models.StudioJob
+	eligible := []string{"queued", "running", "processing", "cancel_requested"}
+	err := r.db.WithContext(ctx).
+		Where("status IN ? AND worker_job_id <> '' AND reconciled_at IS NULL", eligible).
+		Order("created_at ASC").Limit(limit).Find(&jobs).Error
+	return jobs, err
 }
 
 func (r *gormRepository) FindJobByIdempotencyKey(ctx context.Context, docID uuid.UUID, key string) (*models.StudioJob, error) {

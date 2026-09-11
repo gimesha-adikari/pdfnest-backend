@@ -206,6 +206,7 @@ func main() {
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
 	analyzerService.StartWatchdog(watchdogCtx)
+	studio.StartJobReconciliationWorker(watchdogCtx, studioJobs, 10*time.Second)
 
 	// Automatic Embedded Analyzer Worker Daemon (default: enabled unless ANALYZER_EMBEDDED_WORKER is false)
 	enableEmbedded := os.Getenv("ANALYZER_EMBEDDED_WORKER")

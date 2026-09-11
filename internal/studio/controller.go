@@ -145,7 +145,7 @@ func (ctrl *Controller) SubmitJob(c *fiber.Ctx) error {
 	if err != nil {
 		return ctrl.mapError(c, err)
 	}
-	return c.Status(http.StatusAccepted).JSON(result)
+	return c.Status(http.StatusAccepted).JSON(publicStudioJobResult(result))
 }
 
 func (ctrl *Controller) GetJob(c *fiber.Ctx) error {
@@ -165,7 +165,7 @@ func (ctrl *Controller) GetJob(c *fiber.Ctx) error {
 	if err != nil {
 		return ctrl.mapError(c, err)
 	}
-	return c.JSON(fiber.Map{"job": job})
+	return c.JSON(fiber.Map{"job": publicStudioJob(job)})
 }
 
 func (ctrl *Controller) CancelJob(c *fiber.Ctx) error {
@@ -185,7 +185,7 @@ func (ctrl *Controller) CancelJob(c *fiber.Ctx) error {
 	if err != nil {
 		return ctrl.mapError(c, err)
 	}
-	return c.JSON(fiber.Map{"job": job})
+	return c.JSON(fiber.Map{"job": publicStudioJob(job)})
 }
 
 func (ctrl *Controller) GetEditorState(c *fiber.Ctx) error {
