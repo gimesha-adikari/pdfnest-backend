@@ -309,7 +309,7 @@ func TestStudioFinalizerMaterializeVersionByIDFallsBackForInvalidSnapshots(t *te
 	})
 
 	t.Run("foreign document asset", func(t *testing.T) {
-		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		service, _, finalizer, ident, session, version, initial := finalizerFixture(t)
 		foreignVDM := *initial
 		foreignVDM.DocumentID = "foreign-finalizer-doc-" + uuid.NewString()
 		foreignDoc, _, _, err := service.CreateDocument(context.Background(), ident, "foreign.pdf", int64(len(validObject)), initial.PageCount, "foreign-source-"+uuid.NewString(), "studio/sources/foreign-"+uuid.NewString()+".pdf", foreignVDM)
@@ -322,7 +322,7 @@ func TestStudioFinalizerMaterializeVersionByIDFallsBackForInvalidSnapshots(t *te
 	})
 
 	t.Run("wrong page count", func(t *testing.T) {
-		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		service, _, finalizer, ident, session, version, initial := finalizerFixture(t)
 		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "wrong-pages-"+uuid.NewString(), "studio/snapshots/wrong-pages-"+uuid.NewString()+".pdf", initial.PageCount+1, validObject)
 		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
 		defer byID.Cleanup()
@@ -344,7 +344,7 @@ func TestStudioFinalizerMaterializeVersionByIDFallsBackForInvalidSnapshots(t *te
 	})
 
 	t.Run("non-file storage object", func(t *testing.T) {
-		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		service, _, finalizer, ident, session, version, initial := finalizerFixture(t)
 		key := "studio/snapshots/non-file-" + uuid.NewString() + ".pdf"
 		require.NoError(t, os.MkdirAll(filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(key)), 0o755))
 		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "non-file-snapshot-"+uuid.NewString(), key, initial.PageCount, nil)
