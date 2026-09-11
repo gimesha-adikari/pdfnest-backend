@@ -23,6 +23,7 @@ import (
 	"pdfnest-backend/internal/analyzer/engine"
 	"pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/analyzer/worker"
+	"pdfnest-backend/internal/storage"
 )
 
 func createValidZipBuffer(t *testing.T) []byte {
@@ -69,7 +70,7 @@ func TestUploadArchive_AtomicIngestionAndSessionCreation(t *testing.T) {
 	// 1. Attempt creating session with NON-EXISTENT storageKey -> Must be rejected with 404
 	badSessionReq := CreateSessionRequest{
 		SourceType: engine.SourceTypeZip,
-		StorageKey: "repositories/raw/non-existent-archive.zip",
+		StorageKey: storage.NewOwnedKey("guest:test-user", "repository_analyzer", ".zip"),
 	}
 	body, _ := json.Marshal(badSessionReq)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/analyzer/sessions", bytes.NewReader(body))

@@ -482,6 +482,9 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 			return nil, fmt.Errorf("%w: failed to load source asset '%s': %v", ErrRenderFailed, *page.SourceAssetID, err)
 		}
 
+		if asset.DocumentID.String() != documentID {
+			return nil, ErrUnauthorized
+		}
 		pdfPath, cleanup, resErr := storage.ResolveArchive(ctx, asset.R2Key)
 		if resErr != nil || pdfPath == "" {
 			return nil, fmt.Errorf("%w: failed to resolve source pdf from storage '%s': %v", ErrRenderFailed, asset.R2Key, resErr)

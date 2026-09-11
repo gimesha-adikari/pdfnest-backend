@@ -6,10 +6,8 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
 
 	"pdfnest-backend/internal/storage"
 )
@@ -73,7 +71,7 @@ func (ctrl *Controller) UploadArchive(c *fiber.Ctx) error {
 		cleanName += ".zip"
 	}
 
-	storageKey := fmt.Sprintf("repositories/raw/%d_%s-%s", time.Now().UnixNano(), uuid.NewString()[:8], cleanName)
+	storageKey := storage.NewOwnedKey(ctrl.resolveIdentityID(c), "repository_analyzer", ".zip")
 
 	// 4. Persist to storage backend
 	written, sha256Hex, err := storage.SaveLocalStream(c.Context(), storageKey, stream)

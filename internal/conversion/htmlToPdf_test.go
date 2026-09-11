@@ -2,9 +2,38 @@ package conversion
 
 import (
 	"context"
+	"errors"
+	"os"
+	"pdfnest-backend/internal/netguard"
 	"testing"
 	"time"
 )
+
+func TestHTMLPDFRejectsPrivateAndNonHTTPDestinations(t *testing.T) {
+	for _, target := range []string{"http://127.0.0.1/", "http://[::1]/", "http://169.254.169.254/", "file:///etc/passwd", "http://localhost/"} {
+		path, err := (&ConversionService{}).HtmlToPdf(context.Background(), target, PrintOptions{PaperSize: "A4"})
+		if path != "" || !errors.Is(err, netguard.ErrForbidden) {
+			t.Fatalf("destination %q: path=%q error=%v", target, path, err)
+		}
+	}
+}
+
+func TestHTMLPDFPublicNetworkIntegration(t *testing.T) {
+	if os.Getenv("PDFNEST_TEST_PUBLIC_RENDER") != "true" {
+		t.Skip("requires Chromium and outbound public HTTPS")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 110*time.Second)
+	defer cancel()
+	path, err := (&ConversionService{}).HtmlToPdf(ctx, "https://example.com/", PrintOptions{PaperSize: "A4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 1000 || string(data[:5]) != "%PDF-" {
+		t.Fatalf("invalid PDF output: bytes=%d err=%v", len(data), err)
+	}
+}
 
 func TestHTMLPDFReadyDeadlineMs(t *testing.T) {
 	const fallback = 8 * time.Second

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 	"pdfnest-backend/internal/uploads"
@@ -228,6 +229,21 @@ func (ctrl *Controller) CreateSession(c *fiber.Ctx) error {
 		})
 	}
 
+	// JSON creation may describe blank pages or a fresh upload owned by this
+	// identity. It must never adopt arbitrary stored objects or existing assets.
+	if (req.SourceAssetID == "") != (req.SourceR2Key == "") || (req.SourceR2Key != "" && !storage.IsOwnedKey(req.SourceR2Key, ident.ID, "studio_source")) {
+		return fiber.ErrForbidden
+	}
+	for _, page := range req.InitialVDM.Pages {
+		if page.SourceAssetID != nil && *page.SourceAssetID != "" && *page.SourceAssetID != req.SourceAssetID {
+			return fiber.ErrForbidden
+		}
+		for _, overlay := range page.Overlays {
+			if overlay.AssetID != "" || overlay.AssetR2Key != "" {
+				return fiber.ErrForbidden
+			}
+		}
+	}
 	if req.FileName == "" {
 		req.FileName = "untitled.pdf"
 	}

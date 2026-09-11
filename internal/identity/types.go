@@ -21,6 +21,7 @@ const (
 
 type Identity struct {
 	ID              string    `json:"id"`
+	QuotaID         string    `json:"quota_id,omitempty"`
 	Type            Type      `json:"type"`
 	Role            string    `json:"role,omitempty"`
 	GuestCookie     string    `json:"guest_cookie,omitempty"`
@@ -37,6 +38,7 @@ func (i Identity) IsUser() bool  { return i.Type == TypeUser }
 
 type GuestRecord struct {
 	ID              string    `json:"id"`
+	QuotaID         string    `json:"quota_id,omitempty"`
 	FingerprintHash string    `json:"fingerprint_hash,omitempty"`
 	UserAgentHash   string    `json:"user_agent_hash,omitempty"`
 	IPHash          string    `json:"ip_hash,omitempty"`

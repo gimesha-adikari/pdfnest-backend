@@ -190,10 +190,11 @@ func TestRealRendering_EndToEndWorkerRenderer(t *testing.T) {
 
 	// 3. Create deterministic 2-page PDF and save to storage
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("e2e_test_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	err := os.WriteFile(localPdfPath, pdfBytes, 0644)
 	require.NoError(t, err)
 	defer os.Remove(localPdfPath)
@@ -362,10 +363,11 @@ func TestRealRendering_EndToEndWorkerRenderer_SubTilesAndIntegratedRotation(t *t
 	guestID := "guest_subtile_rot_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("subtile_test_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	err := os.WriteFile(localPdfPath, pdfBytes, 0644)
 	require.NoError(t, err)
 	defer os.Remove(localPdfPath)
@@ -592,7 +594,7 @@ func TestRealRendering_NoSilentSyntheticFallbackOnWorkerFailure(t *testing.T) {
 		FileSize:         1000,
 		InitialPageCount: 2,
 		SourceAssetID:    assetID,
-		SourceR2Key:      "nonexistent_storage_key.pdf",
+		SourceR2Key:      storage.NewOwnedKey(guestID, "studio_source", ".pdf"),
 		InitialVDM: vdm.DocumentModel{
 			PageCount: 2,
 			Pages: []vdm.PageDescriptor{
@@ -676,10 +678,11 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 	guestID := "guest_sf_strict_" + uuid.New().String()
 
 	// Write dummy local PDF
-	pdfKey := fmt.Sprintf("test_sf_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, []byte("%PDF-1.4 dummy"), 0644)
 	defer os.Remove(localPdfPath)
 

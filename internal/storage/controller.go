@@ -34,6 +34,12 @@ func (ctrl *Controller) PresignUploads(c *fiber.Ctx) error {
 		})
 	}
 
+	owner, _ := c.Locals("user_id").(string)
+	var err error
+	req, err = prepareOwnedUploads(req, owner)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{Code: "INVALID_UPLOAD_SCOPE", Message: err.Error()})
+	}
 	store, err := Default()
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{

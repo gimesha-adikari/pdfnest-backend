@@ -62,7 +62,11 @@ func (s *Store) Save(ctx context.Context, g *GuestRecord) error {
 	pipe.Set(ctx, s.guestKey(g.ID), raw, s.ttl)
 
 	if g.FingerprintHash != "" {
-		pipe.Set(ctx, s.fpKey(g.FingerprintHash), g.ID, s.ttl)
+		quotaID := g.QuotaID
+		if quotaID == "" {
+			quotaID = g.ID
+		}
+		pipe.Set(ctx, s.fpKey(g.FingerprintHash), quotaID, s.ttl)
 	}
 
 	_, err = pipe.Exec(ctx)

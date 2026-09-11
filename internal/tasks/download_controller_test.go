@@ -16,11 +16,7 @@ import (
 )
 
 func setupDownloadTestRedis(t *testing.T) (*redis.Client, *TaskRegistry, func()) {
-	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 15})
-	if err := client.Ping(context.Background()).Err(); err != nil {
-		t.Skip("Local Redis server not running on 127.0.0.1:6379, skipping test")
-	}
-	_ = client.FlushDB(context.Background()).Err()
+	client := setupTestRedis(t)
 
 	reg := &TaskRegistry{client: client}
 	oldRegistry := Registry

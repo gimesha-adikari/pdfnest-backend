@@ -96,5 +96,6 @@ func TestStorageResolution_MissingObjectRejection(t *testing.T) {
 
 	_, err = ExtractZipArchive(context.Background(), "repositories/raw/non-existent-file.zip", sandbox, DefaultAcquisitionLimits())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not be found locally or in remote storage")
+	assert.Contains(t, err.Error(), "storage: object not found")
+	assert.Contains(t, err.Error(), "repositories/raw/non-existent-file.zip")
 }

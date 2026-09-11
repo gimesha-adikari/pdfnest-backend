@@ -2,10 +2,10 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"os"
 	"time"
 
-	"github.com/gofiber/fiber/v2/log"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"google.golang.org/api/idtoken"
@@ -36,7 +36,7 @@ func (s *authService) VerifyPassword(hashed, password string) error {
 func (s *authService) GenerateToken(userID, role string) (string, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		log.Fatal("CRITICAL SECURITY ERROR: JWT_SECRET environment variable is missing. Halting startup.")
+		return "", errors.New("authentication is not configured")
 	}
 
 	claims := jwt.MapClaims{
@@ -52,7 +52,7 @@ func (s *authService) GenerateToken(userID, role string) (string, error) {
 func (s *authService) VerifyGoogleToken(ctx context.Context, idToken string) (map[string]interface{}, error) {
 	clientID := os.Getenv("GOOGLE_CLIENT_ID")
 	if clientID == "" {
-		log.Fatal("CRITICAL SECURITY ERROR: GOOGLE_CLIENT_ID environment variable is missing. Halting startup.")
+		return nil, errors.New("Google authentication is not configured")
 	}
 
 	payload, err := idtoken.Validate(ctx, idToken, clientID)

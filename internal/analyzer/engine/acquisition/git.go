@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"pdfnest-backend/internal/analyzer/engine"
+	"pdfnest-backend/internal/process"
 )
 
 var blockedCIDRs []*net.IPNet
@@ -200,8 +201,7 @@ func CloneGitRepository(
 	startTime := time.Now()
 
 	// Prepare isolated git clone command with redirects strictly disabled
-	cmd := exec.CommandContext(
-		cloneCtx,
+	cmd := exec.Command(
 		"git",
 		"-c", "http.followRedirects=false",
 		"clone",
@@ -220,7 +220,7 @@ func CloneGitRepository(
 		"HOME=" + sandbox.RootPath,
 	}
 
-	output, err := cmd.CombinedOutput()
+	output, err := (process.Runner{}).RunCommand(cloneCtx, 0, cmd)
 	if err != nil {
 		_ = sandbox.Cleanup()
 		elapsed := time.Since(startTime).Round(time.Millisecond)
@@ -237,7 +237,8 @@ func CloneGitRepository(
 		}
 
 		// 3. Process Exit Code / Signal Inspection
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			// Exit code 137 = SIGKILL (Linux OS OOM killer or container resource cgroup limit)
 			if exitErr.ExitCode() == 137 || exitErr.String() == "signal: killed" {
 				return nil, fmt.Errorf("%w: git clone process terminated by system (exceeded memory or container resource limit)", ErrGitResourceLimit)
@@ -270,9 +271,9 @@ func CloneGitRepository(
 
 	// Capture commit hash via direct rev-parse
 	var commitHash string
-	revCmd := exec.CommandContext(cloneCtx, "git", "-C", sandbox.RootPath, "rev-parse", "HEAD")
+	revCmd := exec.Command("git", "-C", sandbox.RootPath, "rev-parse", "HEAD")
 	revCmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1"}
-	if revOut, revErr := revCmd.Output(); revErr == nil {
+	if revOut, revErr := (process.Runner{}).RunCommand(cloneCtx, 0, revCmd); revErr == nil {
 		commitHash = strings.TrimSpace(string(revOut))
 	}
 

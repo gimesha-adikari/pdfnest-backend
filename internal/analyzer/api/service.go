@@ -96,6 +96,9 @@ func (s *Service) CreateSession(ctx context.Context, ownerIdentity string, req C
 		if strings.Contains(cleanKey, "..") || strings.HasPrefix(cleanKey, "/") {
 			return nil, fmt.Errorf("%w: path traversal or absolute path detected", ErrInvalidStorageKey)
 		}
+		if !storage.IsOwnedKey(cleanKey, ownerIdentity, "repository_analyzer") {
+			return nil, fmt.Errorf("%w: forbidden storage reference; upload the archive again", ErrInvalidStorageKey)
+		}
 		if !storage.ObjectExists(ctx, cleanKey) {
 			return nil, fmt.Errorf("%w: object key '%s' not found in storage", ErrStorageObjectNotFound, cleanKey)
 		}

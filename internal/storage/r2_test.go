@@ -42,3 +42,24 @@ func TestR2DeleteRejectsUnsafeKeyBeforeStorageRequest(t *testing.T) {
 func TestR2DeleteTimeoutIsBounded(t *testing.T) {
 	require.Equal(t, 2*time.Minute, r2DeleteTimeout)
 }
+
+func TestDecryptionRejectsCorruptCiphertextAndKeepsKnownLegacyFormats(t *testing.T) {
+	t.Setenv("FILE_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+	input := []byte("%PDF-1.7 an encrypted source")
+	encrypted, err := encryptData(input)
+	require.NoError(t, err)
+	require.NotEqual(t, input, encrypted)
+	plain, err := decryptData(encrypted)
+	require.NoError(t, err)
+	require.Equal(t, input, plain)
+	encrypted[len(encrypted)-1] ^= 1
+	_, err = decryptData(encrypted)
+	require.Error(t, err)
+	_, err = decryptData([]byte{1, 2, 3})
+	require.Error(t, err)
+	for _, legacy := range [][]byte{input, []byte("PK\x03\x04legacy archive"), []byte(`{"pages":[]}`), []byte("\x89PNG\r\n\x1a\nimage")} {
+		plain, err = decryptData(legacy)
+		require.NoError(t, err)
+		require.Equal(t, legacy, plain)
+	}
+}

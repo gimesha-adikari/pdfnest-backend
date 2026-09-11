@@ -27,19 +27,31 @@ func saveHeader(c *fiber.Ctx, fh *multipart.FileHeader) (string, error) {
 	}
 	defer src.Close()
 
-	dst, err := os.Create(destPath)
-	if err != nil {
-		return "", err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return "", err
-	}
-	if err := dst.Sync(); err != nil {
+	if err := copyStagedUpload(src, destPath); err != nil {
 		return "", err
 	}
 	return destPath, nil
+}
+
+func copyStagedUpload(src io.Reader, destPath string) (err error) {
+	dst, err := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeErr := dst.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			_ = os.Remove(destPath)
+		}
+	}()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return err
+	}
+	return dst.Sync()
 }
 
 func Prepare() fiber.Handler {

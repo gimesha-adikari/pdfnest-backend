@@ -43,9 +43,10 @@ func TestProtect_NoToken(t *testing.T) {
 }
 
 func TestProtect_ValidToken(t *testing.T) {
+	_, id := activeAccount(t)
 	app := newTestApp()
 	tok := makeToken("test-secret", jwt.MapClaims{
-		"user_id": "user-abc",
+		"user_id": id,
 		"role":    "user",
 		"exp":     time.Now().Add(time.Hour).Unix(),
 	})

@@ -105,7 +105,7 @@ func runGuestQuota(c *fiber.Ctx, tool Tool, identityID string) error {
 	}
 
 	ctx := identity.RequestContext(c)
-	reservation, err := GuestQuota.Reserve(ctx, identityID, tool, pages, images, c.Path())
+	reservation, err := GuestQuota.Reserve(ctx, identity.GuestQuotaKey(c, identityID), tool, pages, images, c.Path())
 	if err != nil {
 		var berr *BillingError
 		if errors.As(err, &berr) {
