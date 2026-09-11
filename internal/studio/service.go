@@ -422,6 +422,32 @@ func (s *studioService) ApplyOperation(
 		return nil, err
 	}
 
+	_, doc, _, err := s.GetSession(ctx, sessionID, ident)
+	if err != nil {
+		return nil, err
+	}
+	// This compatibility endpoint accepts a complete VDM. Resolve every asset
+	// against the authorized document before persisting caller-supplied references.
+	for _, page := range req.NewVirtualModel.Pages {
+		ids := []string{}
+		if page.SourceAssetID != nil && *page.SourceAssetID != "" {
+			ids = append(ids, *page.SourceAssetID)
+		}
+		for _, overlay := range page.Overlays {
+			if overlay.AssetR2Key != "" {
+				return nil, ErrUnauthorized
+			}
+			if overlay.AssetID != "" {
+				ids = append(ids, overlay.AssetID)
+			}
+		}
+		for _, id := range ids {
+			asset, assetErr := s.repo.GetAsset(ctx, id)
+			if assetErr != nil || asset == nil || asset.DocumentID != doc.ID {
+				return nil, ErrUnauthorized
+			}
+		}
+	}
 	return persistOperation(ctx, s.repo, sessionID, ident, operationMutation{
 		BaseVersionID:  req.BaseVersionID,
 		IdempotencyKey: req.IdempotencyKey,

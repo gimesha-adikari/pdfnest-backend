@@ -12,6 +12,7 @@ import (
 	"pdfnest-backend/internal/uploads"
 	"strings"
 
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
 
 	"github.com/gofiber/fiber/v2"
@@ -110,8 +111,8 @@ func (cr *Controller) handle(c *fiber.Ctx, action Action) error {
 		})
 	}
 
-	sourceKey := storage.BuildKey(
-		"markup/source",
+	sourceKey := storage.NewOwnedKey(
+		identity.MustFromContext(c).ID, "markup_source",
 		filepath.Ext(upload.Header.Filename),
 	)
 
@@ -195,6 +196,9 @@ func (cr *Controller) HandleJobStatus(c *fiber.Ctx) error {
 		})
 	}
 
+	if !markupJobOwned(c, job) {
+		return fiber.ErrForbidden
+	}
 	return c.JSON(job)
 }
 
@@ -209,6 +213,9 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		})
 	}
 
+	if !markupJobOwned(c, job) {
+		return fiber.ErrForbidden
+	}
 	resp, err := cr.service.GetJobDownload(jobID)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
@@ -228,29 +235,7 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		return err
 	}
 
-	go func(record *WorkerJobRecord) {
-		store, err := storage.Default()
-		if err != nil || record == nil {
-			return
-		}
-
-		ctx := context.Background()
-
-		if record.Result != nil {
-			if artifact, ok := record.Result["artifact_key"].(string); ok && artifact != "" {
-				_ = store.DeleteObject(ctx, artifact)
-			}
-		}
-
-		if record.Payload != nil {
-			if src, ok := record.Payload["source_key"].(string); ok && src != "" {
-				_ = store.DeleteObject(ctx, src)
-			}
-			if payload, ok := record.Payload["payload_key"].(string); ok && payload != "" {
-				_ = store.DeleteObject(ctx, payload)
-			}
-		}
-	}(job)
+	// Downloads may be retried; storage expiration owns eventual disposal.
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		c.Set("Content-Type", ct)
@@ -271,16 +256,14 @@ func (cr *Controller) HandleGetFile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "path query parameter is required"})
 	}
 
-	store, err := storage.Default()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "storage not configured"})
+	if !storage.IsOwnedKey(path, identity.MustFromContext(c).ID, "markup_source") {
+		return fiber.ErrForbidden
 	}
-
-	tmpPath, err := store.DownloadToTemp(path, "preview", ".pdf")
+	tmpPath, cleanup, err := storage.ResolveObject(c.Context(), path, "markup-preview", ".pdf")
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "file not found or decryption failed"})
 	}
-	defer os.Remove(tmpPath)
+	defer cleanup()
 
 	pdfBytes, err := os.ReadFile(tmpPath)
 	if err != nil {
@@ -289,4 +272,12 @@ func (cr *Controller) HandleGetFile(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "application/pdf")
 	return c.Send(pdfBytes)
+}
+
+func markupJobOwned(c *fiber.Ctx, job *WorkerJobRecord) bool {
+	if job == nil {
+		return false
+	}
+	source, _ := job.Payload["source_key"].(string)
+	return storage.IsOwnedKey(source, identity.MustFromContext(c).ID, "markup_source")
 }

@@ -46,6 +46,11 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 		})
 	}
 
+	for _, ref := range req.Files {
+		if !storage.IsOwnedKey(ref.Key, userID, "image_to_text_pdf") {
+			return c.Status(fiber.StatusForbidden).JSON(APIError{Code: "FORBIDDEN_STORAGE_REFERENCE", Message: "Upload the images again before submitting this job."})
+		}
+	}
 	lang := strings.TrimSpace(req.Lang)
 	if lang == "" {
 		lang = "eng"

@@ -96,10 +96,11 @@ func TestStress_IdenticalConcurrentTilesSingleflight(t *testing.T) {
 	guestID := "guest_stress_sf_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("stress_sf_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 
@@ -197,10 +198,11 @@ func TestStress_DifferentSubTilesConcurrentLoad(t *testing.T) {
 	guestID := "guest_diff_tiles_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("diff_tiles_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 
@@ -306,10 +308,11 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 	createDoc := func(docIdx int) (string, string, string, string) {
 		guestID := fmt.Sprintf("guest_doc_%d_%s", docIdx, uuid.New().String())
 		pdfBytes := createDeterministicTestPDF(t)
-		pdfKey := fmt.Sprintf("multidoc_%d_%s.pdf", docIdx, uuid.New().String())
+		pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 		storageDir := storage.GetLocalStorageDir()
 		_ = os.MkdirAll(storageDir, 0755)
 		localPdfPath := filepath.Join(storageDir, pdfKey)
+		require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 		_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 
 		assetID := fmt.Sprintf("ast_%d_%s", docIdx, uuid.New().String())
@@ -415,10 +418,11 @@ func TestStress_WorkerSaturationAndQueueFull429Propagation(t *testing.T) {
 	guestID := "guest_sat_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("sat_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 
@@ -481,10 +485,11 @@ func TestStress_CorruptPDFHandlingAndErrorMetrics(t *testing.T) {
 	guestID := "guest_corrupt_" + uuid.New().String()
 
 	// Write corrupt bytes
-	pdfKey := fmt.Sprintf("corrupt_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, []byte("NOT_A_VALID_PDF_HEADER_CORRUPT"), 0644)
 	defer os.Remove(localPdfPath)
 
@@ -555,10 +560,11 @@ func TestStress_ScaleProgression_1To8(t *testing.T) {
 	guestID := "guest_scales_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := fmt.Sprintf("scales_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 
@@ -693,10 +699,11 @@ print(doc.tobytes().hex())
 	hugePdfBytes, err := hex.DecodeString(hugePdfHex)
 	require.NoError(t, err)
 
-	pdfKey := fmt.Sprintf("huge_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, hugePdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 

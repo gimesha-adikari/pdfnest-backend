@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/uploads"
 
@@ -76,7 +77,7 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		contentType = "application/pdf"
 	}
 
-	sourceKey := storage.BuildKey("edit/source", filepath.Ext(upload.Header.Filename))
+	sourceKey := storage.NewOwnedKey(identity.MustFromContext(c).ID, "editor_source", filepath.Ext(upload.Header.Filename))
 	if err := cr.persistSource(upload.Path, sourceKey, contentType); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -174,6 +175,9 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 		})
 	}
 
+	if !storage.IsOwnedKey(tracker.SourceTracker, identity.MustFromContext(c).ID, "editor_source") {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Original PDF does not belong to this editor session; upload it again."})
+	}
 	pagesJSONKey := storage.BuildKey("edit/layout", ".json")
 	if err := cr.persistLayout(payloadBytes, pagesJSONKey); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -212,6 +216,9 @@ func (cr *Controller) HandleJobStatus(c *fiber.Ctx) error {
 			"error":   err.Error(),
 		})
 	}
+	if !editorJobOwned(c, job) {
+		return fiber.ErrForbidden
+	}
 	return c.JSON(job)
 }
 
@@ -226,6 +233,9 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		})
 	}
 
+	if !editorJobOwned(c, job) {
+		return fiber.ErrForbidden
+	}
 	resp, err := cr.service.GetJobDownload(jobID)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
@@ -245,29 +255,8 @@ func (cr *Controller) HandleJobDownload(c *fiber.Ctx) error {
 		return err
 	}
 
-	go func(record *WorkerJobRecord) {
-		store, err := storage.Default()
-		if err != nil || record == nil {
-			return
-		}
-
-		ctx := context.Background()
-
-		if record.Result != nil {
-			if artifact, ok := record.Result["artifact_key"].(string); ok && artifact != "" {
-				_ = store.DeleteObject(ctx, artifact)
-			}
-		}
-
-		if record.Payload != nil {
-			if src, ok := record.Payload["source_key"].(string); ok && src != "" {
-				_ = store.DeleteObject(ctx, src)
-			}
-			if pages, ok := record.Payload["pages_json_key"].(string); ok && pages != "" {
-				_ = store.DeleteObject(ctx, pages)
-			}
-		}
-	}(job)
+	// Downloading is a read: the open editor may compile or download again.
+	// Object expiration belongs to storage lifecycle cleanup, not this handler.
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		c.Set("Content-Type", ct)
@@ -288,16 +277,14 @@ func (cr *Controller) HandleGetFile(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "path query parameter is required"})
 	}
 
-	store, err := storage.Default()
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "storage not configured"})
+	if !storage.IsOwnedKey(path, identity.MustFromContext(c).ID, "editor_source") {
+		return fiber.ErrForbidden
 	}
-
-	tmpPath, err := store.DownloadToTemp(path, "preview", ".pdf")
+	tmpPath, cleanup, err := storage.ResolveObject(c.Context(), path, "edit-preview", ".pdf")
 	if err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "file not found or decryption failed"})
 	}
-	defer os.Remove(tmpPath)
+	defer cleanup()
 
 	pdfBytes, err := os.ReadFile(tmpPath)
 	if err != nil {
@@ -306,4 +293,12 @@ func (cr *Controller) HandleGetFile(c *fiber.Ctx) error {
 
 	c.Set("Content-Type", "application/pdf")
 	return c.Send(pdfBytes)
+}
+
+func editorJobOwned(c *fiber.Ctx, job *WorkerJobRecord) bool {
+	if job == nil {
+		return false
+	}
+	source, _ := job.Payload["source_key"].(string)
+	return storage.IsOwnedKey(source, identity.MustFromContext(c).ID, "editor_source")
 }

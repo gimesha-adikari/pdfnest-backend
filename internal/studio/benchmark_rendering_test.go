@@ -53,10 +53,11 @@ func TestBenchmark_ModeB_WarmCacheVsColdCache(t *testing.T) {
 	guestID := "guest_warm_" + uuid.New().String()
 
 	pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-	pdfKey := fmt.Sprintf("warm_%s.pdf", uuid.New().String())
+	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 	storageDir := storage.GetLocalStorageDir()
 	_ = os.MkdirAll(storageDir, 0755)
 	localPdfPath := filepath.Join(storageDir, pdfKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 	defer os.Remove(localPdfPath)
 
@@ -163,10 +164,11 @@ func TestBenchmark_ModeC_SingleflightScaling(t *testing.T) {
 			guestID := fmt.Sprintf("guest_conc_%d_%s", conc, uuid.New().String())
 
 			pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-			pdfKey := fmt.Sprintf("doc_c_%d_%s.pdf", conc, uuid.New().String())
+			pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 			storageDir := storage.GetLocalStorageDir()
 			_ = os.MkdirAll(storageDir, 0755)
 			localPdfPath := filepath.Join(storageDir, pdfKey)
+			require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 			_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 			defer os.Remove(localPdfPath)
 
@@ -276,10 +278,11 @@ func TestBenchmark_ModeE_MultiDocumentConcurrency(t *testing.T) {
 		guestIDs = append(guestIDs, guestID)
 
 		pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-		pdfKey := fmt.Sprintf("doc_multi_%d_%s.pdf", d, uuid.New().String())
+		pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
 		storageDir := storage.GetLocalStorageDir()
 		_ = os.MkdirAll(storageDir, 0755)
 		localPdfPath := filepath.Join(storageDir, pdfKey)
+		require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
 		_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
 		defer os.Remove(localPdfPath)
 

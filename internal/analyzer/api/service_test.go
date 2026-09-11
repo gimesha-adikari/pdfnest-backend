@@ -159,15 +159,18 @@ func TestService_StorageKeySecurity(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidStorageKey)
 
 	// 3. Persist valid object first to satisfy canonical storage existence check
+	key := storage.NewOwnedKey(user, "repository_analyzer", ".zip")
 	testZipBytes := createValidZipBuffer(t)
-	_, _, err = storage.SaveLocalStream(ctx, "repositories/raw/123-session.zip", bytes.NewReader(testZipBytes))
+	_, _, err = storage.SaveLocalStream(ctx, key, bytes.NewReader(testZipBytes))
 	require.NoError(t, err)
 
 	// 4. Valid key accepted
 	validSession, err := svc.CreateSession(ctx, user, CreateSessionRequest{
 		SourceType: engine.SourceTypeZip,
-		StorageKey: "repositories/raw/123-session.zip",
+		StorageKey: key,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "123-session", validSession.RepositoryName)
+	assert.NotEmpty(t, validSession.RepositoryName)
+	_, err = svc.CreateSession(ctx, "other-user", CreateSessionRequest{SourceType: engine.SourceTypeZip, StorageKey: key})
+	require.ErrorIs(t, err, ErrInvalidStorageKey)
 }
