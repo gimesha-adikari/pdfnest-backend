@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -83,6 +84,30 @@ type workerJobStatus struct {
 	ErrorCode                  string
 	Progress                   int
 	Result                     map[string]any
+}
+
+// preparedStudioResult contains only the deterministic, server-derived state
+// required to register a completed worker artifact. It is intentionally
+// process-local: the artifact bytes stay in controlled temporary storage and
+// the durable object is owned by a unique key until finalization wins.
+type preparedStudioResult struct {
+	jobID             uuid.UUID
+	sessionID         uuid.UUID
+	documentID        uuid.UUID
+	baseVersionID     uuid.UUID
+	workerJobID       string
+	jobType           string
+	baseVersionNumber int
+	materializedKey   string
+	pageCount         int
+	byteSize          int64
+	assetID           string
+	versionID         uuid.UUID
+	snapshotID        uuid.UUID
+	operationID       uuid.UUID
+	virtualModel      models.JSON
+	targetPageIDs     models.JSON
+	workerStatus      workerJobStatus
 }
 
 // StudioWorkerGateway is the only Studio-to-worker seam. Its production
@@ -503,11 +528,17 @@ func (c *studioJobCoordinator) Cancel(ctx context.Context, sessionID, jobID uuid
 	}
 	return job, nil
 }
-func (c *studioJobCoordinator) reconcile(ctx context.Context, job *models.StudioJob) (*models.StudioJob, error) {
+func (c *studioJobCoordinator) reconcile(ctx context.Context, job *models.StudioJob) (result *models.StudioJob, reconcileErr error) {
+	reconcileStarted := time.Now()
+	defer func() {
+		c.logReconciliationStage(job, "reconcile_total", time.Since(reconcileStarted), reconciliationOutcome(reconcileErr))
+	}()
 	if terminalStudioJob(job.Status) {
 		return job, nil
 	}
+	workerStatusStarted := time.Now()
 	status, err := c.gateway.Status(ctx, StudioJobName(job.JobType), job.WorkerJobID)
+	c.logReconciliationStage(job, "worker_status", time.Since(workerStatusStarted), reconciliationOutcome(err))
 	if err != nil {
 		return nil, err
 	}
@@ -572,118 +603,192 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 	if job.ReconciledAt != nil {
 		return nil
 	}
-	registered := false
-	materializedKey := ""
-	defer func() {
-		if materializedKey != "" && !registered {
-			cleanupStudioObject(ctx, materializedKey)
-		}
-	}()
+	if StudioJobName(job.JobType) == StudioJobEditExtract {
+		return c.reconcileEditorExtractSuccess(ctx, job)
+	}
+	prepared, err := c.prepareStudioJobResult(ctx, job)
+	if err != nil {
+		return err
+	}
+	registered, err := c.finalizePreparedStudioJobResult(ctx, job, prepared)
+	if !registered {
+		c.cleanupPreparedStudioObject(ctx, prepared.materializedKey)
+	}
+	if err != nil {
+		return err
+	}
+	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "") {
+		c.cleanupStaging(ctx, job)
+	}
+	return nil
+}
 
-	err := c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
+func (c *studioJobCoordinator) reconcileEditorExtractSuccess(ctx context.Context, job *models.StudioJob) error {
+	return c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
 		locked, err := tx.LockJob(ctx, job.ID)
 		if err != nil {
 			return err
 		}
-		if locked.ReconciledAt != nil {
+		if locked.ReconciledAt != nil || locked.Status == "failed" || locked.Status == "cancelled" {
 			*job = *locked
 			return nil
 		}
-		if locked.Status == "failed" || locked.Status == "cancelled" {
-			*job = *locked
-			return nil
-		}
-		// The worker status was read before taking the row lock. Keep the
-		// successful result authoritative while ensuring it is persisted before
-		// the durable version is registered.
 		applyWorkerStatus(locked, workerJobStatus{ID: locked.WorkerJobID, Status: "succeeded", Progress: job.Progress, Message: job.Message, Error: job.Error, ErrorCode: job.ErrorCode, Result: mapFromJSON(job.Result)})
-		if StudioJobName(locked.JobType) == StudioJobEditExtract {
-			if err := c.reconcileEditorExtractLocked(ctx, tx, locked); err != nil {
-				return err
-			}
+		if err := c.reconcileEditorExtractLocked(ctx, tx, locked); err != nil {
+			return err
+		}
+		*job = *locked
+		return nil
+	})
+}
+
+func (c *studioJobCoordinator) prepareStudioJobResult(ctx context.Context, job *models.StudioJob) (*preparedStudioResult, error) {
+	if job.WorkerJobID == "" || job.DocumentID == uuid.Nil || job.SessionID == uuid.Nil || job.BaseVersionID == uuid.Nil {
+		return nil, fmt.Errorf("%w: incomplete durable job identity", ErrJobReconciliationFailed)
+	}
+	base, err := c.repo.GetVersion(ctx, job.BaseVersionID)
+	if err != nil {
+		return nil, err
+	}
+	if base.DocumentID != job.DocumentID {
+		return nil, ErrInvalidBaseVersion
+	}
+	baseModel, err := vdm.FromJSON(base.VirtualModel)
+	if err != nil {
+		return nil, err
+	}
+
+	downloadStarted := time.Now()
+	resp, err := c.gateway.Download(ctx, StudioJobName(job.JobType), job.WorkerJobID)
+	c.logReconciliationStage(job, "artifact_download", time.Since(downloadStarted), reconciliationOutcome(err))
+	if err != nil {
+		return nil, fmt.Errorf("%w: download worker artifact: %w", ErrJobReconciliationFailed, err)
+	}
+	defer resp.Body.Close()
+
+	tmp, err := os.CreateTemp("", "pdfnest-studio-job-result-*.pdf")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	defer os.Remove(path)
+	defer tmp.Close()
+	if _, err = io.Copy(tmp, resp.Body); err != nil {
+		return nil, err
+	}
+	if err = tmp.Close(); err != nil {
+		return nil, err
+	}
+
+	validateStarted := time.Now()
+	pages, err := validateMaterializedOutput(path)
+	if err != nil {
+		c.logReconciliationStage(job, "artifact_validate", time.Since(validateStarted), reconciliationOutcome(err))
+		return nil, err
+	}
+	modelState, err := deriveMaterializedVDMForJob(baseModel, path, pages, StudioJobName(job.JobType))
+	if err != nil {
+		c.logReconciliationStage(job, "artifact_validate", time.Since(validateStarted), reconciliationOutcome(err))
+		return nil, err
+	}
+	assetID := "studio-job-" + uuid.NewString()
+	versionID := uuid.New()
+	for index := range modelState.Pages {
+		modelState.Pages[index].SourceAssetID = &assetID
+		modelState.Pages[index].SourcePageNumber = index + 1
+	}
+	modelState.VersionID = versionID.String()
+	vdmBytes, err := modelState.ToJSON()
+	if err != nil {
+		c.logReconciliationStage(job, "artifact_validate", time.Since(validateStarted), reconciliationOutcome(err))
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		c.logReconciliationStage(job, "artifact_validate", time.Since(validateStarted), reconciliationOutcome(err))
+		return nil, err
+	}
+	c.logReconciliationStage(job, "artifact_validate", time.Since(validateStarted), "ok")
+
+	targetPageIDs := models.JSON(nil)
+	if strings.HasPrefix(job.JobType, "markup_") {
+		targetPageIDs = markupTargetPageIDs(baseModel, job.Parameters)
+	}
+	prepared := &preparedStudioResult{
+		jobID: job.ID, sessionID: job.SessionID, documentID: job.DocumentID, baseVersionID: job.BaseVersionID,
+		workerJobID: job.WorkerJobID, jobType: job.JobType, baseVersionNumber: base.VersionNumber,
+		pageCount: pages, byteSize: info.Size(), assetID: assetID, versionID: versionID,
+		snapshotID: uuid.New(), operationID: uuid.New(), virtualModel: models.JSON(vdmBytes),
+		targetPageIDs: targetPageIDs,
+		workerStatus:  workerJobStatus{ID: job.WorkerJobID, Status: "succeeded", Progress: job.Progress, Message: job.Message, Error: job.Error, ErrorCode: job.ErrorCode, Result: mapFromJSON(job.Result)},
+	}
+	storeStarted := time.Now()
+	prepared.materializedKey = storage.BuildKey(filepath.ToSlash(filepath.Join("studio", "materialized", job.DocumentID.String())), ".pdf")
+	storeErr := persistStudioPDF(ctx, path, prepared.materializedKey)
+	c.logReconciliationStage(job, "artifact_store", time.Since(storeStarted), reconciliationOutcome(storeErr))
+	if storeErr != nil {
+		c.cleanupPreparedStudioObject(ctx, prepared.materializedKey)
+		return nil, storeErr
+	}
+	return prepared, nil
+}
+
+func (c *studioJobCoordinator) finalizePreparedStudioJobResult(ctx context.Context, job *models.StudioJob, prepared *preparedStudioResult) (registered bool, finalizeErr error) {
+	txStarted := time.Now()
+	defer func() {
+		c.logReconciliationStage(job, "finalize_tx", time.Since(txStarted), reconciliationOutcome(finalizeErr))
+	}()
+
+	finalizeErr = c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
+		lockStarted := time.Now()
+		locked, err := tx.LockJob(ctx, job.ID)
+		c.logReconciliationStage(job, "finalize_lock_wait", time.Since(lockStarted), reconciliationOutcome(err))
+		if err != nil {
+			return err
+		}
+		if locked.ReconciledAt != nil || locked.Status == "failed" || locked.Status == "cancelled" {
 			*job = *locked
 			return nil
 		}
-		resp, err := c.gateway.Download(ctx, StudioJobName(locked.JobType), locked.WorkerJobID)
-		if err != nil {
-			return fmt.Errorf("%w: download worker artifact: %v", ErrJobReconciliationFailed, err)
-		}
-		defer resp.Body.Close()
-		tmp, err := os.CreateTemp("", "pdfnest-studio-job-result-*.pdf")
-		if err != nil {
-			return err
-		}
-		path := tmp.Name()
-		defer os.Remove(path)
-		if _, err = io.Copy(tmp, resp.Body); err != nil {
-			tmp.Close()
-			return err
-		}
-		if err = tmp.Close(); err != nil {
-			return err
-		}
-		pages, err := validateMaterializedOutput(path)
-		if err != nil {
-			return err
+		if locked.ID != prepared.jobID || locked.SessionID != prepared.sessionID || locked.DocumentID != prepared.documentID ||
+			locked.BaseVersionID != prepared.baseVersionID || locked.WorkerJobID != prepared.workerJobID || locked.JobType != prepared.jobType {
+			return fmt.Errorf("%w: prepared result no longer matches durable job", ErrJobReconciliationFailed)
 		}
 		base, err := tx.GetVersion(ctx, locked.BaseVersionID)
 		if err != nil {
 			return err
 		}
-		baseModel, err := vdm.FromJSON(base.VirtualModel)
-		if err != nil {
-			return err
+		if base.DocumentID != locked.DocumentID || base.VersionNumber != prepared.baseVersionNumber {
+			return ErrInvalidBaseVersion
 		}
-		modelState, err := deriveMaterializedVDMForJob(baseModel, path, pages, StudioJobName(locked.JobType))
-		if err != nil {
-			return err
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			return err
-		}
-		materializedKey = storage.BuildKey(filepath.ToSlash(filepath.Join("studio", "materialized", locked.DocumentID.String())), ".pdf")
-		if err = persistStudioPDF(ctx, path, materializedKey); err != nil {
-			return err
-		}
-		assetID := "studio-job-" + uuid.NewString()
-		for i := range modelState.Pages {
-			modelState.Pages[i].SourceAssetID = &assetID
-			modelState.Pages[i].SourcePageNumber = i + 1
-		}
-		versionID := uuid.New()
-		modelState.VersionID = versionID.String()
-		vdmBytes, err := modelState.ToJSON()
-		if err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		snap := &models.StudioSnapshot{ID: uuid.New(), VersionID: versionID, AssetID: assetID, PageCount: pages, CreatedAt: now}
-		asset := &models.StudioAsset{ID: assetID, DocumentID: locked.DocumentID, AssetType: "job_result", R2Key: materializedKey, ByteSize: info.Size(), MimeType: "application/pdf"}
-		ver := &models.StudioVersion{ID: versionID, DocumentID: locked.DocumentID, ParentVersionID: &locked.BaseVersionID, VersionNumber: base.VersionNumber + 1, Status: "ready", OperationType: locked.JobType, VirtualModel: models.JSON(vdmBytes), SnapshotID: &snap.ID, IsMaterialized: true, CreatedAt: now}
-		var targetPageIDs models.JSON
-		if strings.HasPrefix(locked.JobType, "markup_") {
-			targetPageIDs = markupTargetPageIDs(baseModel, locked.Parameters)
-		}
-		op := &models.StudioOperation{ID: uuid.New(), DocumentID: locked.DocumentID, VersionID: versionID, IdempotencyKey: locked.IdempotencyKey, OperationName: locked.JobType, Parameters: locked.Parameters, TargetPageIDs: targetPageIDs, CreatedAt: now}
 		lockedSession, err := tx.LockSession(ctx, locked.SessionID)
 		if err != nil {
 			return err
 		}
+		if lockedSession.DocumentID != locked.DocumentID {
+			return ErrUnauthorized
+		}
+
+		applyWorkerStatus(locked, prepared.workerStatus)
+		now := time.Now().UTC()
+		snapshot := &models.StudioSnapshot{ID: prepared.snapshotID, VersionID: prepared.versionID, AssetID: prepared.assetID, PageCount: prepared.pageCount, CreatedAt: now}
+		asset := &models.StudioAsset{ID: prepared.assetID, DocumentID: locked.DocumentID, AssetType: "job_result", R2Key: prepared.materializedKey, ByteSize: prepared.byteSize, MimeType: "application/pdf"}
+		version := &models.StudioVersion{ID: prepared.versionID, DocumentID: locked.DocumentID, ParentVersionID: &locked.BaseVersionID, VersionNumber: base.VersionNumber + 1, Status: "ready", OperationType: locked.JobType, VirtualModel: prepared.virtualModel, SnapshotID: &snapshot.ID, IsMaterialized: true, CreatedAt: now}
+		operation := &models.StudioOperation{ID: prepared.operationID, DocumentID: locked.DocumentID, VersionID: prepared.versionID, IdempotencyKey: locked.IdempotencyKey, OperationName: locked.JobType, Parameters: locked.Parameters, TargetPageIDs: prepared.targetPageIDs, CreatedAt: now}
 		if err = tx.CreateAsset(ctx, asset); err != nil {
 			return err
 		}
-		if err = tx.CreateSnapshot(ctx, snap); err != nil {
+		if err = tx.CreateSnapshot(ctx, snapshot); err != nil {
 			return err
 		}
 		if lockedSession.ActiveVersionID == locked.BaseVersionID {
-			if err = tx.CreateVersionAndOperation(ctx, ver, op, locked.SessionID, &locked.BaseVersionID); err != nil {
+			if err = tx.CreateVersionAndOperation(ctx, version, operation, locked.SessionID, &locked.BaseVersionID); err != nil {
 				return err
 			}
-		} else if err = tx.CreateDetachedVersionAndOperation(ctx, ver, op); err != nil {
+		} else if err = tx.CreateDetachedVersionAndOperation(ctx, version, operation); err != nil {
 			return err
 		}
-		locked.ResultVersionID = &versionID
+		locked.ResultVersionID = &prepared.versionID
 		locked.ReconciledAt = &now
 		if err = tx.SaveJob(ctx, locked); err != nil {
 			return err
@@ -692,13 +797,33 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 		registered = true
 		return nil
 	})
+	if finalizeErr != nil {
+		registered = false
+	}
+	return registered, finalizeErr
+}
+
+func (c *studioJobCoordinator) cleanupPreparedStudioObject(ctx context.Context, key string) {
+	if key == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	cleanupStudioObject(cleanupCtx, key)
+}
+
+func (c *studioJobCoordinator) logReconciliationStage(job *models.StudioJob, stage string, elapsed time.Duration, outcome string) {
+	if job == nil {
+		return
+	}
+	log.Printf("[STUDIO JOB RECONCILIATION] job_id=%s session_id=%s stage=%s duration_ms=%d outcome=%s", job.ID, job.SessionID, stage, elapsed.Milliseconds(), outcome)
+}
+
+func reconciliationOutcome(err error) string {
 	if err != nil {
-		return err
+		return "error"
 	}
-	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "") {
-		c.cleanupStaging(ctx, job)
-	}
-	return nil
+	return "ok"
 }
 
 func (c *studioJobCoordinator) reconcileEditorExtractLocked(ctx context.Context, tx Repository, job *models.StudioJob) error {
