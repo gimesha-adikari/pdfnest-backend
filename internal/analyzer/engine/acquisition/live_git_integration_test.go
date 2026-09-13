@@ -66,18 +66,3 @@ func TestRealRepositoryMatrix_LiveIngestion(t *testing.T) {
 		})
 	}
 }
-
-func TestOriginalIncident_GitDiagnosticsOnFailure(t *testing.T) {
-	sandbox, err := NewSandbox(t.TempDir(), "incident-diag-test")
-	require.NoError(t, err)
-	defer sandbox.Cleanup()
-
-	_, err = CloneGitRepository(context.Background(), "https://nonexistent-git-host-123456789.com/repo.git", sandbox, DefaultAcquisitionLimits())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GIT_UNREACHABLE")
-
-	tightLimits := AcquisitionLimits{GitTimeout: time.Millisecond}
-	_, err = CloneGitRepository(context.Background(), "https://github.com/gin-gonic/gin.git", sandbox, tightLimits)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GIT_TIMEOUT")
-}

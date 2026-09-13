@@ -190,24 +190,6 @@ func CloneGitRepository(
 		return nil, err
 	}
 
-	return cloneGitRepository(ctx, gitURL, sandbox, limits)
-}
-
-// cloneGitRepository performs the clone and inspection work after
-// CloneGitRepository has applied the production URL-security policy. Keeping
-// this unexported lets same-package tests exercise the actual git command with
-// a deterministic local fixture without weakening the exported HTTPS/SSRF
-// boundary used by production callers.
-func cloneGitRepository(
-	ctx context.Context,
-	gitURL string,
-	sandbox *Sandbox,
-	limits AcquisitionLimits,
-) (*AcquisitionResult, error) {
-	if sandbox == nil || sandbox.IsClosed() {
-		return nil, ErrSandboxClosed
-	}
-
 	timeout := limits.GitTimeout
 	if timeout <= 0 {
 		timeout = 45 * time.Second
