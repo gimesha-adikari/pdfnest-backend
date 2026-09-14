@@ -15,10 +15,13 @@ import (
 	"pdfnest-backend/internal/worker"
 )
 
-func ProcessOfficeConversion(format, inputPath, outputPath string) error {
+func processOfficeRequest(ctx context.Context, endpoint, format, inputPath, outputPath string) error {
 	workerBaseURL := os.Getenv("PDFNEST_WORKER_URL")
 	if workerBaseURL == "" {
 		workerBaseURL = "http://localhost:8000"
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	inputFile, err := os.Open(inputPath)
@@ -53,10 +56,10 @@ func ProcessOfficeConversion(format, inputPath, outputPath string) error {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
-	convertURL := strings.TrimRight(workerBaseURL, "/") + "/api/v1/office/convert"
+	convertURL := strings.TrimRight(workerBaseURL, "/") + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, convertURL, pr)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -87,4 +90,16 @@ func ProcessOfficeConversion(format, inputPath, outputPath string) error {
 	}
 
 	return nil
+}
+
+// ProcessOfficeConversion converts a PDF into an Office document through the
+// worker's existing PDF-to-Office endpoint.
+func ProcessOfficeConversion(format, inputPath, outputPath string) error {
+	return processOfficeRequest(context.Background(), "/api/v1/office/convert", format, inputPath, outputPath)
+}
+
+// ProcessOfficeToPDF keeps LibreOffice at the worker boundary, where the
+// runtime image and readiness check guarantee the dependency is installed.
+func ProcessOfficeToPDF(ctx context.Context, format, inputPath, outputPath string) error {
+	return processOfficeRequest(ctx, "/api/v1/office-to-pdf/convert", format, inputPath, outputPath)
 }

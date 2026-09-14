@@ -3,12 +3,10 @@ package conversion
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"pdfnest-backend/internal/process"
+	"pdfnest-backend/internal/uploads"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -16,64 +14,37 @@ import (
 func (s *ConversionService) OfficeToPdf(ctx context.Context, inputPath string) (string, error) {
 	tempDir := os.TempDir()
 	sessionID := uuid.New().String()
-	workDir := filepath.Join(tempDir, "office-conv-"+sessionID)
+	finalPdfPath := filepath.Join(tempDir, "office-compiled-"+sessionID+".pdf")
 
-	if err := os.MkdirAll(workDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to build office sandbox directory: %w", err)
+	format, err := officeFormatFromPath(inputPath)
+	if err != nil {
+		return "", err
 	}
-	defer os.RemoveAll(workDir)
-
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	runner := process.Runner{GracePeriod: 500 * time.Millisecond}
-	output, err := runner.Run(
-		ctx,
-		5*time.Minute,
-		"libreoffice",
-		"-env:UserInstallation=file://"+filepath.ToSlash(filepath.Join(workDir, "profile")),
-		"--headless",
-		"--convert-to", "pdf:writer_pdf_Export",
-		"--outdir", workDir,
-		inputPath,
-	)
-
-	if err != nil {
-		return "", fmt.Errorf("libreoffice conversion engine failed: %v, trace: %s", err, string(output))
+	if err := ProcessOfficeToPDF(ctx, format, inputPath, finalPdfPath); err != nil {
+		_ = os.Remove(finalPdfPath)
+		return "", err
 	}
-
-	baseName := filepath.Base(inputPath)
-	ext := filepath.Ext(baseName)
-	pdfName := strings.TrimSuffix(baseName, ext) + ".pdf"
-	generatedPdfPath := filepath.Join(workDir, pdfName)
-
-	finalPdfPath := filepath.Join(tempDir, "office-compiled-"+sessionID+".pdf")
-
-	if err := moveFile(generatedPdfPath, finalPdfPath); err != nil {
-		return "", fmt.Errorf("failed to lock conversion stream into staging workspace: %w", err)
+	if err := uploads.ValidatePDFHeader(finalPdfPath); err != nil {
+		_ = os.Remove(finalPdfPath)
+		return "", fmt.Errorf("worker returned invalid PDF artifact: %w", err)
 	}
 
 	return finalPdfPath, nil
 }
 
-func moveFile(src, dst string) error {
-	inputFile, err := os.Open(src)
-	if err != nil {
-		return err
+func officeFormatFromPath(inputPath string) (string, error) {
+	switch strings.ToLower(filepath.Ext(inputPath)) {
+	case ".doc", ".docx":
+		return "docx", nil
+	case ".xls", ".xlsx":
+		return "xlsx", nil
+	case ".ppt", ".pptx":
+		return "pptx", nil
+	default:
+		return "", fmt.Errorf("unsupported office document extension %q", filepath.Ext(inputPath))
 	}
-	defer inputFile.Close()
-
-	outputFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-
-	_, err = io.Copy(outputFile, inputFile)
-	if err != nil {
-		return err
-	}
-
-	return os.Remove(src)
 }
