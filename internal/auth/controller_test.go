@@ -145,6 +145,18 @@ func TestLogoutRevokesCapturedCredentialAndNewLoginStillWorks(t *testing.T) {
 func TestPasswordResetLifecycleIsBoundedSingleUseAndNonEnumerating(t *testing.T) {
 	db, app, ctrl, user := setupAuthControllerTest(t)
 	unknown := "unknown-" + uuid.NewString() + "@example.invalid"
+	otherHash, err := ctrl.service.HashPassword("other-password-123")
+	require.NoError(t, err)
+	other := &config.User{
+		ID:            uuid.NewString(),
+		Email:         "controlled-other-" + uuid.NewString() + "@example.invalid",
+		PasswordHash:  otherHash,
+		Role:          "user",
+		Status:        "active",
+		EmailVerified: true,
+	}
+	require.NoError(t, db.Create(other).Error)
+	t.Cleanup(func() { _ = db.Delete(&config.User{}, "id = ?", other.ID).Error })
 
 	knownResponse, err := app.Test(jsonRequest(http.MethodPost, "/request-password-reset", `{"email":"`+user.Email+`"}`))
 	require.NoError(t, err)
@@ -205,6 +217,9 @@ func TestPasswordResetLifecycleIsBoundedSingleUseAndNonEnumerating(t *testing.T)
 	var after config.User
 	require.NoError(t, db.First(&after, "id = ?", user.ID).Error)
 	require.True(t, after.PasswordResetTokenHash != "", "expired token remains auditable until a new request replaces it")
+	var otherAfter config.User
+	require.NoError(t, db.First(&otherAfter, "id = ?", other.ID).Error)
+	require.Equal(t, otherHash, otherAfter.PasswordHash, "a token issued for one account must not change another account")
 }
 
 func TestPasswordResetRejectsMalformedTokenWithoutDatabaseLookup(t *testing.T) {
