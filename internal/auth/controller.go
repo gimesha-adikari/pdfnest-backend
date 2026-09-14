@@ -13,6 +13,7 @@ import (
 	"net/mail"
 	"os"
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/authn"
 	"pdfnest-backend/internal/mailer"
 	"strings"
 	"time"
@@ -20,9 +21,16 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var errPolicyConsentRequired = errors.New("policy consent required")
+var errPasswordResetTokenInvalid = errors.New("invalid or expired password reset token")
+
+const (
+	passwordResetTTL      = 30 * time.Minute
+	passwordResetCooldown = 60 * time.Second
+)
 
 type Controller struct {
 	service Service
@@ -47,13 +55,28 @@ type ResendVerificationRequest struct {
 	Email string `json:"email"`
 }
 
+type PasswordResetRequest struct {
+	Email string `json:"email"`
+}
+
+type PasswordResetConfirmRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
 type VerificationEmailData struct {
 	VerifyURL  string
 	ContactURL string
 	Expiry     string
 }
 
-//go:embed templates/verification_email.html
+type PasswordResetEmailData struct {
+	ResetURL   string
+	ContactURL string
+	Expiry     string
+}
+
+//go:embed templates/verification_email.html templates/password_reset_email.html
 var verificationEmailTemplates embed.FS
 
 func isLocal() bool {
@@ -179,6 +202,72 @@ func buildVerificationEmailHTML(verifyURL, contactURL string) (string, error) {
 	}
 
 	return body.String(), nil
+}
+
+func sendPasswordResetEmail(toEmail, rawToken string) error {
+	frontendURL := strings.TrimRight(os.Getenv("FRONTEND_URL"), "/")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3000"
+	}
+
+	resetURL := fmt.Sprintf("%s/reset-password?token=%s", frontendURL, rawToken)
+	contactURL := fmt.Sprintf("%s/contact", frontendURL)
+
+	htmlBody, err := buildPasswordResetEmailHTML(resetURL, contactURL)
+	if err != nil {
+		return err
+	}
+
+	textBody := fmt.Sprintf(
+		`Reset your Platen PDF password
+
+We received a request to reset the password for your account.
+
+Use the link below to choose a new password:
+
+%s
+
+This password reset link expires in 30 minutes and can be used only once.
+
+If you did not request this change, you can safely ignore this email.
+
+Need help? Contact us:
+%s`,
+		resetURL,
+		contactURL,
+	)
+
+	return mailer.Send(mailer.Email{
+		To:      []string{toEmail},
+		Subject: "Reset your Platen PDF password",
+		Text:    textBody,
+		Html:    htmlBody,
+	})
+}
+
+func buildPasswordResetEmailHTML(resetURL, contactURL string) (string, error) {
+	tmpl, err := template.ParseFS(verificationEmailTemplates, "templates/password_reset_email.html")
+	if err != nil {
+		return "", err
+	}
+
+	var body bytes.Buffer
+	if err := tmpl.Execute(&body, PasswordResetEmailData{
+		ResetURL:   resetURL,
+		ContactURL: contactURL,
+		Expiry:     "30 minutes",
+	}); err != nil {
+		return "", err
+	}
+
+	return body.String(), nil
+}
+
+func passwordResetResponse(c *fiber.Ctx) error {
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "If an account exists for that email, a password reset link will be sent shortly.",
+	})
 }
 
 func (ctrl *Controller) Register(c *fiber.Ctx) error {
@@ -336,6 +425,129 @@ func (ctrl *Controller) ResendVerification(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
 }
 
+// RequestPasswordReset always returns the same public response for valid
+// email-shaped input, regardless of whether an account exists.  A short
+// per-account cooldown and one active bounded token keep resend abuse limited
+// without exposing account state to the caller.
+func (ctrl *Controller) RequestPasswordReset(c *fiber.Ctx) error {
+	var req PasswordResetRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+
+	req.Email = normalizeEmail(req.Email)
+	if req.Email == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Email is required"})
+	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid email address"})
+	}
+	if config.DB == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+	}
+
+	var user config.User
+	var rawToken string
+	now := time.Now()
+	err := config.DB.WithContext(c.UserContext()).Transaction(func(tx *gorm.DB) error {
+		// Lock the account row while checking and replacing the active token so
+		// concurrent requests cannot bypass the resend cooldown and send two
+		// reset emails for the same account.
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("email = ?", req.Email).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		if user.PasswordResetTokenHash != "" && now.Before(user.PasswordResetExpiresAt) &&
+			!user.PasswordResetRequestedAt.IsZero() && now.Sub(user.PasswordResetRequestedAt) < passwordResetCooldown {
+			return nil
+		}
+
+		var tokenHash string
+		rawToken, tokenHash, err = generateVerificationToken()
+		if err != nil {
+			return err
+		}
+
+		return tx.Model(&config.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+			"password_reset_token_hash":   tokenHash,
+			"password_reset_expires_at":   now.Add(passwordResetTTL),
+			"password_reset_requested_at": now,
+		}).Error
+	})
+	if err != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+	}
+	if rawToken == "" {
+		return passwordResetResponse(c)
+	}
+
+	// Keep the public response generic even if the configured provider is
+	// unavailable. The token remains bounded and can be resent after cooldown.
+	if err := sendPasswordResetEmail(user.Email, rawToken); err != nil {
+		log.Printf("[AUTH EMAIL] password reset delivery failed for account %s: %v", user.ID, err)
+	}
+
+	return passwordResetResponse(c)
+}
+
+func (ctrl *Controller) ResetPassword(c *fiber.Ctx) error {
+	var req PasswordResetConfirmRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request payload"})
+	}
+
+	req.Token = strings.TrimSpace(req.Token)
+	if req.Token == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": errPasswordResetTokenInvalid.Error()})
+	}
+	if len(req.Password) < 8 {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Password must be at least 8 characters"})
+	}
+	if config.DB == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+	}
+
+	tokenHash := hashVerificationToken(req.Token)
+	err := config.DB.WithContext(c.UserContext()).Transaction(func(tx *gorm.DB) error {
+		var user config.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("password_reset_token_hash = ?", tokenHash).First(&user).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errPasswordResetTokenInvalid
+			}
+			return err
+		}
+		if user.PasswordResetExpiresAt.IsZero() || time.Now().After(user.PasswordResetExpiresAt) {
+			return errPasswordResetTokenInvalid
+		}
+
+		hashedPassword, err := ctrl.service.HashPassword(req.Password)
+		if err != nil {
+			return err
+		}
+		return tx.Model(&user).Updates(map[string]any{
+			"password_hash":               hashedPassword,
+			"password_reset_token_hash":   "",
+			"password_reset_expires_at":   time.Time{},
+			"password_reset_requested_at": time.Time{},
+			"session_version":             gorm.Expr("session_version + ?", 1),
+			"updated_at":                  time.Now(),
+		}).Error
+	})
+
+	if errors.Is(err, errPasswordResetTokenInvalid) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": errPasswordResetTokenInvalid.Error()})
+	}
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to reset password"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "Password reset successfully. You can now sign in."})
+}
+
 func (ctrl *Controller) Login(c *fiber.Ctx) error {
 	var req AuthRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -361,7 +573,7 @@ func (ctrl *Controller) Login(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid credentials"})
 	}
 
-	token, err := ctrl.service.GenerateToken(user.ID, user.Role)
+	token, err := ctrl.service.GenerateToken(user.ID, user.Role, user.SessionVersion)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
@@ -453,7 +665,7 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return c.Status(403).JSON(fiber.Map{"error": "This account is suspended"})
 	}
 
-	token, err := ctrl.service.GenerateToken(user.ID, user.Role)
+	token, err := ctrl.service.GenerateToken(user.ID, user.Role, user.SessionVersion)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
@@ -480,8 +692,39 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
 }
 
+func revokeSession(c *fiber.Ctx) error {
+	rawToken := strings.TrimSpace(c.Cookies("auth_token"))
+	if rawToken == "" {
+		return nil
+	}
+
+	user, err := authn.Verify(c.UserContext(), rawToken)
+	if errors.Is(err, authn.ErrInvalid) || errors.Is(err, authn.ErrAccountDisabled) {
+		// Logout remains idempotent for an already expired, revoked, or disabled
+		// credential; the cookie is still cleared below.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// The version predicate makes concurrent logout requests safe: the first
+	// request advances the version, and later requests observe zero affected
+	// rows because the credential has already been revoked.
+	if config.DB == nil {
+		return authn.ErrUnavailable
+	}
+	if err := config.DB.WithContext(c.UserContext()).Model(&config.User{}).
+		Where("id = ? AND session_version = ?", user.ID, user.SessionVersion).
+		UpdateColumn("session_version", gorm.Expr("session_version + ?", 1)).Error; err != nil {
+		return authn.ErrUnavailable
+	}
+	return nil
+}
+
 func (ctrl *Controller) Logout(c *fiber.Ctx) error {
 	isProduction := os.Getenv("APP_ENV") == "production"
+	revokeErr := revokeSession(c)
 
 	cookie := &fiber.Cookie{
 		Name:     "auth_token",
@@ -499,6 +742,12 @@ func (ctrl *Controller) Logout(c *fiber.Ctx) error {
 	}
 
 	c.Cookie(cookie)
+	if revokeErr != nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"error":   "Authentication is temporarily unavailable",
+		})
+	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Logged out successfully"})
 }

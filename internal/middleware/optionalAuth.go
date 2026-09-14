@@ -1,11 +1,11 @@
 package middleware
 
 import (
-	"os"
+	"errors"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/log"
-	"github.com/golang-jwt/jwt/v5"
+	"pdfnest-backend/internal/authn"
 )
 
 func OptionalAuth() fiber.Handler {
@@ -16,34 +16,18 @@ func OptionalAuth() fiber.Handler {
 			return c.Next()
 		}
 
-		secret := os.Getenv("JWT_SECRET")
-		if secret == "" {
-			log.Error("JWT_SECRET is missing during optional auth check.")
+		user, err := authn.Verify(c.UserContext(), tokenString)
+		if err != nil {
+			// Optional authentication deliberately falls back to guest behavior,
+			// but it must not treat a revoked credential as an authenticated user.
+			if errors.Is(err, authn.ErrUnavailable) {
+				log.Warn("authentication unavailable during optional auth check; continuing as guest")
+			}
 			return c.Next()
 		}
 
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
-		})
-
-		if err != nil || !token.Valid {
-			return c.Next()
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			return c.Next()
-		}
-
-		userID, ok := claims["user_id"].(string)
-		if ok {
-			c.Locals("user_id", userID)
-		}
-
-		role, ok := claims["role"].(string)
-		if ok {
-			c.Locals("role", role)
-		}
+		c.Locals("user_id", user.ID)
+		c.Locals("role", user.Role)
 
 		return c.Next()
 	}

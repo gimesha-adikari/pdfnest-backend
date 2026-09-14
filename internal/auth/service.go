@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 type Service interface {
 	HashPassword(password string) (string, error)
 	VerifyPassword(hashed, password string) error
-	GenerateToken(userID, role string) (string, error)
+	// GenerateToken accepts an optional account session version for backwards
+	// compatibility with callers that only need a default (version zero) token.
+	GenerateToken(userID, role string, sessionVersion ...int64) (string, error)
 	VerifyGoogleToken(ctx context.Context, idToken string) (map[string]interface{}, error)
 }
 
@@ -33,16 +36,27 @@ func (s *authService) VerifyPassword(hashed, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hashed), []byte(password))
 }
 
-func (s *authService) GenerateToken(userID, role string) (string, error) {
+func (s *authService) GenerateToken(userID, role string, sessionVersion ...int64) (string, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		return "", errors.New("authentication is not configured")
 	}
+	version := int64(0)
+	if len(sessionVersion) > 1 {
+		return "", fmt.Errorf("at most one session version may be supplied")
+	}
+	if len(sessionVersion) == 1 {
+		version = sessionVersion[0]
+		if version < 0 {
+			return "", fmt.Errorf("session version cannot be negative")
+		}
+	}
 
 	claims := jwt.MapClaims{
-		"user_id": userID,
-		"role":    role,
-		"exp":     time.Now().Add(24 * time.Hour).Unix(),
+		"user_id":         userID,
+		"role":            role,
+		"session_version": version,
+		"exp":             time.Now().Add(24 * time.Hour).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const managedSchemaVersion = "20260828_01"
+const managedSchemaVersion = "20260914_01"
 
 func schemaModels() []interface{} {
 	return []interface{}{

@@ -22,9 +22,17 @@ type User struct {
 	EmailVerified        bool    `gorm:"default:false"`
 	EmailVerifyTokenHash string  `gorm:"type:varchar(255);index"`
 	EmailVerifyExpiresAt time.Time
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
-	DeletedAt            gorm.DeletedAt `gorm:"index"`
+	// SessionVersion is embedded in every issued JWT.  Incrementing it on
+	// logout (and other credential-reset events) invalidates every previously
+	// issued credential at the server boundary, including credentials retained
+	// by another browser tab.
+	SessionVersion           int64  `gorm:"not null;default:0"`
+	PasswordResetTokenHash   string `gorm:"type:varchar(255);index"`
+	PasswordResetExpiresAt   time.Time
+	PasswordResetRequestedAt time.Time
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	DeletedAt                gorm.DeletedAt `gorm:"index"`
 }
 
 type Subscription struct {

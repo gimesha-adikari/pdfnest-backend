@@ -12,6 +12,11 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller, identityStore *identi
 	authGroup.Post("/login", ctrl.Login)
 	authGroup.Post("/google", ctrl.GoogleSignIn)
 	authGroup.Post("/logout", ctrl.Logout)
+	authGroup.Post("/request-password-reset", ctrl.RequestPasswordReset)
+	// Keep the concise route available for clients that use the page name while
+	// sharing the same handler and token contract.
+	authGroup.Post("/forgot-password", ctrl.RequestPasswordReset)
+	authGroup.Post("/reset-password", ctrl.ResetPassword)
 
 	authGroup.Get("/session", identity.Resolve(identityStore), ctrl.Session)
 
