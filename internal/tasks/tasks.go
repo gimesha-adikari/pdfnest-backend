@@ -26,16 +26,17 @@ const (
 )
 
 type TaskStatus struct {
-	ID            string `json:"id"`
-	Status        string `json:"status"`
-	Progress      int    `json:"progress"`
-	ResultKey     string `json:"resultKey,omitempty"`
-	ResultURL     string `json:"resultUrl,omitempty"`
-	OwnerIdentity string `json:"ownerIdentity,omitempty"`
-	ReservationID string `json:"reservationId,omitempty"`
-	DownloadToken string `json:"downloadToken,omitempty"`
-	Error         string `json:"error,omitempty"`
-	UpdatedAt     int64  `json:"updatedAt,omitempty"`
+	ID              string `json:"id"`
+	Status          string `json:"status"`
+	Progress        int    `json:"progress"`
+	ResultKey       string `json:"resultKey,omitempty"`
+	ResultURL       string `json:"resultUrl,omitempty"`
+	OwnerIdentity   string `json:"ownerIdentity,omitempty"`
+	ReservationID   string `json:"reservationId,omitempty"`
+	ReservationKind string `json:"reservationKind,omitempty"`
+	DownloadToken   string `json:"downloadToken,omitempty"`
+	Error           string `json:"error,omitempty"`
+	UpdatedAt       int64  `json:"updatedAt,omitempty"`
 }
 
 type TaskRegistry struct {
@@ -171,6 +172,8 @@ type staleLuaResult struct {
 
 var StaleTaskBillingHandler func(reservationID string)
 var CommitTaskBillingHandler func(reservationID string)
+var StaleTaskBillingHandlerWithKind func(reservationID, reservationKind string)
+var CommitTaskBillingHandlerWithKind func(reservationID, reservationKind string)
 
 func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, error) {
 	client := r.getClient()
@@ -219,8 +222,12 @@ func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, 
 
 	stalePerformed := (luaRes.Result == "STALE_TRANSITION_PERFORMED")
 	if stalePerformed {
-		if luaRes.ReservationID != "" && StaleTaskBillingHandler != nil {
-			StaleTaskBillingHandler(luaRes.ReservationID)
+		if luaRes.ReservationID != "" {
+			if StaleTaskBillingHandlerWithKind != nil {
+				StaleTaskBillingHandlerWithKind(luaRes.ReservationID, status.ReservationKind)
+			} else if StaleTaskBillingHandler != nil {
+				StaleTaskBillingHandler(luaRes.ReservationID)
+			}
 		}
 		_ = limiter.Default.Release(ctx, status.ID, status.OwnerIdentity)
 	}
@@ -246,8 +253,12 @@ func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress i
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 
 	var resID string
+	var resKind string
 	if len(reservationID) > 0 && reservationID[0] != "" {
 		resID = reservationID[0]
+	}
+	if len(reservationID) > 1 && reservationID[1] != "" {
+		resKind = reservationID[1]
 	}
 	dlToken := downloadToken
 	if dlToken == "" {
@@ -256,6 +267,9 @@ func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress i
 			if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
 				if resID == "" {
 					resID = existingTask.ReservationID
+				}
+				if resKind == "" {
+					resKind = existingTask.ReservationKind
 				}
 				dlToken = existingTask.DownloadToken
 			}
@@ -266,15 +280,16 @@ func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress i
 	}
 
 	task := &TaskStatus{
-		ID:            id,
-		Status:        status,
-		Progress:      progress,
-		ResultKey:     resultKey,
-		Error:         errStr,
-		UpdatedAt:     time.Now().Unix(),
-		OwnerIdentity: ownerIdentity,
-		ReservationID: resID,
-		DownloadToken: dlToken,
+		ID:              id,
+		Status:          status,
+		Progress:        progress,
+		ResultKey:       resultKey,
+		Error:           errStr,
+		UpdatedAt:       time.Now().Unix(),
+		OwnerIdentity:   ownerIdentity,
+		ReservationID:   resID,
+		ReservationKind: resKind,
+		DownloadToken:   dlToken,
 	}
 
 	if resultKey != "" {
@@ -301,6 +316,23 @@ func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress i
 }
 
 func (r *TaskRegistry) SetWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID ...string) (bool, error) {
+	var resID, resKind string
+	if len(reservationID) > 0 {
+		resID = reservationID[0]
+	}
+	if len(reservationID) > 1 {
+		resKind = reservationID[1]
+	}
+	return r.setWithKey(id, status, progress, resultKey, errStr, ownerIdentity, resID, resKind)
+}
+
+// SetWithKeyAndBilling records the reservation store with the task at
+// creation time. Later status updates preserve both fields from Redis.
+func (r *TaskRegistry) SetWithKeyAndBilling(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
+	return r.setWithKey(id, status, progress, resultKey, errStr, ownerIdentity, reservationID, reservationKind)
+}
+
+func (r *TaskRegistry) setWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
@@ -312,16 +344,17 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 
-	var resID string
 	var dlToken string
-	if len(reservationID) > 0 && reservationID[0] != "" {
-		resID = reservationID[0]
-	}
+	resID := reservationID
+	resKind := reservationKind
 	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
 		var existingTask TaskStatus
 		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
 			if resID == "" {
 				resID = existingTask.ReservationID
+			}
+			if resKind == "" {
+				resKind = existingTask.ReservationKind
 			}
 			dlToken = existingTask.DownloadToken
 		}
@@ -331,15 +364,16 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 	}
 
 	task := &TaskStatus{
-		ID:            id,
-		Status:        status,
-		Progress:      progress,
-		ResultKey:     resultKey,
-		Error:         errStr,
-		UpdatedAt:     time.Now().Unix(),
-		OwnerIdentity: ownerIdentity,
-		ReservationID: resID,
-		DownloadToken: dlToken,
+		ID:              id,
+		Status:          status,
+		Progress:        progress,
+		ResultKey:       resultKey,
+		Error:           errStr,
+		UpdatedAt:       time.Now().Unix(),
+		OwnerIdentity:   ownerIdentity,
+		ReservationID:   resID,
+		ReservationKind: resKind,
+		DownloadToken:   dlToken,
 	}
 
 	if resultKey != "" {
@@ -384,12 +418,14 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 	var ownerIdentity string
 	var reservationID string
+	var reservationKind string
 	var dlToken string
 	if existingVal, err := client.Get(ctx, key).Result(); err == nil && existingVal != "" {
 		var existingTask TaskStatus
 		if err := json.Unmarshal([]byte(existingVal), &existingTask); err == nil {
 			ownerIdentity = existingTask.OwnerIdentity
 			reservationID = existingTask.ReservationID
+			reservationKind = existingTask.ReservationKind
 			dlToken = existingTask.DownloadToken
 			if resultKey == "" && existingTask.ResultKey != "" {
 				resultKey = existingTask.ResultKey
@@ -401,16 +437,17 @@ func (r *TaskRegistry) Set(id string, status string, progress int, resultURL str
 	}
 
 	task := &TaskStatus{
-		ID:            id,
-		Status:        status,
-		Progress:      progress,
-		ResultKey:     resultKey,
-		ResultURL:     resultURL,
-		Error:         errStr,
-		UpdatedAt:     time.Now().Unix(),
-		OwnerIdentity: ownerIdentity,
-		ReservationID: reservationID,
-		DownloadToken: dlToken,
+		ID:              id,
+		Status:          status,
+		Progress:        progress,
+		ResultKey:       resultKey,
+		ResultURL:       resultURL,
+		Error:           errStr,
+		UpdatedAt:       time.Now().Unix(),
+		OwnerIdentity:   ownerIdentity,
+		ReservationID:   reservationID,
+		ReservationKind: reservationKind,
+		DownloadToken:   dlToken,
 	}
 
 	if resultKey != "" && task.ResultURL == "" {

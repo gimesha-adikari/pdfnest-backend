@@ -1,7 +1,9 @@
 package billing
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"pdfnest-backend/config"
 	"strconv"
@@ -30,6 +32,23 @@ var (
 	ErrBillingMissing = errors.New("subscription data not found")
 )
 
+// ReservationKind identifies the state store that owns an asynchronous
+// reservation. Database reservations belong to BillingReservation rows;
+// guest reservations belong to the Redis-backed GuestQuotaStore. Keeping the
+// kind alongside the task prevents the completion path from guessing which
+// finalizer to call from an opaque reservation ID.
+type ReservationKind string
+
+const (
+	ReservationKindDatabase ReservationKind = "database"
+	ReservationKindGuest    ReservationKind = "guest"
+)
+
+type AsyncReservation struct {
+	ID   string
+	Kind ReservationKind
+}
+
 type reservationTotals struct {
 	Units       int
 	PlanUnits   int
@@ -38,6 +57,77 @@ type reservationTotals struct {
 
 func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPath string) (*config.BillingReservation, error) {
 	return s.ReserveWithTaskID(userID, tool, pages, images, requestPath, "")
+}
+
+// ReserveAsync reserves usage in the store appropriate for the identity. A
+// non-empty guestQuotaID is supplied only for guest requests; authenticated
+// requests continue through the existing PostgreSQL subscription/reservation
+// contract. The returned kind must be persisted with the task and passed to
+// CommitAsync/ReleaseAsync.
+func (s *Service) ReserveAsync(ctx context.Context, userID, guestQuotaID string, tool Tool, pages, images int, requestPath, taskID string) (*AsyncReservation, error) {
+	if strings.TrimSpace(guestQuotaID) != "" {
+		if GuestQuota == nil {
+			return nil, errors.New("guest quota store not configured")
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		reservation, err := GuestQuota.ReserveAsync(ctx, guestQuotaID, tool, pages, images, requestPath)
+		if err != nil {
+			return nil, err
+		}
+		return &AsyncReservation{ID: reservation.ID, Kind: ReservationKindGuest}, nil
+	}
+
+	reservation, err := s.ReserveWithTaskID(userID, tool, pages, images, requestPath, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return &AsyncReservation{ID: reservation.ID, Kind: ReservationKindDatabase}, nil
+}
+
+func (s *Service) CommitAsync(ctx context.Context, reservationID string, kind ReservationKind) error {
+	reservationID = strings.TrimSpace(reservationID)
+	if reservationID == "" {
+		return nil
+	}
+
+	switch kind {
+	case ReservationKindGuest:
+		if GuestQuota == nil {
+			return errors.New("guest quota store not configured")
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return GuestQuota.Commit(ctx, reservationID)
+	case ReservationKindDatabase, "":
+		return s.Commit(reservationID)
+	default:
+		return fmt.Errorf("unknown asynchronous reservation kind %q", kind)
+	}
+}
+
+func (s *Service) ReleaseAsync(ctx context.Context, reservationID string, kind ReservationKind) error {
+	reservationID = strings.TrimSpace(reservationID)
+	if reservationID == "" {
+		return nil
+	}
+
+	switch kind {
+	case ReservationKindGuest:
+		if GuestQuota == nil {
+			return errors.New("guest quota store not configured")
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return GuestQuota.Release(ctx, reservationID)
+	case ReservationKindDatabase, "":
+		return s.Release(reservationID)
+	default:
+		return fmt.Errorf("unknown asynchronous reservation kind %q", kind)
+	}
 }
 
 func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int, requestPath string, taskID string) (*config.BillingReservation, error) {

@@ -40,8 +40,12 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		})
 	}
 
-	if task.ReservationID != "" && CommitTaskBillingHandler != nil {
-		CommitTaskBillingHandler(task.ReservationID)
+	if task.ReservationID != "" && (CommitTaskBillingHandlerWithKind != nil || CommitTaskBillingHandler != nil) {
+		if CommitTaskBillingHandlerWithKind != nil {
+			CommitTaskBillingHandlerWithKind(task.ReservationID, task.ReservationKind)
+		} else {
+			CommitTaskBillingHandler(task.ReservationID)
+		}
 	}
 
 	key := task.ResultKey

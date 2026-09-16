@@ -63,6 +63,18 @@ func (s *GuestQuotaStore) resKey(reservationID string) string {
 }
 
 func (s *GuestQuotaStore) Reserve(ctx context.Context, guestID string, tool Tool, pages, images int, requestPath string) (*GuestReservation, error) {
+	return s.reserveWithLimits(ctx, guestID, tool, pages, images, requestPath, s.limits)
+}
+
+// ReserveAsync preserves the legacy async guest contract that existed before
+// Redis-backed guest middleware: the route used the free-tier 3-hour/day/month
+// allowances, but its reservation was only kept in memory. The reservation is
+// now durable in Redis without changing those effective limits.
+func (s *GuestQuotaStore) ReserveAsync(ctx context.Context, guestID string, tool Tool, pages, images int, requestPath string) (*GuestReservation, error) {
+	return s.reserveWithLimits(ctx, guestID, tool, pages, images, requestPath, GetTierLimits("free"))
+}
+
+func (s *GuestQuotaStore) reserveWithLimits(ctx context.Context, guestID string, tool Tool, pages, images int, requestPath string, limits TierLimits) (*GuestReservation, error) {
 	if strings.TrimSpace(guestID) == "" {
 		return nil, NewBillingError(
 			ErrUnknownBilling,
@@ -96,9 +108,9 @@ func (s *GuestQuotaStore) Reserve(ctx context.Context, guestID string, tool Tool
 		}
 		s.syncWindows(&state, now)
 
-		available3H := s.limits.Units3H - (state.Used3H + state.Pending3H)
-		availableDay := s.limits.UnitsDay - (state.UsedDay + state.PendingDay)
-		availableMonth := s.limits.UnitsMonth - (state.UsedMonth + state.PendingMonth)
+		available3H := limits.Units3H - (state.Used3H + state.Pending3H)
+		availableDay := limits.UnitsDay - (state.UsedDay + state.PendingDay)
+		availableMonth := limits.UnitsMonth - (state.UsedMonth + state.PendingMonth)
 
 		if available3H < 0 {
 			available3H = 0
@@ -157,17 +169,29 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 
 	now := time.Now()
 	stateKey := s.stateKey(res.GuestID)
+	reservationKey := s.resKey(reservationID)
 
-	return s.rdb.Watch(ctx, func(tx *redis.Tx) error {
-		state, err := s.loadState(ctx, tx, res.GuestID)
+	return watchReservation(ctx, s.rdb, []string{stateKey, reservationKey}, func(tx *redis.Tx) error {
+		// Re-read the reservation inside the watched transaction. A duplicate
+		// commit must observe the reservation deletion and become a no-op even
+		// when the first commit changed the state key and caused a WATCH retry.
+		current, err := s.loadReservationFrom(ctx, tx, reservationID)
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				return nil
+			}
+			return err
+		}
+
+		state, err := s.loadState(ctx, tx, current.GuestID)
 		if err != nil {
 			return err
 		}
 		s.syncWindows(&state, now)
 
-		state.Pending3H -= res.Units
-		state.PendingDay -= res.Units
-		state.PendingMonth -= res.Units
+		state.Pending3H -= current.Units
+		state.PendingDay -= current.Units
+		state.PendingMonth -= current.Units
 
 		if state.Pending3H < 0 {
 			state.Pending3H = 0
@@ -179,18 +203,18 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 			state.PendingMonth = 0
 		}
 
-		state.Used3H += res.Units
-		state.UsedDay += res.Units
-		state.UsedMonth += res.Units
+		state.Used3H += current.Units
+		state.UsedDay += current.Units
+		state.UsedMonth += current.Units
 
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.HSet(ctx, stateKey, state.toMap()...)
+			pipe.HSet(ctx, s.stateKey(current.GuestID), state.toMap()...)
 			pipe.Expire(ctx, stateKey, s.ttl)
-			pipe.Del(ctx, s.resKey(reservationID))
+			pipe.Del(ctx, reservationKey)
 			return nil
 		})
 		return err
-	}, stateKey)
+	})
 }
 
 func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) error {
@@ -204,17 +228,28 @@ func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) err
 
 	now := time.Now()
 	stateKey := s.stateKey(res.GuestID)
+	reservationKey := s.resKey(reservationID)
 
-	return s.rdb.Watch(ctx, func(tx *redis.Tx) error {
-		state, err := s.loadState(ctx, tx, res.GuestID)
+	return watchReservation(ctx, s.rdb, []string{stateKey, reservationKey}, func(tx *redis.Tx) error {
+		// As with commit, the reservation existence check is part of the
+		// watched transaction so concurrent release/commit calls are exact-once.
+		current, err := s.loadReservationFrom(ctx, tx, reservationID)
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				return nil
+			}
+			return err
+		}
+
+		state, err := s.loadState(ctx, tx, current.GuestID)
 		if err != nil {
 			return err
 		}
 		s.syncWindows(&state, now)
 
-		state.Pending3H -= res.Units
-		state.PendingDay -= res.Units
-		state.PendingMonth -= res.Units
+		state.Pending3H -= current.Units
+		state.PendingDay -= current.Units
+		state.PendingMonth -= current.Units
 
 		if state.Pending3H < 0 {
 			state.Pending3H = 0
@@ -227,17 +262,35 @@ func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) err
 		}
 
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.HSet(ctx, stateKey, state.toMap()...)
+			pipe.HSet(ctx, s.stateKey(current.GuestID), state.toMap()...)
 			pipe.Expire(ctx, stateKey, s.ttl)
-			pipe.Del(ctx, s.resKey(reservationID))
+			pipe.Del(ctx, reservationKey)
 			return nil
 		})
 		return err
-	}, stateKey)
+	})
+}
+
+func watchReservation(ctx context.Context, client *redis.Client, keys []string, fn func(*redis.Tx) error) error {
+	var err error
+	for attempt := 0; attempt < 16; attempt++ {
+		err = client.Watch(ctx, fn, keys...)
+		if !errors.Is(err, redis.TxFailedErr) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+	return err
 }
 
 func (s *GuestQuotaStore) loadReservation(ctx context.Context, reservationID string) (*GuestReservation, error) {
-	raw, err := s.rdb.Get(ctx, s.resKey(reservationID)).Bytes()
+	return s.loadReservationFrom(ctx, s.rdb, reservationID)
+}
+
+func (s *GuestQuotaStore) loadReservationFrom(ctx context.Context, client redis.Cmdable, reservationID string) (*GuestReservation, error) {
+	raw, err := client.Get(ctx, s.resKey(reservationID)).Bytes()
 	if err != nil {
 		return nil, err
 	}
