@@ -366,17 +366,17 @@ func (ctrl *Controller) VerifyEmail(c *fiber.Ctx) error {
 			return err
 		}
 
-		// Idempotency: If this exact token already verified this account, return success immediately.
-		// Duplicate requests (e.g. React StrictMode double-mount, user double-click, browser prefetch,
-		// or human click after an automated email scanner prefetch) must not convert a successfully
-		// verified account into a misleading "invalid/expired" failure.
-		if txUser.EmailVerified {
-			return nil
-		}
-
-		// For unverified accounts, verify that the token has not expired
+		// Expiry validation occurs BEFORE idempotent EmailVerified success so that
+		// a retained token hash does not become permanently accepted after its valid lifetime.
 		if txUser.EmailVerifyExpiresAt.IsZero() || time.Now().After(txUser.EmailVerifyExpiresAt) {
 			return errors.New("token_expired")
+		}
+
+		// Idempotency: If this exact token already verified this account within its valid lifetime,
+		// return success immediately. Duplicate requests (e.g. React StrictMode, user double-click,
+		// browser prefetch, or email scanner prefetch) within the token window must not fail.
+		if txUser.EmailVerified {
+			return nil
 		}
 
 		txUser.EmailVerified = true

@@ -125,6 +125,10 @@ func TestEmailVerify_C_ConcurrentSameTokenClicks(t *testing.T) {
 	require.NoError(t, config.DB.First(&persisted, "id = ?", user.ID).Error)
 	require.True(t, persisted.EmailVerified)
 	require.Equal(t, "active", persisted.Status)
+
+	var subCount int64
+	require.NoError(t, config.DB.Model(&config.Subscription{}).Where("user_id = ?", user.ID).Count(&subCount).Error)
+	require.Equal(t, int64(1), subCount, "concurrent requests must ensure exactly 1 free subscription is created")
 }
 
 // Test D: expired token -> rejected
@@ -298,4 +302,35 @@ func TestEmailVerify_J_ResendOnAlreadyVerifiedRejected(t *testing.T) {
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(resendResp.Body).Decode(&body))
 	require.Equal(t, "Email is already verified", body["error"])
+}
+
+// Test K: same successfully-used token AFTER expiry -> rejected with 400 "Verification token expired"
+func TestEmailVerify_K_SameTokenAfterExpiryRejected(t *testing.T) {
+	app, _, user, validToken := setupEmailVerificationMatrixTest(t)
+
+	// 1. Create pending user with valid token and verify successfully
+	reqValid := httptest.NewRequest(http.MethodGet, "/verify-email?token="+validToken, nil)
+	respValid, err := app.Test(reqValid)
+	require.NoError(t, err)
+	respValid.Body.Close()
+	require.Equal(t, http.StatusOK, respValid.StatusCode)
+
+	var persisted config.User
+	require.NoError(t, config.DB.First(&persisted, "id = ?", user.ID).Error)
+	require.True(t, persisted.EmailVerified)
+
+	// 2. Move EmailVerifyExpiresAt into the past
+	require.NoError(t, config.DB.Model(&config.User{}).Where("id = ?", user.ID).Update("email_verify_expires_at", time.Now().Add(-5*time.Minute)).Error)
+
+	// 3. Call /verify-email again using THE SAME TOKEN
+	reqExpired := httptest.NewRequest(http.MethodGet, "/verify-email?token="+validToken, nil)
+	respExpired, err := app.Test(reqExpired)
+	require.NoError(t, err)
+	defer respExpired.Body.Close()
+
+	// 4. Assert bounded-lifetime behavior: rejected with 400 "Verification token expired"
+	require.Equal(t, http.StatusBadRequest, respExpired.StatusCode)
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(respExpired.Body).Decode(&body))
+	require.Equal(t, "Verification token expired", body["error"])
 }
