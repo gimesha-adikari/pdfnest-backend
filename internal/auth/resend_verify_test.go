@@ -2,20 +2,23 @@ package auth
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"pdfnest-backend/config"
 )
 
-// TestResendVerification_AUTH004_UnknownEmailReturnsGenericSuccess verifies that
-// requesting verification resend for an unknown/unregistered email returns HTTP 200
-// with a generic success message, preventing account enumeration (AUTH-004).
-func TestResendVerification_AUTH004_UnknownEmailReturnsGenericSuccess(t *testing.T) {
+// Scenario A: unknown email returns generic 200 and does not create phantom user
+func TestResendVerification_AUTH004_A_UnknownEmailReturnsGenericSuccess(t *testing.T) {
 	app, _, _, _ := setupEmailVerificationMatrixTest(t)
 
 	unknownEmail := "unknown-" + uuid.NewString() + "@example.invalid"
@@ -30,16 +33,14 @@ func TestResendVerification_AUTH004_UnknownEmailReturnsGenericSuccess(t *testing
 	require.Equal(t, true, body["success"])
 	require.Equal(t, "Verification email sent", body["message"])
 
-	// Ensure no phantom user was created in the database
+	// Ensure 0 phantom users created in DB
 	var count int64
 	require.NoError(t, config.DB.Model(&config.User{}).Where("email = ?", unknownEmail).Count(&count).Error)
 	require.Equal(t, int64(0), count)
 }
 
-// TestResendVerification_AUTH004_PendingUserReceivesNewToken verifies that
-// a registered but unverified user successfully receives a refreshed verification token
-// and HTTP 200 response with identical payload structure.
-func TestResendVerification_AUTH004_PendingUserReceivesNewToken(t *testing.T) {
+// Scenario B: pending registered email returns generic 200, replaces token, and refreshes expiration
+func TestResendVerification_AUTH004_B_PendingUserRefreshesToken(t *testing.T) {
 	app, _, user, oldToken := setupEmailVerificationMatrixTest(t)
 
 	oldHash := hashVerificationToken(oldToken)
@@ -62,32 +63,107 @@ func TestResendVerification_AUTH004_PendingUserReceivesNewToken(t *testing.T) {
 	require.True(t, updated.EmailVerifyExpiresAt.After(time.Now()))
 }
 
-// TestResendVerification_AUTH004_AlreadyVerifiedReturnsBadRequest verifies that
-// an already-verified user receives the standard 400 error.
-func TestResendVerification_AUTH004_AlreadyVerifiedReturnsBadRequest(t *testing.T) {
+// Scenario C: already-verified registered email returns generic 200, verified remains true, state unchanged
+func TestResendVerification_AUTH004_C_AlreadyVerifiedReturnsGenericSuccess(t *testing.T) {
 	app, _, user, validToken := setupEmailVerificationMatrixTest(t)
 
-	// Verify the user first
-	reqVerify := jsonRequest(http.MethodPost, "/verify-email?token="+validToken, "")
+	// Verify user first
+	reqVerify := httptest.NewRequest(http.MethodGet, "/verify-email?token="+validToken, nil)
 	respVerify, err := app.Test(reqVerify)
 	require.NoError(t, err)
 	respVerify.Body.Close()
 	require.Equal(t, http.StatusOK, respVerify.StatusCode)
 
-	// Request resend for already verified email
+	var before config.User
+	require.NoError(t, config.DB.First(&before, "id = ?", user.ID).Error)
+	require.True(t, before.EmailVerified)
+
+	// Request resend for already-verified email
 	req := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+user.Email+`"}`)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
-	require.Equal(t, "Email is already verified", body["error"])
+	require.Equal(t, true, body["success"])
+	require.Equal(t, "Verification email sent", body["message"])
+
+	// Verified status remains true and token/state is NOT altered by resend
+	var after config.User
+	require.NoError(t, config.DB.First(&after, "id = ?", user.ID).Error)
+	require.True(t, after.EmailVerified)
+	require.Equal(t, before.EmailVerifyTokenHash, after.EmailVerifyTokenHash)
+	require.Equal(t, before.EmailVerifyExpiresAt.Unix(), after.EmailVerifyExpiresAt.Unix())
 }
 
-// TestResendVerification_AUTH004_InvalidEmailFormat verifies input validation.
-func TestResendVerification_AUTH004_InvalidEmailFormat(t *testing.T) {
+// Scenario D: exact response equivalence across unknown, pending, and verified states
+func TestResendVerification_AUTH004_D_ExactResponseEquivalence(t *testing.T) {
+	app, _, pendingUser, _ := setupEmailVerificationMatrixTest(t)
+
+	// Create a verified user in the same DB
+	verifiedUser := &config.User{
+		ID:            uuid.NewString(),
+		Email:         "verified-" + uuid.NewString() + "@example.invalid",
+		Role:          "user",
+		Status:        "active",
+		EmailVerified: true,
+	}
+	require.NoError(t, config.DB.Create(verifiedUser).Error)
+	t.Cleanup(func() {
+		_ = config.DB.Delete(&config.User{}, "id = ?", verifiedUser.ID).Error
+	})
+
+	unknownEmail := "unknown-" + uuid.NewString() + "@example.invalid"
+
+	// 1. Unknown
+	reqUnknown := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+unknownEmail+`"}`)
+	respUnknown, err := app.Test(reqUnknown)
+	require.NoError(t, err)
+	defer respUnknown.Body.Close()
+	bodyUnknownBytes, err := io.ReadAll(respUnknown.Body)
+	require.NoError(t, err)
+
+	// 2. Pending
+	reqPending := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+pendingUser.Email+`"}`)
+	respPending, err := app.Test(reqPending)
+	require.NoError(t, err)
+	defer respPending.Body.Close()
+	bodyPendingBytes, err := io.ReadAll(respPending.Body)
+	require.NoError(t, err)
+
+	// 3. Verified
+	reqVerified := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+verifiedUser.Email+`"}`)
+	respVerified, err := app.Test(reqVerified)
+	require.NoError(t, err)
+	defer respVerified.Body.Close()
+	bodyVerifiedBytes, err := io.ReadAll(respVerified.Body)
+	require.NoError(t, err)
+
+	// Compare HTTP Status Codes
+	require.Equal(t, http.StatusOK, respUnknown.StatusCode)
+	require.Equal(t, respUnknown.StatusCode, respPending.StatusCode)
+	require.Equal(t, respPending.StatusCode, respVerified.StatusCode)
+
+	// Compare Content-Type headers
+	require.Equal(t, "application/json", respUnknown.Header.Get("Content-Type"))
+	require.Equal(t, respUnknown.Header.Get("Content-Type"), respPending.Header.Get("Content-Type"))
+	require.Equal(t, respPending.Header.Get("Content-Type"), respVerified.Header.Get("Content-Type"))
+
+	// Compare decoded JSON bodies
+	var jsonUnknown, jsonPending, jsonVerified map[string]interface{}
+	require.NoError(t, json.Unmarshal(bodyUnknownBytes, &jsonUnknown))
+	require.NoError(t, json.Unmarshal(bodyPendingBytes, &jsonPending))
+	require.NoError(t, json.Unmarshal(bodyVerifiedBytes, &jsonVerified))
+
+	require.Equal(t, map[string]interface{}{"success": true, "message": "Verification email sent"}, jsonUnknown)
+	require.Equal(t, jsonUnknown, jsonPending)
+	require.Equal(t, jsonPending, jsonVerified)
+}
+
+// Scenario E: invalid email syntax returns 400
+func TestResendVerification_AUTH004_E_InvalidEmailSyntax(t *testing.T) {
 	app, _, _, _ := setupEmailVerificationMatrixTest(t)
 
 	cases := []struct {
@@ -115,11 +191,11 @@ func TestResendVerification_AUTH004_InvalidEmailFormat(t *testing.T) {
 	}
 }
 
-// TestResendVerification_AUTH004_MalformedPayload verifies malformed JSON handling.
-func TestResendVerification_AUTH004_MalformedPayload(t *testing.T) {
+// Scenario F: malformed JSON returns 400
+func TestResendVerification_AUTH004_F_MalformedJSON(t *testing.T) {
 	app, _, _, _ := setupEmailVerificationMatrixTest(t)
 
-	req := jsonRequest(http.MethodPost, "/resend-verification", `{malformed json`)
+	req := jsonRequest(http.MethodPost, "/resend-verification", `{not-valid-json`)
 	resp, err := app.Test(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -130,8 +206,8 @@ func TestResendVerification_AUTH004_MalformedPayload(t *testing.T) {
 	require.Equal(t, "Invalid request payload", body["error"])
 }
 
-// TestResendVerification_AUTH004_DatabaseUnavailable verifies service unavailable response.
-func TestResendVerification_AUTH004_DatabaseUnavailable(t *testing.T) {
+// Scenario G: DB unavailable (config.DB == nil) returns 503
+func TestResendVerification_AUTH004_G_DatabaseUnavailable(t *testing.T) {
 	app, _, _, _ := setupEmailVerificationMatrixTest(t)
 
 	origDB := config.DB
@@ -147,4 +223,32 @@ func TestResendVerification_AUTH004_DatabaseUnavailable(t *testing.T) {
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
 	require.Equal(t, "Authentication is temporarily unavailable", body["error"])
+}
+
+// Scenario H: unexpected DB query failure returns 5xx
+func TestResendVerification_AUTH004_H_UnexpectedDatabaseError(t *testing.T) {
+	app, _, _, _ := setupEmailVerificationMatrixTest(t)
+
+	origDB := config.DB
+	defer func() { config.DB = origDB }()
+
+	// Create a valid temporary connection and close its underlying connection pool
+	dsn := os.Getenv("DATABASE_URL")
+	tempDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := tempDB.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+
+	config.DB = tempDB
+
+	req := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"user@example.com"}`)
+	resp, err := app.Test(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	require.Equal(t, "Failed checking user", body["error"])
 }

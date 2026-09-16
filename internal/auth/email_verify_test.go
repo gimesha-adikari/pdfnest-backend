@@ -281,8 +281,8 @@ func TestEmailVerify_I_AlreadyVerifiedAccountBogusTokenRejected(t *testing.T) {
 	require.Equal(t, "Invalid or expired token", body["error"])
 }
 
-// Test J: resend on already-verified account -> rejected
-func TestEmailVerify_J_ResendOnAlreadyVerifiedRejected(t *testing.T) {
+// Test J: resend on already-verified account -> generic 200 without altering verification state
+func TestEmailVerify_J_ResendOnAlreadyVerified(t *testing.T) {
 	app, _, user, validToken := setupEmailVerificationMatrixTest(t)
 
 	// First verify successfully
@@ -292,16 +292,27 @@ func TestEmailVerify_J_ResendOnAlreadyVerifiedRejected(t *testing.T) {
 	respValid.Body.Close()
 	require.Equal(t, http.StatusOK, respValid.StatusCode)
 
-	// Resend verification on verified account
+	var before config.User
+	require.NoError(t, config.DB.First(&before, "id = ?", user.ID).Error)
+	require.True(t, before.EmailVerified)
+
+	// Resend verification on verified account returns generic 200 (AUTH-004 privacy contract)
 	resendReq := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+user.Email+`"}`)
 	resendResp, err := app.Test(resendReq)
 	require.NoError(t, err)
 	defer resendResp.Body.Close()
 
-	require.Equal(t, http.StatusBadRequest, resendResp.StatusCode)
+	require.Equal(t, http.StatusOK, resendResp.StatusCode)
 	var body map[string]interface{}
 	require.NoError(t, json.NewDecoder(resendResp.Body).Decode(&body))
-	require.Equal(t, "Email is already verified", body["error"])
+	require.Equal(t, true, body["success"])
+	require.Equal(t, "Verification email sent", body["message"])
+
+	// Assert user remains verified and state is unchanged
+	var after config.User
+	require.NoError(t, config.DB.First(&after, "id = ?", user.ID).Error)
+	require.True(t, after.EmailVerified)
+	require.Equal(t, before.EmailVerifyTokenHash, after.EmailVerifyTokenHash)
 }
 
 // Test K: same successfully-used token AFTER expiry -> rejected with 400 "Verification token expired"

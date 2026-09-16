@@ -430,7 +430,7 @@ func (ctrl *Controller) ResendVerification(c *fiber.Ctx) error {
 	}
 
 	if user.EmailVerified {
-		return c.Status(400).JSON(fiber.Map{"error": "Email is already verified"})
+		return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
 	}
 
 	rawToken, tokenHash, err := generateVerificationToken()
