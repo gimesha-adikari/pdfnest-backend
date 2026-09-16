@@ -348,30 +348,43 @@ func (ctrl *Controller) VerifyEmail(c *fiber.Ctx) error {
 	}
 
 	if token == "" {
-		return c.Status(400).JSON(fiber.Map{"error": "Missing verification token"})
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Missing verification token"})
+	}
+
+	if config.DB == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
 	}
 
 	tokenHash := hashVerificationToken(token)
 
-	var user config.User
-	if err := config.DB.Where("email_verify_token_hash = ?", tokenHash).First(&user).Error; err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid or expired token"})
-	}
-
-	if time.Now().After(user.EmailVerifyExpiresAt) {
-		return c.Status(400).JSON(fiber.Map{"error": "Verification token expired"})
-	}
-
-	err := config.DB.Transaction(func(tx *gorm.DB) error {
+	err := config.DB.WithContext(c.UserContext()).Transaction(func(tx *gorm.DB) error {
 		var txUser config.User
-		if err := tx.First(&txUser, "id = ?", user.ID).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("email_verify_token_hash = ?", tokenHash).First(&txUser).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("invalid_or_expired_token")
+			}
 			return err
 		}
 
+		// Idempotency: If this exact token already verified this account, return success immediately.
+		// Duplicate requests (e.g. React StrictMode double-mount, user double-click, browser prefetch,
+		// or human click after an automated email scanner prefetch) must not convert a successfully
+		// verified account into a misleading "invalid/expired" failure.
+		if txUser.EmailVerified {
+			return nil
+		}
+
+		// For unverified accounts, verify that the token has not expired
+		if txUser.EmailVerifyExpiresAt.IsZero() || time.Now().After(txUser.EmailVerifyExpiresAt) {
+			return errors.New("token_expired")
+		}
+
 		txUser.EmailVerified = true
-		txUser.Status = "active"
-		txUser.EmailVerifyTokenHash = ""
-		txUser.EmailVerifyExpiresAt = time.Time{}
+		if txUser.Status == "pending" {
+			txUser.Status = "active"
+		}
+		// Notice: txUser.EmailVerifyTokenHash is preserved so that subsequent duplicate or replay requests
+		// with this exact valid token are recognized as already verified and handled idempotently.
 
 		if err := tx.Save(&txUser).Error; err != nil {
 			return err
@@ -379,8 +392,15 @@ func (ctrl *Controller) VerifyEmail(c *fiber.Ctx) error {
 
 		return ensureFreeSubscription(tx, txUser.ID)
 	})
+
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed verifying email"})
+		if err.Error() == "invalid_or_expired_token" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid or expired token"})
+		}
+		if err.Error() == "token_expired" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Verification token expired"})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed verifying email"})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Email verified successfully"})
