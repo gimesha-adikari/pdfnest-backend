@@ -417,9 +417,16 @@ func (ctrl *Controller) ResendVerification(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"error": "Invalid email address"})
 	}
 
+	if config.DB == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
+	}
+
 	var user config.User
 	if err := config.DB.Where("email = ?", req.Email).First(&user).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"error": "User not found"})
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
+		}
+		return c.Status(500).JSON(fiber.Map{"error": "Failed checking user"})
 	}
 
 	if user.EmailVerified {
