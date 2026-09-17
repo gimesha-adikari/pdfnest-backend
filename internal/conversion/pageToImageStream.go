@@ -35,6 +35,7 @@ type previewWorkerSession struct {
 var (
 	ErrPreviewSessionNotFound  = errors.New("preview session not found")
 	ErrPreviewSessionForbidden = errors.New("preview session belongs to another identity")
+	ErrPreviewInvalidPage      = errors.New("invalid preview page number")
 )
 
 type previewSessionCache struct {
@@ -512,6 +513,12 @@ func (s *ConversionService) renderWorkerSessionPage(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, ErrPreviewSessionNotFound
+		}
+		if resp.StatusCode == http.StatusBadRequest {
+			return nil, ErrPreviewInvalidPage
+		}
 		body, _ := io.ReadAll(resp.Body)
 
 		return nil, fmt.Errorf(
@@ -597,15 +604,6 @@ func (s *ConversionService) CreatePreviewSession(
 		workerBaseURL = "http://localhost:8000"
 	}
 
-	if existing, ok := globalPreviewSessions.getByHash(ownerID, sourceHash); ok {
-		globalPreviewSessions.touch(existing.ID)
-
-		return map[string]any{
-			"session_id": existing.ID,
-			"page_count": existing.PageCount,
-		}, nil
-	}
-
 	workerSession, err := s.createWorkerPreviewSession(
 		ctx,
 		workerBaseURL,
@@ -687,7 +685,9 @@ func (s *ConversionService) GetPreviewSessionPage(
 		dpi,
 	)
 	if err != nil {
-		globalPreviewSessions.deleteByID(sessionID)
+		if errors.Is(err, ErrPreviewSessionNotFound) {
+			globalPreviewSessions.deleteByID(sessionID)
+		}
 
 		return nil, err
 	}

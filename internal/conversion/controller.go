@@ -263,6 +263,12 @@ func (cc *Controller) StreamPreviewSessionPageHandler(c *fiber.Ctx) error {
 				"message": "This preview session is no longer available.",
 			})
 		}
+		if errors.Is(err, ErrPreviewInvalidPage) {
+			return c.Status(400).JSON(fiber.Map{
+				"code":    "INVALID_PAGE",
+				"message": "The requested page number is invalid for this document.",
+			})
+		}
 
 		return c.Status(500).JSON(fiber.Map{
 			"code":    "PREVIEW_SESSION_PAGE_FAILED",
