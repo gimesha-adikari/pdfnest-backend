@@ -282,6 +282,61 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 			return nil, ErrInvalidJob
 		}
 	}
+	var extractLanguage edit.EditorLanguageRequest
+	if req.Operation == StudioJobEditExtract {
+		var parameters EditExtractJobParameters
+		_ = decodeStrictParameters(canonical, &parameters)
+		var languageErr error
+		extractLanguage, languageErr = validateStudioEditorLanguage(parameters)
+		if languageErr != nil {
+			return nil, languageErr
+		}
+		existingState, err := c.repo.GetLatestEditorStateForVersion(ctx, sessionID, req.BaseVersionID)
+		if err != nil {
+			return nil, err
+		}
+		if existingState != nil {
+			reuse := false
+			if origJob, jobErr := c.repo.GetJob(ctx, existingState.ExtractJobID); jobErr == nil && origJob != nil {
+				if origJob.JobType == string(StudioJobEditCompile) {
+					reuse = true
+				} else {
+					var origParams EditExtractJobParameters
+					if decodeStrictParameters(json.RawMessage(origJob.Parameters), &origParams) == nil {
+						if origParams.LanguageMode == extractLanguage.Mode {
+							if extractLanguage.Mode == "AUTO" || stringSliceEqual(origParams.Languages, extractLanguage.Languages) {
+								reuse = true
+							}
+						}
+					}
+				}
+			}
+			if reuse {
+				now := time.Now().UTC()
+				job := &models.StudioJob{
+					ID:             uuid.New(),
+					DocumentID:     sess.DocumentID,
+					SessionID:      sessionID,
+					BaseVersionID:  req.BaseVersionID,
+					WorkerJobID:    fmt.Sprintf("reused-%s", uuid.NewString()),
+					JobType:        string(req.Operation),
+					Status:         "succeeded",
+					Progress:       100,
+					Message:        "Editor layout reused from existing session state",
+					IdempotencyKey: req.IdempotencyKey,
+					Parameters:     models.JSON(canonical),
+					EditorStateID:  &existingState.ID,
+					ReconciledAt:   &now,
+					CreatedAt:      now,
+					UpdatedAt:      now,
+				}
+				if err := c.repo.CreateJob(ctx, job); err != nil {
+					return nil, err
+				}
+				return &StudioJobResult{Job: job}, nil
+			}
+		}
+	}
 	var current *MaterializedVersion
 	if req.Operation == StudioJobEditCompile {
 		if byID, ok := c.materializer.(StudioVersionMaterializerByID); ok {
@@ -312,16 +367,8 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 	if strings.HasPrefix(string(req.Operation), "markup_") {
 		submitted, err = c.gateway.SubmitMarkup(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
 	} else if req.Operation == StudioJobEditExtract {
-		var parameters EditExtractJobParameters
-		_ = decodeStrictParameters(canonical, &parameters)
-		language, languageErr := validateStudioEditorLanguage(parameters)
-		if languageErr != nil {
-			cleanupStudioObject(ctx, sourceKey)
-			cleanupStudioObject(ctx, payloadKey)
-			return nil, languageErr
-		}
 		if gateway, ok := c.gateway.(StudioLanguageWorkerGateway); ok {
-			submitted, err = gateway.SubmitEditWithLanguage(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName, language)
+			submitted, err = gateway.SubmitEditWithLanguage(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName, extractLanguage)
 		} else {
 			submitted, err = c.gateway.SubmitEdit(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
 		}
@@ -365,6 +412,18 @@ func validateStudioEditorLanguage(parameters EditExtractJobParameters) (edit.Edi
 		languages = append(languages, code)
 	}
 	return edit.EditorLanguageRequest{Mode: mode, Languages: languages}, nil
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobName, canonical []byte, documentID uuid.UUID) (string, error) {
@@ -790,6 +849,23 @@ func (c *studioJobCoordinator) finalizePreparedStudioJobResult(ctx context.Conte
 		}
 		locked.ResultVersionID = &prepared.versionID
 		locked.ReconciledAt = &now
+		if locked.JobType == string(StudioJobEditCompile) {
+			var compileParams EditCompileJobParameters
+			if decodeStrictParameters(json.RawMessage(locked.Parameters), &compileParams) == nil && len(compileParams.Layout) > 0 {
+				compileState := &models.StudioEditorState{
+					ID:            uuid.New(),
+					DocumentID:    locked.DocumentID,
+					SessionID:     locked.SessionID,
+					BaseVersionID: prepared.versionID,
+					ExtractJobID:  locked.ID,
+					Layout:        models.JSON(compileParams.Layout),
+					CreatedAt:     now,
+				}
+				if err = tx.CreateEditorState(ctx, compileState); err != nil {
+					return err
+				}
+			}
+		}
 		if err = tx.SaveJob(ctx, locked); err != nil {
 			return err
 		}

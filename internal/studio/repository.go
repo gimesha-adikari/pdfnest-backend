@@ -44,6 +44,7 @@ type Repository interface {
 	CreateEditorState(ctx context.Context, state *models.StudioEditorState) error
 	GetEditorState(ctx context.Context, id uuid.UUID) (*models.StudioEditorState, error)
 	GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error)
+	GetLatestEditorStateForVersion(ctx context.Context, sessionID, baseVersionID uuid.UUID) (*models.StudioEditorState, error)
 	DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]models.StudioStorageCleanupTask, error)
 	CreateStorageCleanupTasks(ctx context.Context, keys []string) ([]models.StudioStorageCleanupTask, error)
 	ClaimStorageCleanupTasks(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]models.StudioStorageCleanupTask, error)
@@ -378,6 +379,16 @@ func (r *gormRepository) GetEditorState(ctx context.Context, id uuid.UUID) (*mod
 func (r *gormRepository) GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error) {
 	var state models.StudioEditorState
 	if err := r.db.WithContext(ctx).Where("extract_job_id = ?", jobID).First(&state).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &state, nil
+}
+func (r *gormRepository) GetLatestEditorStateForVersion(ctx context.Context, sessionID, baseVersionID uuid.UUID) (*models.StudioEditorState, error) {
+	var state models.StudioEditorState
+	if err := r.db.WithContext(ctx).Where("session_id = ? AND base_version_id = ?", sessionID, baseVersionID).Order("created_at DESC").First(&state).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
