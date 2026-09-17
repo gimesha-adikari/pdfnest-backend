@@ -221,4 +221,29 @@ func TestStudio001_Qualification_SameSessionReuseAndCompiledVersionState(t *test
 	assert.Equal(t, 100, queriedJob.Progress)
 	require.NotNil(t, queriedJob.EditorStateID)
 	assert.Equal(t, v2State.ID, *queriedJob.EditorStateID)
+
+	// -------------------------------------------------------------
+	// SCENARIO 7: Explicit different language on SAME compiled version (v2)
+	// User explicitly selects "sin" (Sinhala).
+	// Must NOT return cached compiled state; must submit a fresh worker extraction job!
+	// -------------------------------------------------------------
+	// Update materializer to point to the active compiled version (v2)
+	resultVersion, err := repository.GetVersion(ctx, v2VersionID)
+	require.NoError(t, err)
+	materializer.version = resultVersion
+
+	submitsBeforeExplicitLangV2 := gateway.editSubmits
+	explicitV2Req := StudioJobRequest{
+		BaseVersionID:  v2VersionID,
+		IdempotencyKey: "extract-v2-sin-" + uuid.NewString(),
+		Operation:      StudioJobEditExtract,
+		Parameters:     rawJSON(t, EditExtractJobParameters{LanguageMode: "EXPLICIT", Languages: []string{"sin"}}),
+	}
+	explicitV2Res, err := coordinator.Submit(ctx, session.ID, ident, explicitV2Req)
+	require.NoError(t, err)
+	assert.Equal(t, "queued", explicitV2Res.Job.Status, "Explicit different language on compiled version must queue fresh worker job")
+	assert.Equal(t, "editor_extract", explicitV2Res.Job.JobType)
+	assert.Equal(t, submitsBeforeExplicitLangV2+1, gateway.editSubmits, "Worker submit count must increment exactly once")
+	assert.Equal(t, edit.EditorLanguageRequest{Mode: "EXPLICIT", Languages: []string{"sin"}}, gateway.languages[explicitV2Res.Job.WorkerJobID])
 }
+

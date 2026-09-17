@@ -299,7 +299,12 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 			reuse := false
 			if origJob, jobErr := c.repo.GetJob(ctx, existingState.ExtractJobID); jobErr == nil && origJob != nil {
 				if origJob.JobType == string(StudioJobEditCompile) {
-					reuse = true
+					// Compile layouts are compiled from their base editor state and default to AUTO.
+					// If the user explicitly selects a specific language (e.g. sin or tam via changeLanguage),
+					// bypass the cached compile layout to trigger a fresh worker OCR extraction.
+					if extractLanguage.Mode == "AUTO" {
+						reuse = true
+					}
 				} else {
 					var origParams EditExtractJobParameters
 					if decodeStrictParameters(json.RawMessage(origJob.Parameters), &origParams) == nil {
