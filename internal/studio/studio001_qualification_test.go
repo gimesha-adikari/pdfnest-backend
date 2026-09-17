@@ -211,4 +211,14 @@ func TestStudio001_Qualification_SameSessionReuseAndCompiledVersionState(t *test
 	require.NoError(t, err)
 	require.NotNil(t, loadedV2State)
 	assert.JSONEq(t, string(editedRaw), string(loadedV2State.Layout))
+
+	// Verify querying the fast-path job via coordinator.Get (used by frontend polling / status checks)
+	queriedJob, err := coordinator.Get(ctx, session.ID, reopenV2Res.Job.ID, ident)
+	require.NoError(t, err)
+	require.NotNil(t, queriedJob)
+	assert.Equal(t, "editor_extract", queriedJob.JobType, "Fastpath job type must be editor_extract")
+	assert.Equal(t, "succeeded", queriedJob.Status)
+	assert.Equal(t, 100, queriedJob.Progress)
+	require.NotNil(t, queriedJob.EditorStateID)
+	assert.Equal(t, v2State.ID, *queriedJob.EditorStateID)
 }
