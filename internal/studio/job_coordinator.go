@@ -299,12 +299,12 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 			reuse := false
 			if origJob, jobErr := c.repo.GetJob(ctx, existingState.ExtractJobID); jobErr == nil && origJob != nil {
 				if origJob.JobType == string(StudioJobEditCompile) {
-					// Compile layouts are compiled from their base editor state and default to AUTO.
-					// If the user explicitly selects a specific language (e.g. sin or tam via changeLanguage),
-					// bypass the cached compile layout to trigger a fresh worker OCR extraction.
-					if extractLanguage.Mode == "AUTO" {
-						reuse = true
-					}
+					// The compiled editor state was produced from a specific source extraction.
+					// Resolve the effective OCR language from that source extraction so that:
+					//   - reopening with the SAME language reuses the compiled state (zero worker jobs)
+					//   - reopening with a DIFFERENT language triggers fresh OCR
+					// AUTO vs EXPLICIT alone is not the correct semantic distinction.
+					reuse = compileOriginLanguageMatches(c.repo, ctx, origJob, extractLanguage)
 				} else {
 					var origParams EditExtractJobParameters
 					if decodeStrictParameters(json.RawMessage(origJob.Parameters), &origParams) == nil {
@@ -429,6 +429,66 @@ func stringSliceEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// compileOriginLanguageMatches determines whether a compile-origin editor state should be
+// reused for the requested extraction language, by tracing back to the effective OCR language
+// of the source extraction that was compiled.
+//
+// Provenance chain:
+//
+//	compileJob.Parameters (EditCompileJobParameters.EditorStateID)
+//	  -> source StudioEditorState
+//	  -> source StudioEditorState.ExtractJobID
+//	  -> source editor_extract StudioJob.Parameters (EditExtractJobParameters)
+//	  -> effective language
+//
+// Reuse is granted when the effective source language is compatible with the requested
+// language: same explicit language codes, or both AUTO. This means:
+//   - EXPLICIT ENG compiled -> reopen EXPLICIT ENG: REUSE
+//   - AUTO compiled -> reopen AUTO: REUSE
+//   - EXPLICIT ENG compiled -> reopen EXPLICIT SIN: FRESH OCR
+//   - AUTO compiled -> reopen EXPLICIT SIN: FRESH OCR
+//
+// On any error resolving the chain, defaults to safe fresh OCR (no reuse).
+func compileOriginLanguageMatches(repo Repository, ctx context.Context, compileJob *models.StudioJob, requested edit.EditorLanguageRequest) bool {
+	// Step 1: decode compile job parameters to get source EditorStateID
+	var compileParams EditCompileJobParameters
+	if decodeStrictParameters(json.RawMessage(compileJob.Parameters), &compileParams) != nil || compileParams.EditorStateID == uuid.Nil {
+		return false
+	}
+	// Step 2: fetch the source editor state
+	sourceState, err := repo.GetEditorState(ctx, compileParams.EditorStateID)
+	if err != nil || sourceState == nil {
+		return false
+	}
+	// Step 3: fetch the source extract job
+	sourceExtractJob, err := repo.GetJob(ctx, sourceState.ExtractJobID)
+	if err != nil || sourceExtractJob == nil {
+		return false
+	}
+	// Step 4: if the source was itself a compile job (multi-generation), recurse one level
+	if sourceExtractJob.JobType == string(StudioJobEditCompile) {
+		return compileOriginLanguageMatches(repo, ctx, sourceExtractJob, requested)
+	}
+	// Step 5: decode the source extract job parameters and compare languages
+	if sourceExtractJob.JobType != string(StudioJobEditExtract) {
+		return false
+	}
+	var sourceParams EditExtractJobParameters
+	if decodeStrictParameters(json.RawMessage(sourceExtractJob.Parameters), &sourceParams) != nil {
+		return false
+	}
+	sourceMode := strings.ToUpper(strings.TrimSpace(sourceParams.LanguageMode))
+	requestedMode := strings.ToUpper(strings.TrimSpace(requested.Mode))
+	if sourceMode == "AUTO" && requestedMode == "AUTO" {
+		return true
+	}
+	if sourceMode == "EXPLICIT" && requestedMode == "EXPLICIT" {
+		return stringSliceEqual(sourceParams.Languages, requested.Languages)
+	}
+	// AUTO vs EXPLICIT mismatch: fresh OCR
+	return false
 }
 
 func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobName, canonical []byte, documentID uuid.UUID) (string, error) {
