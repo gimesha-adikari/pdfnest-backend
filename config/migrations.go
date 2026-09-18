@@ -14,11 +14,11 @@ import (
 	"gorm.io/gorm"
 )
 
-const managedSchemaVersion = "20260914_01"
+const managedSchemaVersion = "20260918_01_admin_subscription_mutation"
 
 func schemaModels() []interface{} {
 	return []interface{}{
-		&User{}, &Subscription{}, &Transaction{}, &UsageLog{}, &OCRLanguageUsage{}, &WebhookLog{}, &BillingReservation{}, &UserSetting{},
+		&User{}, &Subscription{}, &AdminSubscriptionMutation{}, &Transaction{}, &UsageLog{}, &OCRLanguageUsage{}, &WebhookLog{}, &BillingReservation{}, &UserSetting{},
 		&ContactCategory{}, &ContactTicket{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{},
 		models.AboutPageContent{}, &analyzerModels.AnalyzerSession{}, &studioModels.StudioDocument{}, &studioModels.StudioAsset{},
 		&studioModels.StudioSnapshot{}, &studioModels.StudioVersion{}, &studioModels.StudioOperation{}, &studioModels.StudioJob{},
