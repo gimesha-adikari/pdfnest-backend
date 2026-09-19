@@ -61,6 +61,28 @@ type Subscription struct {
 	UpdatedAt time.Time
 }
 
+// AdminSubscriptionMutation is the durable idempotency and audit record for
+// an admin subscription mutation. The operation key represents one logical
+// admin action; the request fingerprint prevents reusing that key for a
+// different target or payload.
+type AdminSubscriptionMutation struct {
+	ID                  string  `gorm:"type:uuid;primaryKey"`
+	OperationKey        string  `gorm:"type:varchar(128);uniqueIndex;not null"`
+	UserID              string  `gorm:"type:uuid;index;not null"`
+	AdminUserID         *string `gorm:"type:uuid;index"`
+	RequestFingerprint  string  `gorm:"type:char(64);not null"`
+	RequestedTier       string  `gorm:"type:varchar(50);not null"`
+	RequestedStatus     string  `gorm:"type:varchar(50);not null"`
+	RequestedCredits    int     `gorm:"not null"`
+	RequestedDays       int     `gorm:"not null"`
+	State               string  `gorm:"type:varchar(20);not null"`
+	ResultTier          string  `gorm:"type:varchar(50);not null"`
+	ResultStatus        string  `gorm:"type:varchar(50);not null"`
+	ResultCustomCredits int     `gorm:"not null"`
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
 type BillingReservation struct {
 	ID          string    `gorm:"type:uuid;primaryKey"`
 	UserID      string    `gorm:"type:uuid;index;not null"`
