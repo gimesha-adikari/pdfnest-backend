@@ -64,15 +64,15 @@ var homeAllowedFields = map[string]struct{}{
 }
 
 // filterAllowed returns a new map containing only the keys present in the
-// allowlist, plus the server-set updatedAt timestamp. Unknown keys are dropped.
+// allowlist. Unknown keys are dropped. GORM manages UpdatedAt for model
+// updates; injecting it here would generate a duplicate SQL assignment.
 func filterAllowed(src map[string]interface{}, allowed map[string]struct{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(allowed)+1)
+	out := make(map[string]interface{}, len(allowed))
 	for k, v := range src {
 		if _, ok := allowed[k]; ok {
 			out[k] = v
 		}
 	}
-	out["updatedAt"] = time.Now()
 	return out
 }
 

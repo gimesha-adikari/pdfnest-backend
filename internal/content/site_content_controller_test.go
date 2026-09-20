@@ -40,8 +40,22 @@ func TestFilterAllowed(t *testing.T) {
 	if _, exists := filtered["malicious"]; exists {
 		t.Errorf("malicious field should have been filtered out")
 	}
-	if _, exists := filtered["updatedAt"]; !exists {
-		t.Errorf("updatedAt timestamp should have been added")
+	if _, exists := filtered["updatedAt"]; exists {
+		t.Errorf("updatedAt should be managed by GORM, not injected into the update map")
+	}
+}
+
+func TestFilterAllowedDoesNotInjectGormManagedUpdatedAt(t *testing.T) {
+	filtered := filterAllowed(
+		map[string]interface{}{"highlightsJson": `[{"title":"PDF Tools"}]`},
+		aboutAllowedFields,
+	)
+
+	if _, exists := filtered["updatedAt"]; exists {
+		t.Fatal("filterAllowed must not inject updatedAt into a GORM Updates map")
+	}
+	if filtered["highlightsJson"] == nil {
+		t.Fatal("highlightsJson should remain in the filtered payload")
 	}
 }
 
