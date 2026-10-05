@@ -391,3 +391,23 @@ Frontend regressions after the live work:
 3. **Rollout ownership (operational prerequisite):** assign responsibility for consistent `BILLING_MODE` across all replicas during rollout and rollback and instance-by-instance policy verification.
 
 Until items 1 and 2 are resolved and item 3 has an owner/checklist, keep GIM-12 **In Progress** and **do not proceed to staging/rollout**. No product-source changes were made in this continuation; no remote storage access, production-data mutation, external Paddle action, push, PR, merge, or deployment occurred.
+
+## Operator access and OCR risk disposition — 2026-10-06
+
+### Local R2 identity and environment classification
+
+The local backend `.env` identifies Cloudflare R2 account ID `e8f1bb9a96ed9d20486ba01ed77d5447` and bucket `pdfnest-storage`. The endpoint is the standard HTTPS Cloudflare R2 endpoint for that account. The same local file has `APP_ENV=development`, but that describes the local backend process; it does not establish that the referenced bucket is test storage.
+
+The connected approved Railway configuration tool showed one `platen-production` project, one `production` environment, and a `pdfnest-backend` production service with the `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY`, and `R2_SECRET_KEY` variable names present. Railway OAuth redacted variable values. No comparison between the production service's configured account/bucket and the local account/bucket could therefore be made. No access-key or secret values were disclosed or recorded.
+
+The verification host has no Cloudflare/R2 management integration and no `wrangler`, AWS CLI, `s5cmd`, `rclone`, or MinIO client executable. The Railway service/configuration tools do not provide Cloudflare R2 object access. Consequently the account/bucket could be identified from local configuration, but the target bucket's environment classification remains **unknown**. It cannot safely be classified as test, staging, or production from the available configuration evidence.
+
+### Object check and reconciliation status
+
+No remote `HEAD`, list, read, download, or delete operation was performed. The exact object key `jobs/markdown/source/a1e179c5-4d19-4ed8-9e8a-3e71a4ddd169.pdf` remains **unverified** for existence and **not reconciled**. No authorized operator confirmation is available. GIM-12 remains blocked on this gate.
+
+Operator handoff: use the approved Cloudflare account/storage tooling to verify the account and bucket, check only this exact key, establish whether the bucket is test, staging, or production, then follow the normal retention/incident procedure to delete or retain the object as appropriate. Record the classification, exact-key check, action, and verification. Do not infer that the local `APP_ENV=development` means the bucket is disposable.
+
+### Historical OCR incident risk acceptance
+
+At the user's direct instruction in this continuation, the residual risk from the historical `failed to finalize billing` incident is **accepted for GIM-12 disposition**. This is a risk acceptance only: the incident's historical cause remains unknown and the technical classification remains `NOT REPRODUCED — INSUFFICIENT EVIDENCE`. No production logs or request context were produced, no code fix is claimed, and this acceptance does not waive the separate R2 operator-reconciliation blocker. GIM-12 therefore remains **In Progress** until the exact R2 object is reconciled and confirmed by an authorized operator.
