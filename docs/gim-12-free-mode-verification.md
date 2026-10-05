@@ -110,8 +110,8 @@ This addendum preserves the earlier **BLOCKED** record above and records the rem
 | Gate | Previous state | New evidence | State after this run |
 |---|---|---|---|
 | Authenticated synchronous normal/free/rollback | Missing | Same isolated Pro account with exhausted processing quota and zero credits: normal returned `429 HOURLY_LIMIT_REACHED`; free returned `200`; rollback to normal returned the same `429`. Billing state was unchanged by free processing. | Closed for the local API matrix |
-| Account async normal→free and free→normal | Repository tests only | Real OCR/PDF-to-Markdown tasks ran through local backend, task persistence, worker, and download/cancel finalization. Stored DB reservations settled after completion through a free-mode replica; empty IDs stayed unbilled after finalization through a normal-mode replica. | Closed for tested success/cancel/download paths |
-| Guest async normal→free and free→normal | Repository tests only | Real guest OCR and PDF-to-Markdown tasks exercised Redis pending/used transitions, mode-opposite finalization, cancellation, and duplicate download/cancel. | Closed for tested success/cancel/download paths |
+| Account async normal→free and free→normal | Repository tests only | Real OCR/PDF-to-Markdown tasks ran through local backend, task persistence, worker, and download/cancel finalization. Stored DB reservations settled after completion through a free-mode replica; empty IDs stayed unbilled after finalization through a normal-mode replica. | Partial: account success and normal→free cancellation covered; account free→normal cancellation and worker-returned async failure not covered live |
+| Guest async normal→free and free→normal | Repository tests only | Real guest OCR and PDF-to-Markdown tasks exercised Redis pending/used transitions, mode-opposite finalization, cancellation, and duplicate download/cancel. | Partial: success/cancel covered in both directions; worker-returned async failure not separately induced live |
 | Ownership/authentication and billing non-mutation | Partial | Protected checkout without identity returned `401`; wrong-owner task status/cancel/download returned `403`; reservations remained pending until an authorized finalizer. | Closed for exercised routes |
 | Free-mode validation/resource capacity | Partial | Missing upload and invalid file remained `400`; 1001-page PDF remained `400 PAGE_LIMIT_EXCEEDED`; saturated global technical capacity remained `429 SERVER_BUSY`, distinct from billing quota. | Closed for listed checks; upload-size boundary not run |
 | Paid Pro real-browser free/rollback | Missing | Real local session and local Pro account showed stored Pro/120 credits separately from free policy and kept management controls; normal rollback restored purchase affordances. | Closed for local browser presentation |
@@ -167,6 +167,8 @@ The live async exercise used local OCR and PDF-to-Markdown worker paths, not dir
 - A larger free guest OCR task `e61defca-695d-4d2a-b8b7-fce79bfca486` was cancelled through the normal replica; duplicate cancellation was safe. It had an empty ID and caused no Redis billing mutation.
 
 These exercises prove the tested allocation-time reservation identity survives cross-mode completion. They do not prove every possible simultaneous commit/cancel race schedule; no state-machine redesign was attempted.
+
+The live matrix did not separately inject a worker-returned asynchronous processing error in either identity class. Account free→normal success was driven, but account free→normal cancellation was not. Account normal→free cancellation, guest cancellation in both mode directions, and stale-account release were driven. These missing cases are still part of the requested full transition matrix and should be closed before GIM-12 can be marked complete.
 
 ### Stale recovery, authorization, validation, and resource controls
 
@@ -238,11 +240,12 @@ Do not close GIM-12 yet. Remaining actions:
 
 1. **High — nonlocal storage side effect:** have an authorized operator identify and reconcile the exact source object above. Do not use this report as proof it was removed.
 2. **High — historical OCR error:** original `failed to finalize billing` cause is not proven; obtain incident logs/context or record an explicit accepted disposition. Current-path non-reproduction is not a root-cause fix.
-3. **Operational — replica consistency:** assign rollout ownership to ensure every replica has the same mode before and during rollout/rollback; no production multi-replica control plane was rehearsed.
-4. **Evidence gap — live purchase race:** only the mocked browser race plus GIM-9 backend tests are available; no real local stale-session purchase click was run.
-5. **Optional validation gap:** upload-size and per-identity capacity live saturation were not separately driven; existing automated tests remain the evidence for those controls.
+3. **High — async transition completeness:** induce worker-returned failures for account and guest async tasks, and drive account free→normal cancellation through the live task lifecycle.
+4. **Operational — replica consistency:** assign rollout ownership to ensure every replica has the same mode before and during rollout/rollback; no production multi-replica control plane was rehearsed.
+5. **Evidence gap — live purchase race:** only the mocked browser race plus GIM-9 backend tests are available; no real local stale-session purchase click was run.
+6. **Optional validation gap:** upload-size and per-identity capacity live saturation were not separately driven; existing automated tests remain the evidence for those controls.
 
-Until items 1 and 2 are handled and reviewed, retain `GIM-12` as **In Progress** and do not proceed to staging/rollout. The later GIM-8+ product behavior is not expanded in this continuation.
+Until items 1–3 are handled and reviewed, retain `GIM-12` as **In Progress** and do not proceed to staging/rollout. The later GIM-8+ product behavior is not expanded in this continuation.
 
 ### Continuation Git record
 
