@@ -51,9 +51,19 @@ type SessionResponse struct {
 	User          *SessionUser         `json:"user,omitempty"`
 	Guest         *SessionGuest        `json:"guest,omitempty"`
 	Subscription  *SessionSubscription `json:"subscription,omitempty"`
+	BillingPolicy config.BillingPolicy `json:"billing_policy"`
 }
 
 func (ctrl *Controller) Session(c *fiber.Ctx) error {
+	c.Set("Cache-Control", "private, no-store")
+
+	billingPolicy, err := config.CurrentBillingPolicy()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "billing policy unavailable",
+		})
+	}
+
 	ident, ok := identity.FromContext(c)
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -65,6 +75,7 @@ func (ctrl *Controller) Session(c *fiber.Ctx) error {
 		return c.JSON(SessionResponse{
 			Authenticated: true,
 			Type:          "guest",
+			BillingPolicy: billingPolicy,
 			Guest: &SessionGuest{
 				ID:         ident.ID,
 				Trust:      ident.Trust,
@@ -107,6 +118,7 @@ func (ctrl *Controller) Session(c *fiber.Ctx) error {
 	return c.JSON(SessionResponse{
 		Authenticated: true,
 		Type:          "user",
+		BillingPolicy: billingPolicy,
 		User: &SessionUser{
 			ID:            user.ID,
 			Email:         user.Email,
