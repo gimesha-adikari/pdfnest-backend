@@ -250,3 +250,144 @@ Until items 1–3 are handled and reviewed, retain `GIM-12` as **In Progress** a
 ### Continuation Git record
 
 The backend and frontend remained on `gim-12-free-mode-verification`. The only intended continuation change is this documentation file. The full backend source tree and frontend source tree were not modified. No push, PR, merge, deployment, external Paddle call, or production configuration change occurred. The nonlocal object write described above is the sole known external-service side effect and remains unresolved.
+
+## Final blocker-closure continuation — 2026-10-06
+
+This continuation preserves the preceding blocked evidence and updates the three live async gaps, investigates the R2 side effect using local evidence only, and distinguishes the current OCR finalization emitter from the unresolved historical incident. No product source was changed.
+
+### Updated blocker state
+
+| Gate | State before this continuation | New evidence | State now |
+|---|---|---|---|
+| Account free→normal cancellation | Missing | Live authenticated async OCR task created in free mode, then cancelled through the normal-mode task API twice | Closed for the exercised task path |
+| Account normal worker-returned failure | Missing | Live worker accepted work, failed during OCR processing, and backend released its real database reservation | Closed for the exercised task path |
+| Guest normal worker-returned failure | Missing | Live worker accepted guest work, failed during OCR processing, and guest pending quota/reservation were released | Closed for the exercised task path |
+| Free-mode worker failure | Optional | Account and guest async free-mode requests reached worker failure with empty reservation IDs and no billing allocations | Closed for the exercised paths |
+| Nonlocal R2 object | Open | Local provenance/root-cause evidence assembled; no remote object operation was authorized or performed | **Open — operator reconciliation required** |
+| Historical synchronous OCR `failed to finalize billing` | Open | Current emitter and error conditions documented; generic emitter reproduced with an isolated forced database write error, but historical cause is not established | **Open — incident evidence or owner risk acceptance required** |
+| Same billing mode on every replica | Operational prerequisite | Prior local mixed-mode replica rehearsal remains evidence; no production deployment owner was assigned | **Open operational prerequisite** |
+| Full backend suite | Previously reported pass; this continuation first hit harness/DB limits | Fresh isolated run passed all packages with local storage and a 300-connection disposable PostgreSQL server | Closed |
+
+The release decision remains **BLOCKED**. The two operationally unresolved high-severity items (R2 reconciliation and historical OCR incident disposition) prevent closure even though the newly requested local async gates and final backend/frontend regressions passed.
+
+### Account free→normal cancellation — live API
+
+Using the isolated local Pro account, `POST /api/ocr/extract-text-async` on the free-mode backend returned HTTP `202`. Task `58ccda8e-7ee0-499f-b168-0bf50beda275` reached `PROCESSING` with an empty `reservationId` and stored `reservationKind=database`. Before submission the test account was Pro/active with 120 custom credits, zero in each usage window, and no processing reservation rows. The same account/task was then sent to the normal-mode backend's authenticated `DELETE /api/v1/tasks/58ccda8e-7ee0-499f-b168-0bf50beda275`; the first and repeated cancellation both returned HTTP `200`. The task remained `CANCELLED` with empty reservation ID. The before/after subscription state remained Pro/active, credits 120, usage 0/0/0, and task-linked processing reservation count zero. No reservation was retroactively created, no usage or credit changed, and repeated cancellation did not create a billing mutation.
+
+This closes the specified account free→normal cancellation gate for the actual OCR task lifecycle; it is not a direct service-call test. The invalid first barrier attempt from this continuation, where a short failure shim caused the worker to fail before cancellation, is not counted as cancellation evidence.
+
+### Account worker-returned failure — live API and worker
+
+Normal-mode authenticated `POST /api/ocr/extract-text-async` returned HTTP `202`, persisted task `a77a69b4-6ba5-4ef2-ba4e-30defffc1333`, and created exactly one database reservation `2b6764a6-fa54-4b98-94ce-25fc9eb08654` for 6 plan units and 0 credit units. Its initial state was `reserved`; the account's baseline was Pro/active, 120 credits, and usage 0/0/0. The request was accepted and the worker reached the real local `/api/v1/ocr/extract-text` processing endpoint. A test-only local Tesseract executable then returned a processing error. This failure occurred after dispatch and worker processing began; it was not request validation, task persistence, dispatch transport failure, or cancellation.
+
+The worker returned HTTP `500`; the task became `FAILED` with the worker error. A repeated authorized task-status GET left it failed. The reservation became `released`; no usage log or plan usage increment was recorded, and credits remained 120. The release was effective once. The local Tesseract shim was a controlled test fixture; no product or worker source was changed.
+
+### Guest worker-returned failure — live API and worker
+
+Normal-mode guest `POST /api/ocr/extract-text-async` returned HTTP `202` and created task `940cc420-e492-44c4-8911-f4d7068d0891` with guest reservation `e266bffe-a710-40c2-9810-52b202637ec2` and kind `guest`. Before failure, the guest quota state had `pending_3h=6`, `used_3h=0`; the same reservation key existed. The request reached the local worker OCR processing endpoint, where the same controlled Tesseract fixture returned a processing error and worker HTTP `500`.
+
+The task became `FAILED`; a repeated authorized status GET did not alter it. After finalization, guest pending returned to 0, used remained 0, all checked windows showed no usage charge, and the guest reservation key was absent (`EXISTS=0`). The guest reservation was released effectively once. This proves a worker-returned failure path, not a Redis/PostgreSQL outage simulation.
+
+### Optional free-mode worker-failure regression
+
+The same controlled processing failure was exercised after requests had been accepted in free mode:
+
+- Account task `08ed462d-886c-487d-98f0-99979baf6e48` became `FAILED`, stored an empty reservation ID and `database` kind, and had no billing reservation row for its task ID. The account remained Pro/active with 120 credits and the usage state measured at that phase was unchanged.
+- Guest task `b9370276-cc7f-480e-9cf1-ee438e97efde` became `FAILED`, stored an empty reservation ID and `guest` kind, and left all guest used/pending quota values at zero with zero guest billing reservation keys.
+
+The task failure remains visible normally; free mode did not disable worker failure reporting or alter identity/task behavior.
+
+### R2 incident facts and local provenance
+
+The exact known object key remains:
+
+```text
+jobs/markdown/source/a1e179c5-4d19-4ed8-9e8a-3e71a4ddd169.pdf
+```
+
+No bucket listing, object read/download, delete, or remote configuration request was made during this continuation. Based on the locally available Codex command history, the request was an authenticated normal-mode test-phase `POST http://127.0.0.1:18081/api/conversion/pdf-to-markdown-async` on 2026-10-05 at 19:02:33 UTC (2026-10-06 00:32:33 Asia/Colombo). The backend had been launched from the `pdfnest-backend` working directory with `BILLING_MODE=normal` and `PORT=18081`; the launch command had no explicit R2 or `STORAGE_MODE` override. The request returned `202`; its task identifier aligns with the object key. The exact backend child PID was not recorded.
+
+The current route registration in `internal/conversion/routes.go` maps both `/conversion/pdf-to-markdown-async` and `/conversion/pdf-to-markdown` to `Controller.HandleAsyncPDFToMarkdown`. That handler in `internal/conversion/pdfToMarkdown.go` calls `storage.Default()` and `UploadFile` for `jobs/markdown/source/<task-id>.pdf` before worker processing. The path directly asks for the R2-backed store; it does not use the development `RemoteStorageEnabled()` selector before the upload.
+
+The local `.env` was inspected with values redacted. It contains `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY`, and `R2_SECRET_KEY`; the endpoint is HTTPS and non-loopback. `APP_ENV=development`; `STORAGE_MODE` is unset. `main.go` calls `godotenv.Load()` before initializing services. Since the historical process environment was not snapshotted, it is not possible to prove whether each value came from the ambient shell or was supplied by dotenv after being absent from that shell. The launch record did not show explicit R2 exports, so dotenv is the likely source. No endpoint host, account identifier, bucket value, or credentials are reproduced here.
+
+Ownership confidence for the destination is **unknown**. Local evidence proves that a configured non-loopback Cloudflare R2 endpoint was selected; it does not establish whether the account/bucket was authorized test storage or production storage.
+
+### R2 operator reconciliation packet and prevention
+
+Required operator action: an authorized storage operator must use approved infrastructure configuration (not this report or Codex access) to identify the Cloudflare account and bucket corresponding to the local R2 configuration, verify whether the exact key above exists, reconcile/delete it according to the normal storage incident and retention procedure if appropriate, and record the account/bucket identity, key, action, and verification result. Do not disclose credentials in that record. **Remote object reconciliation was not completed by an authorized operator.** This remains a release blocker.
+
+The supported cause classification is **test-harness/environment setup error**, combined with an unsafe handler configuration boundary: the integration launch omitted an explicit local storage configuration, dotenv could load nonlocal R2 settings, and this handler directly instantiated/used the R2 store. Setting only `STORAGE_MODE=local` would not have prevented this particular handler from calling `storage.Default()` when all R2 variables are present. The provenance caveat above means the exact shell-versus-dotenv source cannot be proven.
+
+Future GIM-12 launch procedure: before starting any integration backend, require a preflight that fails unless every storage path used by the selected flow is explicitly local/loopback or filesystem-backed. For PDF-to-Markdown tests, do not provide real R2 credentials; use a dedicated local adapter/test fixture or fail closed before starting the test backend. Inspect the effective process environment without printing values, verify the endpoint is loopback when an S3 mock is used, and audit direct `storage.Default()` call sites because `STORAGE_MODE=local` alone is insufficient there. This is a verification-harness recommendation; no product behavior was changed.
+
+### OCR `failed to finalize billing` emitter and source-supported causes
+
+The only Go source emitter of the exact lowercase response text is `internal/billing/middleware.go:67-71`. Current path:
+
+```text
+POST /api/ocr/extract-text or /api/ocr/to-text-pdf
+  -> billing.Use(tool)
+  -> identity check and request estimate
+  -> Default.Reserve(...)
+  -> controller runs
+  -> successful controller response (status < 400)
+  -> Default.Commit(reservation.ID)
+  -> on commit error, best-effort Default.Release(reservation.ID)
+  -> HTTP 500 {"error":"failed to finalize billing"}
+```
+
+`internal/ocr/routes.go:20-21` registers those two synchronous routes behind `billing.Use`. `POST /api/ocr/extract-text` reaches `Controller.ProcessOCR`, which validates the upload/page limit and calls `ocrService.ExtractTextFromPDF`; `internal/ocr/extractText.go:22-38` posts to the worker's `/api/v1/ocr/extract-text`, rejects a non-2xx worker response, and only returns success after it has a successful worker response/body. `ProcessImageToTextPDF` is the second synchronous billing-wrapped OCR route and returns success only after its image-processing/service operation succeeds. The exact historical phrase therefore points to the synchronous authenticated middleware finalizer, rather than the async task path. The available historical note does not preserve a request path/request ID, so the specific synchronous OCR route cannot be distinguished.
+
+For a non-empty reservation ID, `Service.Commit` in `internal/billing/service.go:407-477` can return an error if the transaction cannot start/commit, the reservation `SELECT ... FOR UPDATE` fails (including a missing row or DB/query failure), the conditional reservation update fails, the subscription lookup fails (including missing subscription), saving subscription accounting fails, or inserting the usage log fails. A non-reserved status and a conditional update with zero affected rows are deliberate no-op success paths, not errors. `Release` is attempted after commit error, but its error is discarded by the middleware; if the DB update itself fails, release may remain unapplied. This list describes errors supported by the code; it does not identify which condition occurred historically.
+
+### OCR local reproduction and historical disposition
+
+All cases used isolated local infrastructure and the live HTTP routes:
+
+| Case | Route/result | Billing evidence |
+|---|---|---|
+| Normal authenticated OCR success | `POST /api/ocr/extract-text`; HTTP `200`, text/plain, 90-byte worker result | Real 6-plan-unit reservation committed; account usage became 6/6/6 and one usage log was added; no finalization error |
+| Normal authenticated OCR worker/controller failure | Same route with valid PDF; controlled local worker/Tesseract failure; HTTP `500 OCR_PROCESSING_FAILED` | Real reservation released; no usage log or usage increment; credits unchanged |
+| Free authenticated OCR success | Same route on free replica; HTTP `200` with worker result | Empty-ID commit was a no-op; reservation count, credits, and usage remained as measured immediately before the free request |
+| Normal allocation followed by free-mode settlement | Synchronous same-request process switch was not practical because each local backend process retained its configured mode. Async cross-mode success/failure/cancel paths are separately live-verified above and in prior report history. | Stored real ID/kind finalized against its store despite the opposite current replica mode |
+
+The exact current HTTP emitter was also forced in the isolated disposable database: a temporary, test-only `BEFORE INSERT` trigger for the isolated user's `UsageLog` caused an otherwise successful normal synchronous OCR request to fail during commit. The actual worker OCR processing succeeded; GORM logged the injected SQL error; the transaction rolled back; the API returned HTTP `500` with the exact `{"error":"failed to finalize billing"}` body; the middleware's release changed the reservation to `released`, and usage/counter state remained unchanged. The trigger/function were dropped immediately after the test. This demonstrates one source-supported way the current emitter can occur; it does not reproduce or prove the historical incident mechanism.
+
+GIM-6 empty-ID semantics explain why free-mode synchronous finalization is a no-op. GIM-7's reservation-kind resolver concerns async settlement and cannot fix this synchronous `Service.Commit` path. No GIM-5 through GIM-11 source change has been shown to remove the historical failure mechanism. Original production logs, request ID, exact route, and underlying commit error remain unavailable. The required incident classification is **NOT REPRODUCED — INSUFFICIENT EVIDENCE**. The historical incident remains a release blocker unless the project owner supplies incident evidence or explicitly accepts the residual risk.
+
+### Replica consistency and remaining optional checks
+
+The earlier two-replica rehearsal remains valid and was not repeated. Each backend reports its own process-local policy. Before rollout and rollback, the operator must apply the same `BILLING_MODE` to every backend replica and verify each instance's session policy through approved deployment tooling. A rollout owner still needs to be assigned; no production infrastructure command or deployment was used here.
+
+The real stale-session `PURCHASES_DISABLED` browser race was not repeated. Existing evidence remains the backend GIM-9 guard plus mocked Playwright race from the prior report; no real Paddle call or overlay was triggered. The optional upload-size and per-identity capacity checks were also not repeated; the prior live missing-upload, invalid-PDF, page-limit, and global technical `429 SERVER_BUSY` checks remain documented. These do not replace the unresolved high-severity R2/OCR gates.
+
+### Final backend and frontend regression results
+
+The first full-suite attempt in this continuation used a local S3Mock R2 endpoint and PostgreSQL `max_connections=100`. It exposed a test-harness mismatch: `TestGuestAsyncRequestPostFixSuccess` received an `r2://` artifact URL then tried to read it with `os.ReadFile`, which expects the local filesystem artifact. With all `R2_*` variables omitted and local storage selected, the focused command `go test ./internal/ocr -run '^TestGuestAsyncRequestPostFixSuccess$' -count=1` passed. A second suite attempt with the corrected storage environment still hit PostgreSQL `too many clients already` in Studio tests. These were not treated as product passes or code failures.
+
+The disposable PostgreSQL container's `max_connections` was raised from 100 to 300, a new empty test database (`test_gim12_final_20261006_b`) and Redis DB 6 were used, the healthy worker was restricted to loopback, and all `R2_*` variables were absent. The final command was:
+
+```text
+GOMAXPROCS=2 go test -p 1 -count=1 -timeout=300s ./...
+```
+
+Result: **PASS**, exit code 0. All packages passed, including `internal/billing`, `internal/auth`, `internal/conversion`, `internal/ocr`, `internal/studio`, `internal/studio/models`, `internal/tasks`, and `internal/storage`. The local worker health endpoint passed before the run. No nonlocal storage endpoint was used in this final suite run.
+
+Frontend regressions after the live work:
+
+- `npm run test:unit`: **PASS**, `UNIT SUITE: 100/100 files passed`.
+- `npx tsc --noEmit`: **PASS**, exit code 0.
+- `APP_ENV=development MANAGED_BUILD=false` with loopback API/app URLs and dummy local Google/Paddle build values, then `npm run build`: **PASS**. Next compiled, type-checked, generated all 38 static pages, and exited 0. During static generation it attempted the configured loopback backend at `127.0.0.1:18021`, found it unavailable, and used the bundled static tools catalog as designed; this was a local fallback warning, not a build failure or nonlocal request.
+- Lint was not rerun because there are no frontend source changes. The prior same-file-set comparison remains candidate 20 errors/14 warnings versus `origin/main` 20 errors/15 warnings, with no candidate-only diagnostics; the inspected repository CI does not run lint.
+- Browser suites were not rerun: prior report evidence remains mocked Playwright 8/8 and the real local paid-Pro free/normal rollback browser run. The optional real stale-session purchase race remains unverified.
+
+### Final release decision and required ownership
+
+**Final decision: BLOCKED.** The newly requested account free→normal cancellation, normal account worker failure, normal guest worker failure, optional free-mode worker failures, and final complete backend/frontend regression gates now pass. GIM-12 must remain In Progress because:
+
+1. **Storage operator action (high severity):** reconcile the exact R2 source object under approved account/bucket procedures and record the outcome. Codex did not and must not perform a remote object operation without authorization.
+2. **OCR incident disposition (high severity):** provide original incident logs/request context and identify the underlying commit error, or have the project owner explicitly accept the remaining risk. No source fix has been tied to the historical incident.
+3. **Rollout ownership (operational prerequisite):** assign responsibility for consistent `BILLING_MODE` across all replicas during rollout and rollback and instance-by-instance policy verification.
+
+Until items 1 and 2 are resolved and item 3 has an owner/checklist, keep GIM-12 **In Progress** and **do not proceed to staging/rollout**. No product-source changes were made in this continuation; no remote storage access, production-data mutation, external Paddle action, push, PR, merge, or deployment occurred.
