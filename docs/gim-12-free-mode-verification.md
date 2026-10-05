@@ -411,3 +411,29 @@ Operator handoff: use the approved Cloudflare account/storage tooling to verify 
 ### Historical OCR incident risk acceptance
 
 At the user's direct instruction in this continuation, the residual risk from the historical `failed to finalize billing` incident is **accepted for GIM-12 disposition**. This is a risk acceptance only: the incident's historical cause remains unknown and the technical classification remains `NOT REPRODUCED — INSUFFICIENT EVIDENCE`. No production logs or request context were produced, no code fix is claimed, and this acceptance does not waive the separate R2 operator-reconciliation blocker. GIM-12 therefore remains **In Progress** until the exact R2 object is reconciled and confirmed by an authorized operator.
+
+## Final operational closure for integration preparation — 2026-10-06
+
+This section records later release evidence supplied for the final local integration pass. It preserves the historical investigation above, including the original blocked decisions. No Cloudflare, Railway, production database, Paddle, or remote storage operation was performed as part of this integration pass, and no product source was changed.
+
+### R2 exact-object reconciliation
+
+Per the authorized Cloudflare integration confirmation supplied for this pass, the connected account was verified as `e8f1bb9a96ed9d20486ba01ed77d5447`, bucket `pdfnest-storage` was verified, and the exact object key below was found:
+
+```text
+jobs/markdown/source/a1e179c5-4d19-4ed8-9e8a-3e71a4ddd169.pdf
+```
+
+Only this exact object was deleted. A follow-up exact-key lookup returned zero matches. No other object or bucket configuration was changed. **R2 reconciliation blocker: CLOSED.** These are operator-confirmed facts supplied for the integration; this pass did not independently access Cloudflare.
+
+### Historical OCR incident disposition
+
+The technical classification remains exactly **NOT REPRODUCED — INSUFFICIENT EVIDENCE**. The original production logs, request ID, exact route, and underlying database error remain unavailable, and no code change is claimed to have fixed the historical cause. The project owner explicitly accepted the residual unknown-cause risk for GIM-12. This closes the required disposition by risk acceptance only; it does not convert the incident into a diagnosed or fixed defect.
+
+### Rollout ownership and current production observation
+
+The project owner explicitly accepted responsibility as the rollout owner. The production observation supplied for this pass identifies project `platen-production`, environment `production`, backend service `pdfnest-backend`, region `asia-southeast1-eqsg3a`, and one backend replica. `BILLING_MODE` is currently absent, so the backend's effective mode is the normal default. No production free-mode rollout occurred during verification. For any future free-mode rollout or rollback, the rollout owner must set the same `BILLING_MODE` on every backend replica and verify each instance's session policy through approved infrastructure tooling.
+
+### Final GIM-12 disposition
+
+With the exact R2 object reconciled, the historical OCR risk explicitly accepted, the rollout owner assigned, and the live transition/security/resource gates plus complete local regression suites recorded above, the GIM-12 verification evidence is **closed for issue completion**. This is not a claim that the historical OCR root cause was found or fixed, and it is not authorization to deploy or to enable free mode. The recommendation is to mark GIM-12 Done; code integration, PR review, staging, and any later rollout remain separate actions.
