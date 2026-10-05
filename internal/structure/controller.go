@@ -580,6 +580,17 @@ func (ctrl *Controller) Crop(c *fiber.Ctx) error {
 	return err
 }
 
+func duplicateProcessingLimits(policy config.BillingPolicy, tier, status string) (maxPages, maxCopies int) {
+	if !policy.ProcessingUnitLimitsEnforced {
+		return 50, 10
+	}
+
+	if status == "active" && tier == "pro" {
+		return 50, 10
+	}
+	return 5, 2
+}
+
 func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 	var userID string
 	if uid, ok := c.Locals("user_id").(string); ok {
@@ -600,20 +611,24 @@ func (ctrl *Controller) Duplicate(c *fiber.Ctx) error {
 		copies = 1
 	}
 
-	maxPages := 5
-	maxCopies := 2
+	policy, err := config.CurrentBillingPolicy()
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
+			Code:    "BILLING_POLICY_UNAVAILABLE",
+			Message: "Processing policy is currently unavailable.",
+		})
+	}
 
-	var sub config.Subscription
-
-	if err := config.DB.
-		Where("user_id = ? AND status = ?", userID, "active").
-		First(&sub).Error; err == nil {
-
-		if sub.Tier == "pro" {
-			maxPages = 50
-			maxCopies = 10
+	tier, status := "", ""
+	if policy.ProcessingUnitLimitsEnforced {
+		var sub config.Subscription
+		if err := config.DB.
+			Where("user_id = ? AND status = ?", userID, "active").
+			First(&sub).Error; err == nil {
+			tier, status = sub.Tier, sub.Status
 		}
 	}
+	maxPages, maxCopies := duplicateProcessingLimits(policy, tier, status)
 
 	selectedPages := 0
 
