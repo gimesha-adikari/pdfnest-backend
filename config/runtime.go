@@ -24,6 +24,10 @@ func ManagedEnvironmentName() string {
 }
 
 func ValidateRuntimeConfig() error {
+	if _, err := CurrentBillingMode(); err != nil {
+		return err
+	}
+
 	if !IsManagedEnvironment() {
 		return nil
 	}

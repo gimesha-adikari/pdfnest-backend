@@ -48,6 +48,9 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found; using Render environment variables.")
 	}
+	if err := config.ValidateRuntimeConfig(); err != nil {
+		log.Fatalf("Invalid runtime configuration: %v", err)
+	}
 	if !storage.RemoteStorageEnabled() {
 		log.Printf("[OCR V2 STORAGE] local filesystem storage enabled at %s", storage.GetLocalStorageDir())
 	}
