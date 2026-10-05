@@ -79,8 +79,10 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 
 	identityType, _ := c.Locals(identity.LocalIdentityType).(string)
 	var reservationID string
+	reservationKind := billing.ReservationKindDatabase
 
 	if identityType == string(identity.TypeGuest) {
+		reservationKind = billing.ReservationKindGuest
 		ctx := identity.RequestContext(c)
 		gres, err := reservePDFToMarkdownGuest(ctx, ownerIdentity, pages, images, c.Path())
 		if err != nil {
@@ -148,7 +150,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	}
 
 	downloadToken := uuid.New().String()
-	_, _ = tasks.Registry.SetWithDownloadToken(taskId, "QUEUED", 0, "", "PDF to Markdown job queued", ownerIdentity, downloadToken, reservationID)
+	_, _ = tasks.Registry.SetWithDownloadToken(taskId, "QUEUED", 0, "", "PDF to Markdown job queued", ownerIdentity, downloadToken, reservationID, string(reservationKind))
 
 	payload := map[string]interface{}{
 		"actor_name": "pdf_to_markdown_job",
@@ -165,13 +167,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	}
 
 	releaseReservation := func() {
-		if identityType == string(identity.TypeGuest) {
-			if billing.GuestQuota != nil {
-				_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
-			}
-		} else {
-			_ = billing.Default.Release(reservationID)
-		}
+		_ = billing.Default.ReleaseAsync(identity.RequestContext(c), reservationID, reservationKind)
 	}
 
 	jsonBytes, err := json.Marshal(payload)

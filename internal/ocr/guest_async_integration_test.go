@@ -32,14 +32,23 @@ import (
 // submission, real task creation, a controlled worker response, local
 // artifact persistence, guest billing finalization, and task completion.
 func TestGuestAsyncRequestPostFixSuccess(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	db, client := setupGuestAsyncIntegration(t)
 	if db == nil || client == nil {
 		t.Skip("isolated local PostgreSQL/Redis are required")
 	}
 
+	workerStarted := make(chan struct{}, 1)
+	continueWorker := make(chan struct{})
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/ocr/extract-text" {
 			http.NotFound(w, r)
+			return
+		}
+		workerStarted <- struct{}{}
+		select {
+		case <-continueWorker:
+		case <-r.Context().Done():
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -108,6 +117,13 @@ func TestGuestAsyncRequestPostFixSuccess(t *testing.T) {
 	if submitted.TaskID == "" {
 		t.Fatal("expected task ID")
 	}
+	select {
+	case <-workerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not receive the successful completion fixture")
+	}
+	t.Setenv("BILLING_MODE", "free")
+	close(continueWorker)
 
 	deadline := time.Now().Add(10 * time.Second)
 	var task *tasks.TaskStatus
@@ -156,16 +172,21 @@ func TestGuestAsyncRequestPostFixSuccess(t *testing.T) {
 }
 
 func TestGuestAsyncRequestWorkerFailureReleasesQuota(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	db, client := setupGuestAsyncIntegration(t)
 	if db == nil || client == nil {
 		t.Skip("isolated local PostgreSQL/Redis are required")
 	}
 
+	workerStarted := make(chan struct{}, 1)
+	continueWorker := make(chan struct{})
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/ocr/extract-text" {
 			http.NotFound(w, r)
 			return
 		}
+		workerStarted <- struct{}{}
+		<-continueWorker
 		http.Error(w, "controlled worker failure", http.StatusBadGateway)
 	}))
 	defer worker.Close()
@@ -174,6 +195,13 @@ func TestGuestAsyncRequestWorkerFailureReleasesQuota(t *testing.T) {
 	guestID := uuid.NewString()
 	app := newGuestAsyncTestApp(guestID)
 	taskID := submitGuestAsyncTestTask(t, app)
+	select {
+	case <-workerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not receive the controlled failure fixture")
+	}
+	t.Setenv("BILLING_MODE", "free")
+	close(continueWorker)
 	task := waitForGuestAsyncTerminalTask(t, taskID)
 	if task.Status != "FAILED" {
 		t.Fatalf("expected failed task after worker failure, got status=%s error=%q", task.Status, task.Error)
@@ -195,6 +223,7 @@ func TestGuestAsyncRequestWorkerFailureReleasesQuota(t *testing.T) {
 }
 
 func TestGuestAsyncRequestCancellationReleasesQuota(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	db, client := setupGuestAsyncIntegration(t)
 	if db == nil || client == nil {
 		t.Skip("isolated local PostgreSQL/Redis are required")
@@ -226,6 +255,7 @@ func TestGuestAsyncRequestCancellationReleasesQuota(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not receive the controlled cancellation fixture")
 	}
+	t.Setenv("BILLING_MODE", "free")
 
 	result, task, err := tasks.Registry.CancelTask(taskID, guestID)
 	if err != nil {

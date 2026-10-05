@@ -294,6 +294,20 @@ func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) err
 	})
 }
 
+func (s *GuestQuotaStore) hasReservation(ctx context.Context, reservationID string) (bool, error) {
+	if s == nil || s.rdb == nil {
+		return false, ErrGuestQuotaStoreUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	exists, err := s.rdb.Exists(ctx, s.resKey(reservationID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists > 0, nil
+}
+
 func watchReservation(ctx context.Context, client *redis.Client, keys []string, fn func(*redis.Tx) error) error {
 	var err error
 	for attempt := 0; attempt < 16; attempt++ {

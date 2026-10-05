@@ -31,6 +31,7 @@ var (
 	ErrBillingBlocked             = errors.New("billing quota exceeded")
 	ErrBillingMissing             = errors.New("subscription data not found")
 	ErrGuestQuotaStoreUnavailable = errors.New("guest quota store not configured")
+	ErrReservationKindAmbiguous   = errors.New("asynchronous reservation exists in both billing stores")
 )
 
 // ReservationKind identifies the state store that owns an asynchronous
@@ -137,6 +138,19 @@ func (s *Service) CommitAsync(ctx context.Context, reservationID string, kind Re
 	if reservationID == "" {
 		return nil
 	}
+	if kind == "" {
+		resolvedKind, exists, err := s.resolveReservationKind(ctx, reservationID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			// Guest finalization treats an absent or expired reservation key as
+			// already settled. Database reservations remain persisted after
+			// settlement, so an absent match cannot be a normally settled DB row.
+			return nil
+		}
+		kind = resolvedKind
+	}
 
 	switch kind {
 	case ReservationKindGuest:
@@ -159,6 +173,19 @@ func (s *Service) ReleaseAsync(ctx context.Context, reservationID string, kind R
 	if reservationID == "" {
 		return nil
 	}
+	if kind == "" {
+		resolvedKind, exists, err := s.resolveReservationKind(ctx, reservationID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			// Guest finalization treats an absent or expired reservation key as
+			// already settled. Database reservations remain persisted after
+			// settlement, so an absent match cannot be a normally settled DB row.
+			return nil
+		}
+		kind = resolvedKind
+	}
 
 	switch kind {
 	case ReservationKindGuest:
@@ -174,6 +201,45 @@ func (s *Service) ReleaseAsync(ctx context.Context, reservationID string, kind R
 	default:
 		return fmt.Errorf("unknown asynchronous reservation kind %q", kind)
 	}
+}
+
+// resolveReservationKind handles task metadata written before reservationKind
+// was persisted. Both stores must be checked successfully: selecting a store
+// while the other is unavailable could settle an ambiguous ID incorrectly.
+// The current operating mode and task identity are intentionally irrelevant.
+func (s *Service) resolveReservationKind(ctx context.Context, reservationID string) (ReservationKind, bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if config.DB == nil {
+		return "", false, errors.New("billing database not configured")
+	}
+	if GuestQuota == nil {
+		return "", false, ErrGuestQuotaStoreUnavailable
+	}
+
+	var databaseMatches int64
+	if err := config.DB.WithContext(ctx).
+		Model(&config.BillingReservation{}).
+		Where("id = ?", reservationID).
+		Count(&databaseMatches).Error; err != nil {
+		return "", false, fmt.Errorf("check database reservation ownership: %w", err)
+	}
+	guestMatches, err := GuestQuota.hasReservation(ctx, reservationID)
+	if err != nil {
+		return "", false, fmt.Errorf("check guest reservation ownership: %w", err)
+	}
+
+	if databaseMatches > 0 && guestMatches {
+		return "", false, fmt.Errorf("%w: %s", ErrReservationKindAmbiguous, reservationID)
+	}
+	if databaseMatches > 0 {
+		return ReservationKindDatabase, true, nil
+	}
+	if guestMatches {
+		return ReservationKindGuest, true, nil
+	}
+	return "", false, nil
 }
 
 func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int, requestPath string, taskID string) (*config.BillingReservation, error) {
