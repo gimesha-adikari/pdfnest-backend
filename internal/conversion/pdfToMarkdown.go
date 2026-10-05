@@ -2,6 +2,7 @@ package conversion
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
+
+func reservePDFToMarkdownGuest(ctx context.Context, ownerIdentity string, pages, images int, requestPath string) (*billing.GuestReservation, error) {
+	return billing.Default.ReserveGuest(ctx, ownerIdentity, billing.ConvertPDFToMarkdown, pages, images, requestPath)
+}
 
 func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	var userID string
@@ -76,17 +81,16 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	var reservationID string
 
 	if identityType == string(identity.TypeGuest) {
-		if billing.GuestQuota == nil {
-			idempotency.Release(c, nil)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"code":    "CONFIG_ERR",
-				"message": "Guest quota service unavailable",
-			})
-		}
 		ctx := identity.RequestContext(c)
-		gres, err := billing.GuestQuota.Reserve(ctx, ownerIdentity, billing.ConvertPDFToMarkdown, pages, images, c.Path())
+		gres, err := reservePDFToMarkdownGuest(ctx, ownerIdentity, pages, images, c.Path())
 		if err != nil {
 			idempotency.Release(c, nil)
+			if errors.Is(err, billing.ErrGuestQuotaStoreUnavailable) {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"code":    "CONFIG_ERR",
+					"message": "Guest quota service unavailable",
+				})
+			}
 			var berr *billing.BillingError
 			if errors.As(err, &berr) {
 				berr.Tool = billing.ConvertPDFToMarkdown.Name

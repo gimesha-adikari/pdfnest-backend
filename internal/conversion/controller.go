@@ -481,12 +481,8 @@ func reserveAsyncBilling(
 	taskID string,
 ) (*asyncBillingLease, error) {
 	if identityType == string(identity.TypeGuest) {
-		if billing.GuestQuota == nil {
-			return nil, fmt.Errorf("guest quota store not configured")
-		}
-
 		reserveCtx := identity.RequestContext(c)
-		reservation, err := billing.GuestQuota.Reserve(reserveCtx, identity.GuestQuotaKey(c, identityID), tool, pages, images, path)
+		reservation, err := billing.Default.ReserveGuest(reserveCtx, identity.GuestQuotaKey(c, identityID), tool, pages, images, path)
 		if err != nil {
 			return nil, err
 		}

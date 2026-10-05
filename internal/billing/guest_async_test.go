@@ -15,6 +15,7 @@ import (
 )
 
 func TestAuthenticatedAsyncReservationStillUsesDatabaseBilling(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	db := setupTestDB(t)
 	if db == nil {
 		t.Skip("isolated PostgreSQL is required")
@@ -44,6 +45,7 @@ func TestAuthenticatedAsyncReservationStillUsesDatabaseBilling(t *testing.T) {
 }
 
 func TestGuestAsyncReservationFinalizationIsExactOnce(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer client.Close()
@@ -106,6 +108,7 @@ func TestGuestAsyncReservationFinalizationIsExactOnce(t *testing.T) {
 }
 
 func TestGuestAsyncReservationFailureReleasesAndPreservesQuota(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer client.Close()
@@ -137,6 +140,7 @@ func TestGuestAsyncReservationFailureReleasesAndPreservesQuota(t *testing.T) {
 }
 
 func TestGuestAsyncReservationPreservesQuotaExhaustion(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	defer client.Close()

@@ -28,8 +28,9 @@ func NewService() *Service {
 }
 
 var (
-	ErrBillingBlocked = errors.New("billing quota exceeded")
-	ErrBillingMissing = errors.New("subscription data not found")
+	ErrBillingBlocked             = errors.New("billing quota exceeded")
+	ErrBillingMissing             = errors.New("subscription data not found")
+	ErrGuestQuotaStoreUnavailable = errors.New("guest quota store not configured")
 )
 
 // ReservationKind identifies the state store that owns an asynchronous
@@ -59,6 +60,57 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 	return s.ReserveWithTaskID(userID, tool, pages, images, requestPath, "")
 }
 
+// ReserveGuest is the guest billing allocation boundary shared by middleware
+// and direct async conversion callers. Free mode returns an empty-ID allocation
+// before requiring the Redis-backed billing quota store.
+func (s *Service) ReserveGuest(ctx context.Context, guestID string, tool Tool, pages, images int, requestPath string) (*GuestReservation, error) {
+	return s.reserveGuest(ctx, guestID, tool, pages, images, requestPath, false)
+}
+
+// validateGuestQuotaDependency preserves the normal-mode middleware failure
+// order while allowing free mode to proceed without the billing-only store.
+func (s *Service) validateGuestQuotaDependency() error {
+	mode, err := config.CurrentBillingMode()
+	if err != nil {
+		return err
+	}
+	if mode != config.BillingModeFree && GuestQuota == nil {
+		return ErrGuestQuotaStoreUnavailable
+	}
+	return nil
+}
+
+func (s *Service) reserveGuest(ctx context.Context, guestID string, tool Tool, pages, images int, requestPath string, async bool) (*GuestReservation, error) {
+	if strings.TrimSpace(guestID) == "" {
+		return nil, NewBillingError(
+			ErrUnknownBilling,
+			"Billing error",
+			"Unable to process request.",
+			"",
+			"",
+			0,
+		)
+	}
+
+	mode, err := config.CurrentBillingMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == config.BillingModeFree {
+		return &GuestReservation{GuestID: guestID, ToolName: tool.Name}, nil
+	}
+	if GuestQuota == nil {
+		return nil, ErrGuestQuotaStoreUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if async {
+		return GuestQuota.ReserveAsync(ctx, guestID, tool, pages, images, requestPath)
+	}
+	return GuestQuota.Reserve(ctx, guestID, tool, pages, images, requestPath)
+}
+
 // ReserveAsync reserves usage in the store appropriate for the identity. A
 // non-empty guestQuotaID is supplied only for guest requests; authenticated
 // requests continue through the existing PostgreSQL subscription/reservation
@@ -66,13 +118,7 @@ func (s *Service) Reserve(userID string, tool Tool, pages, images int, requestPa
 // CommitAsync/ReleaseAsync.
 func (s *Service) ReserveAsync(ctx context.Context, userID, guestQuotaID string, tool Tool, pages, images int, requestPath, taskID string) (*AsyncReservation, error) {
 	if strings.TrimSpace(guestQuotaID) != "" {
-		if GuestQuota == nil {
-			return nil, errors.New("guest quota store not configured")
-		}
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		reservation, err := GuestQuota.ReserveAsync(ctx, guestQuotaID, tool, pages, images, requestPath)
+		reservation, err := s.reserveGuest(ctx, guestQuotaID, tool, pages, images, requestPath, true)
 		if err != nil {
 			return nil, err
 		}
@@ -131,12 +177,27 @@ func (s *Service) ReleaseAsync(ctx context.Context, reservationID string, kind R
 }
 
 func (s *Service) ReserveWithTaskID(userID string, tool Tool, pages, images int, requestPath string, taskID string) (*config.BillingReservation, error) {
+	mode, err := config.CurrentBillingMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == config.BillingModeFree {
+		return &config.BillingReservation{
+			UserID:      userID,
+			TaskID:      taskID,
+			ToolName:    tool.Name,
+			PagesCount:  pages,
+			ImagesCount: images,
+			RequestPath: requestPath,
+		}, nil
+	}
+
 	now := time.Now()
 	units := tool.Units(pages, images)
 
 	var reservation *config.BillingReservation
 
-	err := config.DB.Transaction(func(tx *gorm.DB) error {
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
 		var userRecord config.User
 		isRegisteredUser := (tx.Where("id = ?", userID).First(&userRecord).Error == nil)
 

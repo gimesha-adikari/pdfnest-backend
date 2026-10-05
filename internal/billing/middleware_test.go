@@ -16,6 +16,7 @@ import (
 )
 
 func TestGuestOwnershipIsolationPreservesQuota(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	oldQuota, oldStore := GuestQuota, identity.DefaultStore
@@ -122,5 +123,39 @@ func TestBillingMiddleware_GuestExhaustedQuota(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&body)
 	if body["code"] != string(ErrHourlyLimit) {
 		t.Errorf("expected error code %s, got %v", ErrHourlyLimit, body["code"])
+	}
+}
+
+func TestNormalModeGuestMiddlewarePreservesUnavailableStoreErrorPriority(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	previousQuota := GuestQuota
+	GuestQuota = nil
+	t.Cleanup(func() { GuestQuota = previousQuota })
+
+	estimateCalled := false
+	tool := Tool{Name: "guest_store_priority", Estimate: func(*fiber.Ctx) (int, int, error) {
+		estimateCalled = true
+		return 0, 0, errors.New("synthetic estimate failure")
+	}}
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals(identity.LocalIdentityType, string(identity.TypeGuest))
+		c.Locals(identity.LocalIdentityIDKey, "guest-no-quota-store")
+		return c.Next()
+	})
+	app.Post("/operation", UseGuestOnly(tool), func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusAccepted)
+	})
+
+	response, err := app.Test(httptest.NewRequest("POST", "/operation", nil))
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("expected missing guest billing store to remain a 500, got %d", response.StatusCode)
+	}
+	if estimateCalled {
+		t.Fatal("normal mode should preserve the existing store check before estimation")
 	}
 }
