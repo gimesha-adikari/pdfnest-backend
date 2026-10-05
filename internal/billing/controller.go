@@ -23,7 +23,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type Controller struct{}
+type Controller struct {
+	// A nil preparer uses ensureSubscriptionRow; checkout tests can inject a
+	// counter to verify policy ordering without requiring PostgreSQL.
+	prepareCheckoutSubscription func(string) (*config.Subscription, error)
+}
 
 func NewController() *Controller {
 	return &Controller{}

@@ -46,6 +46,11 @@ type paddleTransactionCreateResponse struct {
 	} `json:"data"`
 }
 
+const (
+	purchasesDisabledCode        = "PURCHASES_DISABLED"
+	billingPolicyUnavailableCode = "BILLING_POLICY_UNAVAILABLE"
+)
+
 func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
 	userID, _ := c.Locals("user_id").(string)
 	if strings.TrimSpace(userID) == "" {
@@ -74,8 +79,15 @@ func (ctrl *Controller) CreateCheckout(c *fiber.Ctx) error {
 			"error": "missing price id for selected plan",
 		})
 	}
+	allowed, err := checkoutPolicyAllowsPurchases(c)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return nil
+	}
 
-	if _, err := ensureSubscriptionRow(userID); err != nil {
+	if _, err := ctrl.prepareSubscriptionForCheckout(userID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to prepare subscription record",
 		})
@@ -122,8 +134,15 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 			"error": "missing price id for selected credit pack",
 		})
 	}
+	allowed, err := checkoutPolicyAllowsPurchases(c)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return nil
+	}
 
-	if _, err := ensureSubscriptionRow(userID); err != nil {
+	if _, err := ctrl.prepareSubscriptionForCheckout(userID); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to prepare subscription record",
 		})
@@ -146,6 +165,30 @@ func (ctrl *Controller) CreateCreditCheckout(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"checkout_url": checkoutURL,
 	})
+}
+
+func checkoutPolicyAllowsPurchases(c *fiber.Ctx) (bool, error) {
+	policy, err := config.CurrentBillingPolicy()
+	if err != nil {
+		return false, c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"code":    billingPolicyUnavailableCode,
+			"message": "Billing is temporarily unavailable.",
+		})
+	}
+	if !policy.PurchasesEnabled {
+		return false, c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"code":    purchasesDisabledCode,
+			"message": "New purchases are currently disabled while processing is free.",
+		})
+	}
+	return true, nil
+}
+
+func (ctrl *Controller) prepareSubscriptionForCheckout(userID string) (*config.Subscription, error) {
+	if ctrl != nil && ctrl.prepareCheckoutSubscription != nil {
+		return ctrl.prepareCheckoutSubscription(userID)
+	}
+	return ensureSubscriptionRow(userID)
 }
 
 func createPaddleTransactionCheckout(priceID string, customData map[string]any) (string, string, error) {

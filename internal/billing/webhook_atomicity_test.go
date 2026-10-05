@@ -7,17 +7,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 	"log"
+	"net/http"
 	"net/http/httptest"
-	"pdfnest-backend/config"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"pdfnest-backend/config"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func signedWebhook(t *testing.T, app *fiber.App, body []byte) int {
@@ -91,6 +94,53 @@ func TestWebhookDoesNotLogPayloadOrSignature(t *testing.T) {
 	require.Equal(t, 401, resp.StatusCode)
 	require.NotContains(t, capture.String(), "private-payload-sentinel")
 	require.NotContains(t, capture.String(), "private-signature-sentinel")
+}
+
+func TestWebhookStillProcessesPreexistingPurchaseInFreeMode(t *testing.T) {
+	t.Setenv("BILLING_MODE", "free")
+	t.Setenv("PADDLE_WEBHOOK_SECRET", "test-webhook-secret")
+	db := setupGIM6IsolatedTestDB(t)
+	require.NoError(t, db.AutoMigrate(&config.Transaction{}, &config.WebhookLog{}))
+	userID := createCheckoutTestUser(t, db)
+	subscriptionID := uuid.NewString()
+	now := time.Now()
+	require.NoError(t, db.Create(&config.Subscription{
+		ID: subscriptionID, UserID: userID, PaddleCustomerID: "ctm_" + uuid.NewString(),
+		PaddleSubscriptionID: "sub_" + uuid.NewString(), Tier: "free", Status: "active",
+		CurrentPeriodEnd: now.AddDate(0, 1, 0), Window3HResetAt: now.Add(time.Hour),
+		WindowDailyResetAt: now.Add(24 * time.Hour), WindowMonthlyResetAt: now.AddDate(0, 1, 0),
+		CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	eventID := "evt_" + uuid.NewString()
+	body, err := json.Marshal(map[string]any{
+		"event_id":   eventID,
+		"event_type": "transaction.completed",
+		"data": map[string]any{
+			"id":            "txn_" + uuid.NewString(),
+			"customer_id":   "ctm_test",
+			"currency_code": "USD",
+			"custom_data": map[string]any{
+				"user_id":       userID,
+				"purchase_type": "credits",
+				"package_type":  "addon_pack_20",
+			},
+			"details": map[string]any{"totals": map[string]any{"total": "500", "currency_code": "USD"}},
+		},
+	})
+	require.NoError(t, err)
+	app := fiber.New()
+	app.Post("/webhook", NewController().HandleWebhook)
+
+	require.Equal(t, http.StatusOK, signedWebhook(t, app, body))
+	var subscription config.Subscription
+	require.NoError(t, db.Where("user_id = ?", userID).First(&subscription).Error)
+	require.Equal(t, 20, subscription.CustomCredits, "a preexisting transaction must still synchronize in free mode")
+	var transactionCount, eventCount int64
+	require.NoError(t, db.Model(&config.Transaction{}).Where("user_id = ?", userID).Count(&transactionCount).Error)
+	require.NoError(t, db.Model(&config.WebhookLog{}).Where("event_id = ?", eventID).Count(&eventCount).Error)
+	require.EqualValues(t, 1, transactionCount)
+	require.EqualValues(t, 1, eventCount)
 }
 
 func TestWebhookSignatureFreshnessAndRotation(t *testing.T) {
