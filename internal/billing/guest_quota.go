@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"pdfnest-backend/config"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,14 @@ func (s *GuestQuotaStore) reserveWithLimits(ctx context.Context, guestID string,
 		)
 	}
 
+	mode, err := config.CurrentBillingMode()
+	if err != nil {
+		return nil, err
+	}
+	if mode == config.BillingModeFree {
+		return &GuestReservation{GuestID: guestID, ToolName: tool.Name}, nil
+	}
+
 	units := tool.Units(pages, images)
 	now := time.Now()
 	stateKey := s.stateKey(guestID)
@@ -101,7 +110,7 @@ func (s *GuestQuotaStore) reserveWithLimits(ctx context.Context, guestID string,
 
 	var limitErr error
 
-	err := s.rdb.Watch(ctx, func(tx *redis.Tx) error {
+	err = s.rdb.Watch(ctx, func(tx *redis.Tx) error {
 		state, err := s.loadState(ctx, tx, guestID)
 		if err != nil {
 			return err
@@ -159,6 +168,13 @@ func (s *GuestQuotaStore) reserveWithLimits(ctx context.Context, guestID string,
 }
 
 func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) error {
+	if strings.TrimSpace(reservationID) == "" {
+		return nil
+	}
+	if s == nil || s.rdb == nil {
+		return ErrGuestQuotaStoreUnavailable
+	}
+
 	res, err := s.loadReservation(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -218,6 +234,13 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 }
 
 func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) error {
+	if strings.TrimSpace(reservationID) == "" {
+		return nil
+	}
+	if s == nil || s.rdb == nil {
+		return ErrGuestQuotaStoreUnavailable
+	}
+
 	res, err := s.loadReservation(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -269,6 +292,20 @@ func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) err
 		})
 		return err
 	})
+}
+
+func (s *GuestQuotaStore) hasReservation(ctx context.Context, reservationID string) (bool, error) {
+	if s == nil || s.rdb == nil {
+		return false, ErrGuestQuotaStoreUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	exists, err := s.rdb.Exists(ctx, s.resKey(reservationID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists > 0, nil
 }
 
 func watchReservation(ctx context.Context, client *redis.Client, keys []string, fn func(*redis.Tx) error) error {

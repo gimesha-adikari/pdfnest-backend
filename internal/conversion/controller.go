@@ -465,9 +465,10 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 }
 
 type asyncBillingLease struct {
-	reservationID string
-	settle        func()
-	commit        func() error
+	reservationID   string
+	reservationKind billing.ReservationKind
+	settle          func()
+	commit          func() error
 }
 
 func reserveAsyncBilling(
@@ -481,26 +482,22 @@ func reserveAsyncBilling(
 	taskID string,
 ) (*asyncBillingLease, error) {
 	if identityType == string(identity.TypeGuest) {
-		if billing.GuestQuota == nil {
-			return nil, fmt.Errorf("guest quota store not configured")
-		}
-
 		reserveCtx := identity.RequestContext(c)
-		reservation, err := billing.GuestQuota.Reserve(reserveCtx, identity.GuestQuotaKey(c, identityID), tool, pages, images, path)
+		reservation, err := billing.Default.ReserveGuest(reserveCtx, identity.GuestQuotaKey(c, identityID), tool, pages, images, path)
 		if err != nil {
 			return nil, err
 		}
 
-		lease := &asyncBillingLease{reservationID: reservation.ID}
+		lease := &asyncBillingLease{reservationID: reservation.ID, reservationKind: billing.ReservationKindGuest}
 		lease.settle = func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			_ = billing.GuestQuota.Release(ctx, lease.reservationID)
+			_ = billing.Default.ReleaseAsync(ctx, lease.reservationID, lease.reservationKind)
 		}
 		lease.commit = func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
-			return billing.GuestQuota.Commit(ctx, lease.reservationID)
+			return billing.Default.CommitAsync(ctx, lease.reservationID, lease.reservationKind)
 		}
 		return lease, nil
 	}
@@ -510,12 +507,12 @@ func reserveAsyncBilling(
 		return nil, err
 	}
 
-	lease := &asyncBillingLease{reservationID: reservation.ID}
+	lease := &asyncBillingLease{reservationID: reservation.ID, reservationKind: billing.ReservationKindDatabase}
 	lease.settle = func() {
-		_ = billing.Default.Release(lease.reservationID)
+		_ = billing.Default.ReleaseAsync(context.Background(), lease.reservationID, lease.reservationKind)
 	}
 	lease.commit = func() error {
-		return billing.Default.Commit(lease.reservationID)
+		return billing.Default.CommitAsync(context.Background(), lease.reservationID, lease.reservationKind)
 	}
 	return lease, nil
 }
@@ -581,7 +578,7 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservationID)
+	okCreated, err := tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Allocating sandboxed headless rendering nodes...", ownerIdentity, reservationID, string(lease.reservationKind))
 	if err != nil || !okCreated {
 		lease.settle()
 		idempotency.Release(c, nil)
@@ -790,7 +787,7 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		})
 	}
 
-	okCreated, err := tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity, reservationID)
+	okCreated, err := tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Initializing compilation text nodes...", ownerIdentity, reservationID, string(lease.reservationKind))
 	if err != nil || !okCreated {
 		lease.settle()
 		_ = os.Remove(inputPath)

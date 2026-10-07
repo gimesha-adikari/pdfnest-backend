@@ -174,6 +174,8 @@ var StaleTaskBillingHandler func(reservationID string)
 var CommitTaskBillingHandler func(reservationID string)
 var StaleTaskBillingHandlerWithKind func(reservationID, reservationKind string)
 var CommitTaskBillingHandlerWithKind func(reservationID, reservationKind string)
+var CancelTaskBillingHandler func(reservationID string)
+var CancelTaskBillingHandlerWithKind func(reservationID, reservationKind string)
 
 func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, error) {
 	client := r.getClient()
@@ -581,6 +583,13 @@ func handleCancelTask(c *fiber.Ctx) error {
 			"code":    "FORBIDDEN",
 			"message": "You are not authorized to cancel this task.",
 		})
+	}
+	if result == "CANCELLED_SUCCESS" && task != nil && task.ReservationID != "" {
+		if CancelTaskBillingHandlerWithKind != nil {
+			CancelTaskBillingHandlerWithKind(task.ReservationID, task.ReservationKind)
+		} else if CancelTaskBillingHandler != nil {
+			CancelTaskBillingHandler(task.ReservationID)
+		}
 	}
 
 	return c.JSON(task)

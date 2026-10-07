@@ -67,7 +67,7 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 		})
 	}
 
-	_, _ = tasks.Registry.SetWithKey(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID)
+	_, _ = tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID, string(billing.ReservationKindDatabase))
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
 		taskCtx, taskCancel := context.WithCancel(context.Background())

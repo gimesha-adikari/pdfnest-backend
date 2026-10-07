@@ -2,9 +2,11 @@ package conversion
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"pdfnest-backend/internal/billing"
@@ -20,6 +22,10 @@ import (
 	"github.com/google/uuid"
 )
 
+func reservePDFToMarkdownGuest(ctx context.Context, ownerIdentity string, pages, images int, requestPath string) (*billing.GuestReservation, error) {
+	return billing.Default.ReserveGuest(ctx, ownerIdentity, billing.ConvertPDFToMarkdown, pages, images, requestPath)
+}
+
 func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	var userID string
 	if uid, ok := c.Locals(identity.LocalUserIDKey).(string); ok && uid != "" {
@@ -27,6 +33,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	} else if iid, ok := c.Locals(identity.LocalIdentityIDKey).(string); ok && iid != "" {
 		userID = iid
 	} else {
+		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "IDENTITY_MISSING",
 			"message": "Unable to determine user identity",
@@ -40,6 +47,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 
 	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
+		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "MISSING_FILE",
 			"message": "No valid PDF file uploaded",
@@ -47,6 +55,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	}
 
 	if _, err := uploads.CheckPDFPageLimit(upload.Path, "MAX_PAGES_CONVERT", 150); err != nil {
+		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"code":    "PAGE_LIMIT_EXCEEDED",
 			"message": err.Error(),
@@ -74,19 +83,20 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 
 	identityType, _ := c.Locals(identity.LocalIdentityType).(string)
 	var reservationID string
+	reservationKind := billing.ReservationKindDatabase
 
 	if identityType == string(identity.TypeGuest) {
-		if billing.GuestQuota == nil {
-			idempotency.Release(c, nil)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"code":    "CONFIG_ERR",
-				"message": "Guest quota service unavailable",
-			})
-		}
+		reservationKind = billing.ReservationKindGuest
 		ctx := identity.RequestContext(c)
-		gres, err := billing.GuestQuota.Reserve(ctx, ownerIdentity, billing.ConvertPDFToMarkdown, pages, images, c.Path())
+		gres, err := reservePDFToMarkdownGuest(ctx, ownerIdentity, pages, images, c.Path())
 		if err != nil {
 			idempotency.Release(c, nil)
+			if errors.Is(err, billing.ErrGuestQuotaStoreUnavailable) {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"code":    "CONFIG_ERR",
+					"message": "Guest quota service unavailable",
+				})
+			}
 			var berr *billing.BillingError
 			if errors.As(err, &berr) {
 				berr.Tool = billing.ConvertPDFToMarkdown.Name
@@ -144,7 +154,22 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	}
 
 	downloadToken := uuid.New().String()
-	_, _ = tasks.Registry.SetWithDownloadToken(taskId, "QUEUED", 0, "", "PDF to Markdown job queued", ownerIdentity, downloadToken, reservationID)
+	taskCreated, taskErr := tasks.Registry.SetWithDownloadToken(taskId, "QUEUED", 0, "", "PDF to Markdown job queued", ownerIdentity, downloadToken, reservationID, string(reservationKind))
+	if taskErr != nil || !taskCreated {
+		if identityType == string(identity.TypeGuest) {
+			_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
+		} else {
+			_ = billing.Default.Release(reservationID)
+		}
+		if cleanupErr := r2Store.DeleteObject(context.Background(), sourceKey); cleanupErr != nil {
+			log.Printf("[PDF TO MARKDOWN CLEANUP] source object cleanup failed for task %s: %v", taskId, cleanupErr)
+		}
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"code":    "TASK_STORAGE_UNAVAILABLE",
+			"message": "Task persistence service is temporarily unavailable.",
+		})
+	}
 
 	payload := map[string]interface{}{
 		"actor_name": "pdf_to_markdown_job",
@@ -161,13 +186,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 	}
 
 	releaseReservation := func() {
-		if identityType == string(identity.TypeGuest) {
-			if billing.GuestQuota != nil {
-				_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
-			}
-		} else {
-			_ = billing.Default.Release(reservationID)
-		}
+		_ = billing.Default.ReleaseAsync(identity.RequestContext(c), reservationID, reservationKind)
 	}
 
 	jsonBytes, err := json.Marshal(payload)
@@ -211,6 +230,9 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 		})
 	}
 	defer resp.Body.Close()
+	if err := idempotency.SetTaskID(c, taskId, nil); err != nil {
+		log.Printf("[PDF TO MARKDOWN IDEMPOTENCY] failed to save task ID %s: %v", taskId, err)
+	}
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"success":       true,

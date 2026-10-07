@@ -57,5 +57,5 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	conversionGroup.Post("/pdf-to-powerpoint", billing.Use(billing.ConvertPDFToPowerPoint), ConvertPdfToOfficeHandler("pptx"))
 
 	conversionGroup.Post("/pdf-to-markdown-async", idempotency.Use(nil), ctrl.HandleAsyncPDFToMarkdown)
-	conversionGroup.Post("/pdf-to-markdown", billing.Use(billing.ConvertPDFToMarkdown), ctrl.HandleAsyncPDFToMarkdown)
+	conversionGroup.Post("/pdf-to-markdown", idempotency.Use(nil), ctrl.HandleAsyncPDFToMarkdown)
 }

@@ -14,7 +14,16 @@ func TestManagedRuntimeRejectsMissingValues(t *testing.T) {
 
 func TestDevelopmentRuntimeKeepsLocalFallbacks(t *testing.T) {
 	t.Setenv("APP_ENV", "development")
+	t.Setenv("BILLING_MODE", "normal")
 	if err := ValidateRuntimeConfig(); err != nil {
 		t.Fatalf("development fallback should remain available: %v", err)
+	}
+}
+
+func TestDevelopmentRuntimeRejectsInvalidBillingMode(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("BILLING_MODE", "unlimited")
+	if err := ValidateRuntimeConfig(); err == nil {
+		t.Fatal("expected development runtime validation to reject an invalid BILLING_MODE")
 	}
 }

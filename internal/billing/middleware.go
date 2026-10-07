@@ -93,10 +93,12 @@ func UseGuestOnly(tool Tool) fiber.Handler {
 }
 
 func runGuestQuota(c *fiber.Ctx, tool Tool, identityID string) error {
-	if GuestQuota == nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "guest quota store not configured",
-		})
+	if err := Default.validateGuestQuotaDependency(); err != nil {
+		message := err.Error()
+		if errors.Is(err, ErrGuestQuotaStoreUnavailable) {
+			message = "guest quota store not configured"
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": message})
 	}
 
 	pages, images, err := EstimateFromRequest(c, tool)
@@ -105,8 +107,13 @@ func runGuestQuota(c *fiber.Ctx, tool Tool, identityID string) error {
 	}
 
 	ctx := identity.RequestContext(c)
-	reservation, err := GuestQuota.Reserve(ctx, identity.GuestQuotaKey(c, identityID), tool, pages, images, c.Path())
+	reservation, err := Default.ReserveGuest(ctx, identity.GuestQuotaKey(c, identityID), tool, pages, images, c.Path())
 	if err != nil {
+		if errors.Is(err, ErrGuestQuotaStoreUnavailable) {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "guest quota store not configured",
+			})
+		}
 		var berr *BillingError
 		if errors.As(err, &berr) {
 			berr.Tool = tool.Name
@@ -123,6 +130,9 @@ func runGuestQuota(c *fiber.Ctx, tool Tool, identityID string) error {
 	c.Locals("billing_reservation_id", reservation.ID)
 	c.Locals("billing_tool", tool.Name)
 	c.Locals("billing_kind", "guest")
+	if reservation.ID == "" {
+		c.Locals("consumed_via_credit", false)
+	}
 
 	if err := c.Next(); err != nil {
 		_ = GuestQuota.Release(ctx, reservation.ID)
