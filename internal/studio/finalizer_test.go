@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -353,6 +355,23 @@ func TestStudioFinalizerMaterializeVersionByIDFallsBackForInvalidSnapshots(t *te
 		assert.Nil(t, byID.Asset)
 		assert.FileExists(t, byID.Path)
 	})
+
+	t.Run("malformed stored bytes", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "malformed-snapshot-"+uuid.NewString(), "studio/snapshots/malformed-"+uuid.NewString()+".pdf", initial.PageCount, validObject)
+		cachedVersion, err := repo.GetVersion(context.Background(), version.ID)
+		require.NoError(t, err)
+		snapshot, err := repo.GetSnapshot(context.Background(), *cachedVersion.SnapshotID)
+		require.NoError(t, err)
+		asset, err := repo.GetAsset(context.Background(), snapshot.AssetID)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(asset.R2Key)), []byte("not a PDF"), 0o600))
+		byID := materializeVersionByIDForTest(t, finalizer, session.ID, version.ID, ident)
+		defer byID.Cleanup()
+		assert.Nil(t, byID.Asset, "corrupt cached bytes must fall back to the version VDM")
+		assert.FileExists(t, byID.Path)
+		assert.NoError(t, api.ValidateFile(byID.Path, model.NewDefaultConfiguration()))
+	})
 }
 
 func executeFinalizerCommand(t *testing.T, coordinator OperationCoordinator, sessionID uuid.UUID, ident identity.Identity, baseVersionID uuid.UUID, operation CommandName, parameters interface{}) *ApplyOperationResult {
@@ -412,6 +431,11 @@ func TestStudioFinalizer_MaterializesAuthoritativeVDMAndReusesSnapshot(t *testin
 	assert.InDelta(t, 700, cropBox.UR.Y, 0.01)
 	assert.Equal(t, initial.Pages[2].Dimensions.Width, dimensions[3].Width, "blank page uses authoritative dimensions")
 	assert.Equal(t, initial.Pages[2].Dimensions.Height, dimensions[3].Height)
+	download, err := finalizer.ResolveDownload(ctx, session.ID, exportResult.Export.ID, ident)
+	require.NoError(t, err)
+	defer download.Cleanup()
+	assert.Equal(t, exportResult.Export.VersionID, download.Export.VersionID)
+	assertIndependentStudioExport(t, download.Path, 5)
 
 	sessionState, _, activeVersion, err := service.GetSession(ctx, session.ID, ident)
 	require.NoError(t, err)
@@ -425,13 +449,35 @@ func TestStudioFinalizer_MaterializesAuthoritativeVDMAndReusesSnapshot(t *testin
 	assert.Equal(t, exportResult.Export.R2Key, retryResult.Export.R2Key, "retry reuses the immutable version snapshot")
 }
 
+func assertIndependentStudioExport(t *testing.T, path string, pageCount int) {
+	t.Helper()
+	qpdfPath, qpdfErr := exec.LookPath("qpdf")
+	pdfinfoPath, pdfinfoErr := exec.LookPath("pdfinfo")
+	pdftotextPath, pdftotextErr := exec.LookPath("pdftotext")
+	if qpdfErr != nil || pdfinfoErr != nil || pdftotextErr != nil {
+		t.Log("independent qpdf/pdfinfo/pdftotext tools unavailable; pdfcpu validation remains covered")
+		return
+	}
+	qpdfOutput, err := exec.Command(qpdfPath, "--check", path).CombinedOutput()
+	require.NoError(t, err, "qpdf rejected the downloaded Studio export: %s", qpdfOutput)
+	infoOutput, err := exec.Command(pdfinfoPath, path).CombinedOutput()
+	require.NoError(t, err, "pdfinfo rejected the downloaded Studio export: %s", infoOutput)
+	assert.Contains(t, string(infoOutput), fmt.Sprintf("Pages:           %d", pageCount))
+	assert.Contains(t, string(infoOutput), "Encrypted:       no", "Studio V2 export contract currently produces plaintext PDFs")
+	textOutput, err := exec.Command(pdftotextPath, path, "-").CombinedOutput()
+	require.NoError(t, err, "pdftotext rejected the downloaded Studio export: %s", textOutput)
+	pageTwo := strings.Index(string(textOutput), "PDFNest Studio V2 Benchmark - Page 2 of 10")
+	pageOne := strings.Index(string(textOutput), "PDFNest Studio V2 Benchmark - Page 1 of 10")
+	assert.Greater(t, pageTwo, -1, "reordered source page content should survive export")
+	assert.Greater(t, pageOne, pageTwo, "the export should preserve the VDM's reordered page sequence")
+}
+
 func TestStudioFinalizer_UsesActiveUndoRedoStateAndEnforcesOwnership(t *testing.T) {
-	_, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+	service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
 	coordinator := NewOperationCoordinator(repo)
 	ctx := context.Background()
 
 	rotated := executeFinalizerCommand(t, coordinator, session.ID, ident, version.ID, CommandRotatePage, RotatePageParameters{PageIDs: []string{initial.Pages[0].PageID}, DeltaDegrees: 90})
-	service := NewService(repo)
 	undone, err := service.Undo(ctx, session.ID, ident)
 	require.NoError(t, err)
 	assert.Equal(t, version.ID, undone.ID)
@@ -445,16 +491,53 @@ func TestStudioFinalizer_UsesActiveUndoRedoStateAndEnforcesOwnership(t *testing.
 	redoExport, err := finalizer.Finalize(ctx, session.ID, ident)
 	require.NoError(t, err)
 	assert.Equal(t, rotated.Version.ID, redoExport.Export.VersionID)
+	oldDownload, err := finalizer.ResolveDownload(ctx, session.ID, undoExport.Export.ID, ident)
+	require.NoError(t, err)
+	assert.Equal(t, version.ID, oldDownload.Export.VersionID, "an existing export remains bound to its original immutable version")
+	assert.Equal(t, undoExport.Export.R2Key, oldDownload.Export.R2Key)
+	oldDownload.Cleanup()
 
 	wrongIdentity := identity.Identity{ID: "wrong-" + uuid.NewString(), Type: identity.TypeGuest}
 	_, err = finalizer.Finalize(ctx, session.ID, wrongIdentity)
 	assert.ErrorIs(t, err, ErrUnauthorized)
 	_, err = finalizer.ResolveDownload(ctx, session.ID, redoExport.Export.ID, wrongIdentity)
 	assert.ErrorIs(t, err, ErrUnauthorized)
+	otherIdentity := identity.Identity{ID: "other-guest-" + uuid.NewString(), Type: identity.TypeGuest}
+	otherVDM := *initial
+	otherAssetID := "studio-other-source-" + uuid.NewString()
+	_, otherSession, _, err := service.CreateDocument(ctx, otherIdentity, "other.pdf", 100, initial.PageCount, otherAssetID, "studio/sources/other-"+uuid.NewString()+".pdf", otherVDM)
+	require.NoError(t, err)
+	_, err = finalizer.ResolveDownload(ctx, otherSession.ID, redoExport.Export.ID, otherIdentity)
+	assert.ErrorIs(t, err, ErrUnauthorized, "a different identity and session cannot resolve the export")
+	_, err = finalizer.ResolveDownload(ctx, uuid.New(), redoExport.Export.ID, ident)
+	assert.ErrorIs(t, err, ErrSessionNotFound)
+	_, err = finalizer.ResolveDownload(ctx, session.ID, uuid.New(), ident)
+	assert.ErrorIs(t, err, ErrExportNotFound)
 	download, err := finalizer.ResolveDownload(ctx, session.ID, redoExport.Export.ID, ident)
 	require.NoError(t, err)
 	defer download.Cleanup()
 	assert.True(t, strings.HasSuffix(download.FileName, "-studio.pdf"))
+}
+
+func TestStudioFinalizerRejectsExpiredSessionAndExportDownloads(t *testing.T) {
+	_, repo, finalizer, ident, session, _, _ := finalizerFixture(t)
+	ctx := context.Background()
+	result, err := finalizer.Finalize(ctx, session.ID, ident)
+	require.NoError(t, err)
+
+	concrete, ok := finalizer.(*studioFinalizer)
+	require.True(t, ok)
+	realNow := time.Now().UTC()
+	concrete.now = func() time.Time { return realNow.Add(25 * time.Hour) }
+	_, err = finalizer.ResolveDownload(ctx, session.ID, result.Export.ID, ident)
+	assert.ErrorIs(t, err, ErrExportExpired)
+
+	concrete.now = func() time.Time { return realNow }
+	gormRepo, ok := repo.(*gormRepository)
+	require.True(t, ok)
+	require.NoError(t, gormRepo.db.Model(&models.StudioSession{}).Where("id = ?", session.ID).Update("expires_at", realNow.Add(-time.Minute)).Error)
+	_, err = finalizer.ResolveDownload(ctx, session.ID, result.Export.ID, ident)
+	assert.ErrorIs(t, err, ErrSessionExpired)
 }
 
 func TestStudioFinalizer_FailureLeavesActiveVersionAndNoExportObject(t *testing.T) {
@@ -471,4 +554,97 @@ func TestStudioFinalizer_FailureLeavesActiveVersionAndNoExportObject(t *testing.
 	assert.Equal(t, rotated.Version.ID, current.ActiveVersionID)
 	assert.Equal(t, rotated.Version.ID, active.ID)
 	assert.Nil(t, active.SnapshotID, "a failed materialization must not register a snapshot")
+}
+
+func TestStudioFinalizerRejectsInconsistentCachedSnapshotBeforeCreatingExport(t *testing.T) {
+	t.Run("snapshot belongs to another version", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		ctx := context.Background()
+		rotated := executeFinalizerCommand(t, NewOperationCoordinator(repo), session.ID, ident, version.ID, CommandRotatePage, RotatePageParameters{PageIDs: []string{initial.Pages[0].PageID}, DeltaDegrees: 90})
+		_, err := finalizer.Finalize(ctx, session.ID, ident)
+		require.NoError(t, err)
+		_, err = service.Undo(ctx, session.ID, ident)
+		require.NoError(t, err)
+
+		child, err := repo.GetVersion(ctx, rotated.Version.ID)
+		require.NoError(t, err)
+		require.NotNil(t, child.SnapshotID)
+		gormRepo, ok := repo.(*gormRepository)
+		require.True(t, ok)
+		require.NoError(t, gormRepo.db.Model(&models.StudioVersion{}).Where("id = ?", version.ID).Update("snapshot_id", *child.SnapshotID).Error)
+		exportsBefore := finalizerExportCount(t, gormRepo, session.DocumentID)
+
+		result, err := finalizer.Finalize(ctx, session.ID, ident)
+		assert.Nil(t, result)
+		assert.ErrorIs(t, err, ErrInvalidFinalOutput)
+		assert.Equal(t, exportsBefore, finalizerExportCount(t, gormRepo, session.DocumentID))
+	})
+
+	t.Run("snapshot page count differs from active version", func(t *testing.T) {
+		service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
+		validObject, err := os.ReadFile(filepath.Join("..", "..", "..", "benchmarks", "rendering", "corpus", "standard_a4_10p.pdf"))
+		require.NoError(t, err)
+		registerFinalizerTestSnapshot(t, service, session.DocumentID, version.ID, "wrong-pages-"+uuid.NewString(), "studio/snapshots/wrong-pages-"+uuid.NewString()+".pdf", initial.PageCount+1, validObject)
+		gormRepo, ok := repo.(*gormRepository)
+		require.True(t, ok)
+		exportsBefore := finalizerExportCount(t, gormRepo, session.DocumentID)
+
+		result, err := finalizer.Finalize(context.Background(), session.ID, ident)
+		assert.Nil(t, result)
+		assert.ErrorIs(t, err, ErrInvalidFinalOutput)
+		assert.Equal(t, exportsBefore, finalizerExportCount(t, gormRepo, session.DocumentID))
+	})
+
+	t.Run("cached bytes are malformed", func(t *testing.T) {
+		_, repo, finalizer, ident, session, version, _ := finalizerFixture(t)
+		materialized, err := finalizer.MaterializeVersion(context.Background(), session.ID, ident)
+		require.NoError(t, err)
+		materialized.Cleanup()
+		cachedVersion, err := repo.GetVersion(context.Background(), version.ID)
+		require.NoError(t, err)
+		require.NotNil(t, cachedVersion.SnapshotID)
+		snapshot, err := repo.GetSnapshot(context.Background(), *cachedVersion.SnapshotID)
+		require.NoError(t, err)
+		asset, err := repo.GetAsset(context.Background(), snapshot.AssetID)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(asset.R2Key)), []byte("not a PDF"), 0o600))
+		gormRepo, ok := repo.(*gormRepository)
+		require.True(t, ok)
+		exportsBefore := finalizerExportCount(t, gormRepo, session.DocumentID)
+
+		result, err := finalizer.Finalize(context.Background(), session.ID, ident)
+		assert.Nil(t, result)
+		assert.ErrorIs(t, err, ErrInvalidFinalOutput)
+		assert.Equal(t, exportsBefore, finalizerExportCount(t, gormRepo, session.DocumentID))
+	})
+
+	t.Run("cached object is missing", func(t *testing.T) {
+		_, repo, finalizer, ident, session, version, _ := finalizerFixture(t)
+		materialized, err := finalizer.MaterializeVersion(context.Background(), session.ID, ident)
+		require.NoError(t, err)
+		materialized.Cleanup()
+		cachedVersion, err := repo.GetVersion(context.Background(), version.ID)
+		require.NoError(t, err)
+		require.NotNil(t, cachedVersion.SnapshotID)
+		snapshot, err := repo.GetSnapshot(context.Background(), *cachedVersion.SnapshotID)
+		require.NoError(t, err)
+		asset, err := repo.GetAsset(context.Background(), snapshot.AssetID)
+		require.NoError(t, err)
+		require.NoError(t, storage.DeleteLocalObject(asset.R2Key))
+		gormRepo, ok := repo.(*gormRepository)
+		require.True(t, ok)
+		exportsBefore := finalizerExportCount(t, gormRepo, session.DocumentID)
+
+		result, err := finalizer.Finalize(context.Background(), session.ID, ident)
+		assert.Nil(t, result)
+		assert.ErrorIs(t, err, ErrFinalizationFailed)
+		assert.Equal(t, exportsBefore, finalizerExportCount(t, gormRepo, session.DocumentID))
+	})
+}
+
+func finalizerExportCount(t *testing.T, repo *gormRepository, documentID uuid.UUID) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, repo.db.Model(&models.StudioExport{}).Where("document_id = ?", documentID).Count(&count).Error)
+	return count
 }
