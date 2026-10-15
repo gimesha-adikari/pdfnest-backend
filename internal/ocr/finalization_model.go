@@ -39,8 +39,9 @@ type ocrFinalization struct {
 
 func (ocrFinalization) TableName() string { return "ocr_finalizations" }
 
-// This descriptor binds metadata asserted by a future validator. The dormant
-// repository performs no PDF parse, upload, readback, retention, or download.
+// This descriptor binds logical PDF metadata. The dormant artifact verifier
+// independently reads/parses bytes before supplying private readiness evidence.
+// The SQL repository itself performs no storage I/O, retention, or download.
 type artifactDescriptor struct {
 	ArtifactID        string    `gorm:"not null"`
 	ArtifactKey       string    `gorm:"not null;uniqueIndex:ocr_artifact_key,where:artifact_key <> ''"`

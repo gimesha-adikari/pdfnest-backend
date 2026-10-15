@@ -304,13 +304,23 @@ func claimFoundation(t *testing.T, db *gorm.DB, job *ocrFinalization) {
 	}))
 	reloadFoundation(t, db, job)
 }
-func syntheticIntent() artifactDescriptor {
-	return artifactDescriptor{ArtifactID: uuid.NewString(), ArtifactKey: "foundation-private/" + uuid.NewString() + ".pdf", SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1}
+
+// Test-only metadata evidence retains the SQL/billing characterization without
+// claiming physical PDF qualification. Artifact-evidence tests use real readback.
+func metadataOnlyReadiness(req finalizationRequest) artifactEvidence {
+	return artifactEvidence{task: req.TaskID, owner: req.OwnerID, claim: req.ProcessingClaim, revision: req.ExpectedRevision, descriptor: req.Artifact, verified: true}
+}
+func syntheticIntent(job ocrFinalization) artifactDescriptor {
+	facts, err := newArtifactIntent(job.TaskID, job.OwnerID, job.ProcessingClaim, artifactDescriptor{SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1})
+	if err != nil {
+		panic(err)
+	}
+	return facts
 }
 func intentFoundation(t *testing.T, db *gorm.DB, job *ocrFinalization) {
 	t.Helper()
 	req := foundationRequest(*job)
-	req.Artifact = syntheticIntent()
+	req.Artifact = syntheticIntent(*job)
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).recordIntentInTx(tx, req) }))
 	reloadFoundation(t, db, job)
 }
@@ -321,7 +331,9 @@ func foundationReady(t *testing.T, db *gorm.DB, used int) (ocrFinalization, conf
 	intentFoundation(t, db, &job)
 	req := foundationRequest(job)
 	req.Artifact.VerifiedAt = req.Now
-	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).readyInTx(tx, req) }))
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return (finalizationRepository{}).readyInTx(tx, req, metadataOnlyReadiness(req))
+	}))
 	reloadFoundation(t, db, &job)
 	return job, initial
 }
