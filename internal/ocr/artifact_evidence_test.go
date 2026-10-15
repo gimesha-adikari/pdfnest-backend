@@ -207,7 +207,7 @@ func TestArtifactEvidenceInvalidBytes(t *testing.T) {
 				v.maxBytes = 10
 			}
 			if scenario != "missing" {
-				require.NoError(t, storage.SaveObjectFile(context.Background(), intent.request.Artifact.ArtifactKey, path, "application/pdf"))
+				seedPrivilegedArtifact(t, intent.request.Artifact.ArtifactKey, path)
 			}
 			if scenario == "read_failure" {
 				v.store = faultArtifactStore{readHook: func(context.Context, string, int64) (*storage.ArtifactFile, error) {
@@ -300,7 +300,7 @@ func TestArtifactEvidenceUncertainWritesAndReplacement(t *testing.T) {
 			v.store = faultArtifactStore{persistHook: func(ctx context.Context, key, path string) error {
 				writes++
 				if applied {
-					if err := storage.SaveObjectFile(ctx, key, path, "application/pdf"); err != nil {
+					if err := storage.CreateArtifactIfAbsent(ctx, key, path, intent.request.Artifact.SHA256, intent.request.Artifact.ByteSize); err != nil {
 						return err
 					}
 				}
@@ -328,7 +328,7 @@ func TestArtifactEvidenceUncertainWritesAndReplacement(t *testing.T) {
 		require.NoError(t, v.persist(context.Background(), intent, original))
 		first, err := v.verify(context.Background(), intent)
 		require.NoError(t, err)
-		require.NoError(t, storage.SaveObjectFile(context.Background(), intent.request.Artifact.ArtifactKey, replacement, "application/pdf"))
+		seedPrivilegedArtifact(t, intent.request.Artifact.ArtifactKey, replacement)
 		second, err := v.verify(context.Background(), intent)
 		require.Error(t, err)
 		require.False(t, second.verified)
@@ -511,4 +511,19 @@ func TestArtifactEvidenceLargeAllowedPDF(t *testing.T) {
 	_, err := v.verify(context.Background(), intent)
 	require.NoError(t, err)
 	requireNoVerificationTemps(t)
+}
+
+// Test-only privileged filesystem mutation models corruption/replacement outside
+// the storage APIs. Generic writers now correctly reject this private namespace.
+func seedPrivilegedArtifact(t *testing.T, key, source string) {
+	t.Helper()
+	root := os.Getenv("LOCAL_STORAGE_DIR")
+	require.NotEmpty(t, root)
+	require.True(t, strings.HasPrefix(key, "ocr-finalization/outputs/"))
+	require.Equal(t, key, filepath.ToSlash(filepath.Clean(key)))
+	data, err := os.ReadFile(source)
+	require.NoError(t, err)
+	target := filepath.Join(root, filepath.FromSlash(key))
+	require.NoError(t, os.MkdirAll(filepath.Dir(target), 0700))
+	require.NoError(t, os.WriteFile(target, data, 0600))
 }

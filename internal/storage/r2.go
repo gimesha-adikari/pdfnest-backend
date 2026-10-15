@@ -201,6 +201,9 @@ func BuildKey(prefix, ext string) string {
 }
 
 func (s *Store) UploadFile(path, key, contentType string) error {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -289,6 +292,9 @@ func (s *Store) DownloadToTemp(key, prefix, suffix string) (string, error) {
 }
 
 func (s *Store) UploadBytes(data []byte, key, contentType string) error {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return err
+	}
 	encrypted, err := encryptData(data)
 	if err != nil {
 		return fmt.Errorf("encryption failed: %w", err)
@@ -318,6 +324,9 @@ func (s *Store) UploadBytes(data []byte, key, contentType string) error {
 }
 
 func (s *Store) DeleteObject(ctx context.Context, key string) error {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return err
+	}
 	if key == "" {
 		return nil
 	}
@@ -408,7 +417,7 @@ func (s *Store) PresignPutObject(
 	_ string,
 	expires time.Duration,
 ) (string, error) {
-	key, err := sanitizeObjectKey(key)
+	key, err := sanitizeMutationKey(key)
 	if err != nil {
 		return "", err
 	}
@@ -431,6 +440,16 @@ func (s *Store) PresignPutObject(
 }
 
 func (s *Store) PresignUploads(ctx context.Context, req PresignRequest, expires time.Duration) (*PresignResponse, error) {
+	// Preflight the whole batch before generating any capability or doing SDK work.
+	if err := rejectPrivateOCRMutation(req.Prefix); err != nil {
+		return nil, err
+	}
+	for _, file := range req.Files {
+		if err := rejectPrivateOCRMutation(file.Key); err != nil {
+			return nil, err
+		}
+	}
+
 	if len(req.Files) == 0 {
 		return nil, fmt.Errorf("no files provided")
 	}
