@@ -1,6 +1,7 @@
 package ocr
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -95,11 +96,11 @@ func TestOCRFoundationCompetingDecisions(t *testing.T) {
 				require.NoError(t, first.Error)
 				defer first.Rollback()
 				if scenario == "cancel_then_finalize" {
-					require.NoError(t, r.endInTx(first, req, "cancelled", "CONTROLLED_STOP"))
+					require.NoError(t, endFoundation(first, req, "cancelled", "CONTROLLED_STOP"))
 				} else {
 					require.NoError(t, r.succeedInTx(first, req))
 				}
-				assertFoundation(t, observer, job, "ready", "reserved", used, 50, 0, 1)
+				assertFoundation(t, observer, job, "ready", "reserved", used, 50, 0, 4)
 				pid := make(chan int, 1)
 				result := make(chan error, 1)
 				go func() {
@@ -112,7 +113,7 @@ func TestOCRFoundationCompetingDecisions(t *testing.T) {
 						if scenario == "two_finalizers" || scenario == "cancel_then_finalize" {
 							return r.succeedInTx(tx, req)
 						}
-						return r.endInTx(tx, req, "cancelled", "CONTROLLED_STOP")
+						return endFoundation(tx, req, "cancelled", "CONTROLLED_STOP")
 					})
 				}()
 				select {
@@ -133,7 +134,7 @@ func TestOCRFoundationCompetingDecisions(t *testing.T) {
 					require.ErrorIs(t, err, errFinalizationTerminal)
 				}
 				if scenario == "cancel_then_finalize" || scenario == "rollback_then_cancel" {
-					assertFoundation(t, observer, job, "cancelled", "released", used, 50, 0, 2)
+					assertFoundation(t, observer, job, "cancelled", "released", used, 50, 0, 5)
 				} else {
 					wantUsed, wantCredits := 7, 50
 					if used == 8 {
@@ -142,7 +143,7 @@ func TestOCRFoundationCompetingDecisions(t *testing.T) {
 					if used == 5 {
 						wantUsed, wantCredits = 8, 46
 					}
-					assertFoundation(t, observer, job, "succeeded", "committed", wantUsed, wantCredits, 1, 2)
+					assertFoundation(t, observer, job, "succeeded", "committed", wantUsed, wantCredits, 1, 5)
 				}
 			})
 		}
@@ -162,10 +163,10 @@ func TestOCRFoundationReleaseAndReserveContention(t *testing.T) {
 					if err := installDecisionFailure(tx, "cancelled", "released"); err != nil {
 						return err
 					}
-					return r.endInTx(tx, req, "cancelled", "CONTROLLED_STOP")
+					return endFoundation(tx, req, "cancelled", "CONTROLLED_STOP")
 				})
 				require.ErrorContains(t, err, "foundation guard after settlement")
-				assertFoundation(t, observer, job, "ready", "reserved", 0, 50, 0, 1)
+				assertFoundation(t, observer, job, "ready", "reserved", 0, 50, 0, 4)
 				return
 			}
 			first := db.Begin()
@@ -236,37 +237,96 @@ func TestOCRFoundationReleaseAndReserveContention(t *testing.T) {
 			err := receiveFoundationResult(t, result)
 			if scenario == "settlement_waits_on_release" {
 				require.ErrorIs(t, err, billing.ErrReservationReleased)
-				assertFoundation(t, observer, job, "ready", "released", 0, 50, 0, 1)
+				assertFoundation(t, observer, job, "ready", "released", 0, 50, 0, 4)
 			} else {
 				require.NoError(t, err)
-				assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 2)
+				assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 			}
 		})
 	}
 }
 
-func foundationReady(t *testing.T, db *gorm.DB, used int) (ocrFinalization, config.Subscription) {
+// Synthetic authentication adapter: exercises the repository trust boundary,
+// not HTTP/JWT authentication. No production adapter exists at this stage.
+type fixtureIdentity struct {
+	owner string
+	err   error
+}
+
+func (v fixtureIdentity) VerifyCancellationIdentity(context.Context) (string, error) {
+	return v.owner, v.err
+}
+func fixtureOwner(owner string) cancellationAuthority {
+	a, err := ownerCancellation(context.Background(), fixtureIdentity{owner: owner})
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+func endFoundation(tx *gorm.DB, req finalizationRequest, state, code string) error {
+	r := finalizationRepository{}
+	if state == "failed" {
+		return r.failWorkerInTx(tx, req, code)
+	}
+	return r.cancelInTx(tx, cancellationRequest{TaskID: req.TaskID, ExpectedState: req.ExpectedState, ExpectedRevision: req.ExpectedRevision, Now: req.Now, Authority: fixtureOwner(req.OwnerID)})
+}
+
+func foundationAccepted(t *testing.T, db *gorm.DB, used int) (ocrFinalization, config.Subscription, string) {
 	t.Helper()
 	owner, initial := qualificationAccount(t, db, false)
 	require.NoError(t, db.Model(&config.Subscription{}).Where("user_id = ?", owner).Updates(map[string]any{"used_units3h": used, "used_units_daily": used, "used_units_monthly": used}).Error)
-	initial.UsedUnits3h = used
-	initial.UsedUnitsDaily = used
-	initial.UsedUnitsMonthly = used
+	initial.UsedUnits3h, initial.UsedUnitsDaily, initial.UsedUnitsMonthly = used, used, used
 	id := uuid.NewString()
 	res, err := billing.Default.ReserveWithTaskID(owner, billing.ImageToTextPDF, 0, 1, "/foundation-test", id)
 	require.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	job := ocrFinalization{TaskID: id, ProtocolVersion: 1, OwnerID: owner, ReservationID: res.ID, ReservationKind: string(billing.ReservationKindDatabase), ToolName: billing.ImageToTextPDF.Name,
-		Units: res.Units, PlanUnits: res.PlanUnits, CreditUnits: res.CreditUnits, State: "ready", Revision: 1, ProcessingClaim: uuid.NewString(), CreatedAt: now, UpdatedAt: now,
-		Artifact: artifactDescriptor{ArtifactID: uuid.NewString(), ArtifactKey: "foundation-private/" + uuid.NewString() + ".pdf", SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1, VerifiedAt: now}}
-	r := finalizationRepository{}
-	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.createInTx(tx, &job) }))
+		Units: res.Units, PlanUnits: res.PlanUnits, CreditUnits: res.CreditUnits, State: "accepted", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	var token string
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		token, err = (finalizationRepository{}).createInTx(tx, &job)
+		return err
+	}))
 	t.Cleanup(func() { db.Where("task_id = ?", id).Delete(&ocrFinalization{}) })
+	return job, initial, token
+}
+func reloadFoundation(t *testing.T, db *gorm.DB, job *ocrFinalization) {
+	t.Helper()
+	require.NoError(t, db.First(job, "task_id = ?", job.TaskID).Error)
+}
+func claimFoundation(t *testing.T, db *gorm.DB, job *ocrFinalization) {
+	t.Helper()
+	req := foundationRequest(*job)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		_, err := (finalizationRepository{}).claimInTx(tx, req, job.CreatedAt.Add(time.Minute))
+		return err
+	}))
+	reloadFoundation(t, db, job)
+}
+func syntheticIntent() artifactDescriptor {
+	return artifactDescriptor{ArtifactID: uuid.NewString(), ArtifactKey: "foundation-private/" + uuid.NewString() + ".pdf", SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1}
+}
+func intentFoundation(t *testing.T, db *gorm.DB, job *ocrFinalization) {
+	t.Helper()
+	req := foundationRequest(*job)
+	req.Artifact = syntheticIntent()
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).recordIntentInTx(tx, req) }))
+	reloadFoundation(t, db, job)
+}
+func foundationReady(t *testing.T, db *gorm.DB, used int) (ocrFinalization, config.Subscription) {
+	t.Helper()
+	job, initial, _ := foundationAccepted(t, db, used)
+	claimFoundation(t, db, &job)
+	intentFoundation(t, db, &job)
+	req := foundationRequest(job)
+	req.Artifact.VerifiedAt = req.Now
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).readyInTx(tx, req) }))
+	reloadFoundation(t, db, &job)
 	return job, initial
 }
-
 func foundationRequest(job ocrFinalization) finalizationRequest {
-	return finalizationRequest{TaskID: job.TaskID, OwnerID: job.OwnerID, ReservationID: job.ReservationID, ExpectedState: job.State, ExpectedRevision: job.Revision, ProcessingClaim: job.ProcessingClaim, Artifact: job.Artifact, Now: job.CreatedAt.Add(time.Second)}
+	return finalizationRequest{TaskID: job.TaskID, OwnerID: job.OwnerID, ReservationID: job.ReservationID, ExpectedState: job.State, ExpectedRevision: job.Revision, ProcessingClaim: job.ProcessingClaim, Artifact: job.Artifact, Now: job.UpdatedAt.Add(time.Second)}
 }
 
 // Read every durable assertion through an independent pool/connection, after
@@ -295,6 +355,26 @@ func assertFoundation(t *testing.T, observer *gorm.DB, job ocrFinalization, stat
 	require.Equal(t, job.Artifact.ArtifactID, row.Artifact.ArtifactID)
 	require.Equal(t, job.Artifact.ArtifactKey, row.Artifact.ArtifactKey)
 	require.Equal(t, job.Artifact.SHA256, row.Artifact.SHA256)
+	require.True(t, sameArtifact(job.Artifact, row.Artifact), "all immutable descriptor fields must match")
+	require.True(t, job.CreatedAt.Equal(row.CreatedAt))
+	assertOptionalTime(t, job.ProcessingStartedAt, row.ProcessingStartedAt)
+	assertOptionalTime(t, job.ArtifactIntentAt, row.ArtifactIntentAt)
+	assertOptionalTime(t, job.ReadyAt, row.ReadyAt)
+	require.Equal(t, job.CancellationCapabilityHash, row.CancellationCapabilityHash)
+	if state == "cancelled" || state == "failed" {
+		require.Empty(t, row.ProcessingClaim)
+		require.Nil(t, row.ProcessingLeaseUntil)
+	}
+}
+
+func assertOptionalTime(t *testing.T, expected, actual *time.Time) {
+	t.Helper()
+	if expected == nil {
+		require.Nil(t, actual)
+		return
+	}
+	require.NotNil(t, actual)
+	require.True(t, expected.Equal(*actual))
 }
 
 func TestOCRFoundationAtomicDecisions(t *testing.T) {
@@ -314,9 +394,9 @@ func TestOCRFoundationAtomicDecisions(t *testing.T) {
 					if scenario == "fail_first" {
 						state = "failed"
 					}
-					require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.endInTx(tx, req, state, "CONTROLLED_STOP") }))
+					require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return endFoundation(tx, req, state, "CONTROLLED_STOP") }))
 					require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }), errFinalizationTerminal)
-					assertFoundation(t, observer, job, state, "released", allocation.initial, 50, 0, 2)
+					assertFoundation(t, observer, job, state, "released", allocation.initial, 50, 0, 5)
 					return
 				}
 				if scenario == "rollback" {
@@ -328,7 +408,7 @@ func TestOCRFoundationAtomicDecisions(t *testing.T) {
 						return r.succeedInTx(tx, req)
 					})
 					require.ErrorContains(t, err, "foundation guard after settlement")
-					assertFoundation(t, observer, job, "ready", "reserved", allocation.initial, 50, 0, 1)
+					assertFoundation(t, observer, job, "ready", "reserved", allocation.initial, 50, 0, 4)
 					return
 				}
 				switch scenario {
@@ -345,7 +425,7 @@ func TestOCRFoundationAtomicDecisions(t *testing.T) {
 				}
 				if strings.HasPrefix(scenario, "wrong_") || scenario == "stale_revision" {
 					require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
-					assertFoundation(t, observer, job, "ready", "reserved", allocation.initial, 50, 0, 1)
+					assertFoundation(t, observer, job, "ready", "reserved", allocation.initial, 50, 0, 4)
 					return
 				}
 				require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
@@ -360,8 +440,8 @@ func TestOCRFoundationAtomicDecisions(t *testing.T) {
 				} else {
 					require.NoError(t, err)
 				}
-				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.endInTx(tx, req, "cancelled", "TOO_LATE") }), errFinalizationTerminal)
-				assertFoundation(t, observer, job, "succeeded", "committed", allocation.used, allocation.credits, 1, 2)
+				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return endFoundation(tx, req, "cancelled", "TOO_LATE") }), errFinalizationTerminal)
+				assertFoundation(t, observer, job, "succeeded", "committed", allocation.used, allocation.credits, 1, 5)
 			})
 		}
 	}
@@ -375,6 +455,10 @@ func TestOCRFoundationCreateConstraints(t *testing.T) {
 	for _, name := range []string{"duplicate_task", "duplicate_reservation", "wrong_binding", "bad_protocol", "bad_descriptor", "terminal_create", "autocommit"} {
 		t.Run(name, func(t *testing.T) {
 			candidate := job
+			candidate.State, candidate.Revision = "accepted", 1
+			candidate.ProcessingClaim, candidate.CancellationCapabilityHash = "", ""
+			candidate.ProcessingStartedAt, candidate.ProcessingLeaseUntil, candidate.ArtifactIntentAt, candidate.ReadyAt = nil, nil, nil, nil
+			candidate.Artifact = artifactDescriptor{}
 			switch name {
 			case "duplicate_reservation":
 				candidate.TaskID = uuid.NewString()
@@ -388,11 +472,12 @@ func TestOCRFoundationCreateConstraints(t *testing.T) {
 				candidate.State = "succeeded"
 			}
 			if name == "autocommit" {
-				require.ErrorIs(t, r.createInTx(db, &candidate), billing.ErrTransactionRequired)
+				_, err := r.createInTx(db, &candidate)
+				require.ErrorIs(t, err, billing.ErrTransactionRequired)
 			} else {
-				require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.createInTx(tx, &candidate) }))
+				require.Error(t, db.Transaction(func(tx *gorm.DB) error { _, err := r.createInTx(tx, &candidate); return err }))
 			}
-			assertFoundation(t, observer, job, "ready", "reserved", 0, 50, 0, 1)
+			assertFoundation(t, observer, job, "ready", "reserved", 0, 50, 0, 4)
 		})
 	}
 	// Exercise the database constraint independently of repository validation.
@@ -410,17 +495,14 @@ func TestOCRFoundationEarlyCancellation(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			t.Setenv("BILLING_MODE", "normal")
 			db, observer := foundationDB(t)
-			job, _ := foundationReady(t, db, 0)
-			// Recreate a pre-artifact row: the supported repository creation path
-			// must allow cancellation without a fabricated ready descriptor.
-			require.NoError(t, db.Delete(&ocrFinalization{}, "task_id = ?", job.TaskID).Error)
-			job.State = state
-			job.Artifact = artifactDescriptor{}
-			job.ProcessingClaim = ""
-			r := finalizationRepository{}
-			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.createInTx(tx, &job) }))
-			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.endInTx(tx, foundationRequest(job), "cancelled", "USER_CANCELLED") }))
-			assertFoundation(t, observer, job, "cancelled", "released", 0, 50, 0, 2)
+			job, _, _ := foundationAccepted(t, db, 0)
+			if state == "processing" {
+				claimFoundation(t, db, &job)
+			}
+			require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+				return endFoundation(tx, foundationRequest(job), "cancelled", "USER_CANCELLED")
+			}))
+			assertFoundation(t, observer, job, "cancelled", "released", 0, 50, 0, job.Revision+1)
 		})
 	}
 }
@@ -450,12 +532,12 @@ func TestOCRFoundationReservationStateRejections(t *testing.T) {
 				if state == "committed" {
 					used, logs = 7, 1
 				}
-				assertFoundation(t, observer, job, "ready", state, used, 50, logs, 1)
+				assertFoundation(t, observer, job, "ready", state, used, 50, logs, 4)
 			} else {
 				var row ocrFinalization
 				require.NoError(t, observer.First(&row, "task_id = ?", job.TaskID).Error)
 				require.Equal(t, "ready", row.State)
-				require.EqualValues(t, 1, row.Revision)
+				require.EqualValues(t, job.Revision, row.Revision)
 				var count int64
 				require.NoError(t, observer.Model(&config.UsageLog{}).Where("user_id = ?", job.OwnerID).Count(&count).Error)
 				require.Zero(t, count)
