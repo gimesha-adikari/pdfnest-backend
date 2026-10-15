@@ -382,6 +382,13 @@ func setupGuestAsyncIntegration(t *testing.T) (*gorm.DB, *redis.Client) {
 	if err := db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}); err != nil {
 		t.Fatalf("migrate isolated postgres: %v", err)
 	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.SetMaxOpenConns(4)
+	pool.SetMaxIdleConns(2)
+	t.Cleanup(func() { _ = pool.Close() })
 	options, err := redis.ParseURL(redisURL)
 	if err != nil {
 		t.Fatalf("parse isolated redis URL: %v", err)
