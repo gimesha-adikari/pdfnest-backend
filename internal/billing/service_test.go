@@ -23,6 +23,14 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Skip("Postgres database connection unavailable, skipping test")
 	}
 
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.SetMaxOpenConns(4)
+	pool.SetMaxIdleConns(2)
+	previousDB := config.DB
+	t.Cleanup(func() { config.DB = previousDB; _ = pool.Close() })
 	_ = db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{})
 	config.DB = db
 	return db

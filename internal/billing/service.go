@@ -423,57 +423,8 @@ func (s *Service) Commit(reservationID string) error {
 			return nil
 		}
 
-		// Conditional SQL update: only update if status is still 'reserved'
-		result := tx.Model(&config.BillingReservation{}).
-			Where("id = ? AND status = ?", reservationID, "reserved").
-			Updates(map[string]interface{}{
-				"status":     "committed",
-				"updated_at": now,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return nil
-		}
-
-		var sub config.Subscription
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ?", res.UserID).
-			First(&sub).Error; err != nil {
-			return err
-		}
-
-		syncWindows(&sub, now)
-
-		sub.UsedUnits3h += res.PlanUnits
-		sub.UsedUnitsDaily += res.PlanUnits
-		sub.UsedUnitsMonthly += res.PlanUnits
-
-		sub.CustomCredits -= res.CreditUnits
-		if sub.CustomCredits < 0 {
-			sub.CustomCredits = 0
-		}
-		sub.UpdatedAt = now
-
-		if err := tx.Save(&sub).Error; err != nil {
-			return err
-		}
-
-		workCount := res.PagesCount
-		if workCount == 0 {
-			workCount = res.ImagesCount
-		}
-
-		usage := config.UsageLog{
-			ID:         uuid.New().String(),
-			UserID:     res.UserID,
-			ToolName:   res.ToolName,
-			IsCredit:   res.CreditUnits > 0,
-			PagesCount: workCount,
-			CreatedAt:  now,
-		}
-		return tx.Create(&usage).Error
+		_, err := commitLockedReservation(tx, &res, now)
+		return err
 	})
 }
 
