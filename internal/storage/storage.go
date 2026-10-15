@@ -72,6 +72,9 @@ func GetLocalStorageDir() string {
 // SaveLocalStream writes a stream directly to the local storage directory under the given object key.
 // It streams into the file, calculating SHA-256 on the fly without holding the entire payload in memory.
 func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, string, error) {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return 0, "", err
+	}
 	if managedStorageRequired() {
 		return 0, "", fmt.Errorf("local filesystem storage is disabled in managed environments; use the configured R2 adapter")
 	}
@@ -140,7 +143,7 @@ func SaveLocalFile(ctx context.Context, key, sourcePath string) error {
 // selector. Callers must use this instead of consulting Default directly so a
 // local development run cannot be redirected by incidental R2 dotenv values.
 func SaveObjectFile(ctx context.Context, key, sourcePath, contentType string) error {
-	sanitizedKey, err := sanitizeObjectKey(key)
+	sanitizedKey, err := sanitizeMutationKey(key)
 	if err != nil {
 		return fmt.Errorf("invalid storage key: %w", err)
 	}
@@ -162,7 +165,7 @@ func SaveObjectFile(ctx context.Context, key, sourcePath, contentType string) er
 // selector. It is the bytes counterpart to SaveObjectFile and preserves the
 // same local/remote invariant for staged Studio job payloads.
 func SaveObjectBytes(ctx context.Context, key string, data []byte, contentType string) error {
-	sanitizedKey, err := sanitizeObjectKey(key)
+	sanitizedKey, err := sanitizeMutationKey(key)
 	if err != nil {
 		return fmt.Errorf("invalid storage key: %w", err)
 	}
@@ -185,6 +188,9 @@ func SaveObjectBytes(ctx context.Context, key string, data []byte, contentType s
 // store. It is used only to roll back a failed database registration after a
 // source file was safely persisted.
 func DeleteLocalObject(key string) error {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return err
+	}
 	if RemoteStorageEnabled() {
 		return nil
 	}
@@ -202,6 +208,9 @@ func DeleteLocalObject(key string) error {
 // DeleteObject removes a server-created source or result object from the
 // configured durable store, with the existing local development fallback.
 func DeleteObject(ctx context.Context, key string) error {
+	if err := rejectPrivateOCRMutation(key); err != nil {
+		return err
+	}
 	if !RemoteStorageEnabled() {
 		return DeleteLocalObject(key)
 	}

@@ -42,12 +42,12 @@ func localArtifactEnvironment(t *testing.T) string {
 func TestArtifactLocalReadback(t *testing.T) {
 	root := localArtifactEnvironment(t)
 	ctx := context.Background()
-	key := "ocr-finalization/outputs/test/fixture.pdf"
+	key := "legacy/artifact-read/fixture.pdf"
 	require.NoError(t, SaveObjectBytes(ctx, key, []byte("%PDF-logical-one"), "application/pdf"))
 	snapshot, err := ReadArtifact(ctx, key, 1024)
 	require.NoError(t, err)
 	require.NotEqual(t, filepath.Join(root, filepath.FromSlash(key)), snapshot.Path)
-	// Actual shared adapter replaces existing objects. The open snapshot is
+	// Outside the reserved namespace, the shared adapter still replaces objects. The open snapshot is
 	// independent; randomness is not an immutable/conditional-write guarantee.
 	require.NoError(t, SaveObjectBytes(ctx, key, []byte("%PDF-logical-two"), "application/pdf"))
 	data, err := os.ReadFile(snapshot.Path)
