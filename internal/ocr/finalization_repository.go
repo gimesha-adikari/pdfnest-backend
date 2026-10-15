@@ -135,7 +135,7 @@ func (finalizationRepository) recordIntentInTx(tx *gorm.DB, req finalizationRequ
 	if err := checkWorker(job, req); err != nil {
 		return err
 	}
-	if job.State != "processing" || job.ArtifactIntentAt != nil || !validIntent(req.Artifact) || !req.Artifact.VerifiedAt.IsZero() {
+	if job.State != "processing" || job.ArtifactIntentAt != nil || !artifactKeyMatches(job.TaskID, job.OwnerID, job.ProcessingClaim, req.Artifact) || !validIntent(req.Artifact) || !req.Artifact.VerifiedAt.IsZero() {
 		return errFinalizationBinding
 	}
 	updates := artifactUpdates(req.Artifact)
@@ -143,9 +143,10 @@ func (finalizationRepository) recordIntentInTx(tx *gorm.DB, req finalizationRequ
 	return updateLifecycle(tx, job, updates, req.Now)
 }
 
-// Evidence is trusted synthetic metadata in this foundation, not proof of an
-// actual parse, upload, readback or physical PDF. Storage integration is gated.
-func (finalizationRepository) readyInTx(tx *gorm.DB, req finalizationRequest) error {
+// Readiness requires private evidence produced by independent object readback.
+// Storage/PDF work happens outside this transaction; the locked state and claim
+// are rechecked here. Evidence is point-in-time, not a storage immutability claim.
+func (finalizationRepository) readyInTx(tx *gorm.DB, req finalizationRequest, proof artifactEvidence) error {
 	job, err := lockFinalization(tx, req)
 	if err != nil {
 		return err
@@ -153,7 +154,7 @@ func (finalizationRepository) readyInTx(tx *gorm.DB, req finalizationRequest) er
 	if err := checkWorker(job, req); err != nil {
 		return err
 	}
-	if job.State != "processing" || job.ArtifactIntentAt == nil || !validArtifact(req.Artifact) || !sameIntent(job.Artifact, req.Artifact) || !req.Artifact.VerifiedAt.After(job.CreatedAt) || req.Artifact.VerifiedAt.Before(*job.ArtifactIntentAt) || req.Artifact.VerifiedAt.After(req.Now) {
+	if !proof.matches(job, req) || !artifactKeyMatches(job.TaskID, job.OwnerID, job.ProcessingClaim, req.Artifact) || job.State != "processing" || job.ArtifactIntentAt == nil || !validArtifact(req.Artifact) || !sameIntent(job.Artifact, req.Artifact) || !req.Artifact.VerifiedAt.After(job.CreatedAt) || req.Artifact.VerifiedAt.Before(*job.ArtifactIntentAt) || req.Artifact.VerifiedAt.After(req.Now) {
 		return errFinalizationBinding
 	}
 	return updateLifecycle(tx, job, map[string]any{"state": "ready", "ready_at": req.Now, "artifact_verified_at": req.Artifact.VerifiedAt}, req.Now)

@@ -3,6 +3,7 @@ package ocr
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ func TestOCRLifecycleProgression(t *testing.T) {
 	assertFoundation(t, observer, job, "processing", "reserved", 0, 50, 0, 3)
 	req := foundationRequest(job)
 	req.Artifact.VerifiedAt = req.Now
-	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).readyInTx(tx, req) }))
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return (finalizationRepository{}).readyInTx(tx, req, metadataOnlyReadiness(req))
+	}))
 	reloadFoundation(t, observer, &job)
 	assertFoundation(t, observer, job, "ready", "reserved", 0, 50, 0, 4)
 	require.True(t, job.Artifact.VerifiedAt.After(job.CreatedAt))
@@ -85,7 +88,7 @@ func TestOCRLifecycleReadinessRejections(t *testing.T) {
 						return err
 					}
 				}
-				return (finalizationRepository{}).readyInTx(tx, req)
+				return (finalizationRepository{}).readyInTx(tx, req, metadataOnlyReadiness(req))
 			})
 			require.Error(t, err)
 			if scenario == "rollback" {
@@ -112,7 +115,9 @@ func TestOCRLifecycleCancellationAuthority(t *testing.T) {
 				if stage == "ready" {
 					req := foundationRequest(job)
 					req.Artifact.VerifiedAt = req.Now
-					require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).readyInTx(tx, req) }))
+					require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+						return (finalizationRepository{}).readyInTx(tx, req, metadataOnlyReadiness(req))
+					}))
 					reloadFoundation(t, db, &job)
 				}
 				authority := fixtureOwner(job.OwnerID)
@@ -141,7 +146,7 @@ func TestOCRLifecycleCancellationAuthority(t *testing.T) {
 					require.Nil(t, cancelled.ProcessingLeaseUntil)
 					require.Error(t, db.Transaction(func(tx *gorm.DB) error { _, err := r.claimInTx(tx, stale, stale.Now.Add(time.Minute)); return err }))
 					require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.recordIntentInTx(tx, stale) }))
-					require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.readyInTx(tx, stale) }))
+					require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.readyInTx(tx, stale, metadataOnlyReadiness(stale)) }))
 					require.Error(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, stale) }))
 					assertFoundation(t, observer, job, "cancelled", "released", 0, 50, 0, job.Revision+1)
 				} else {
@@ -175,7 +180,11 @@ func TestOCRLifecycleIntentAndClaimRejections(t *testing.T) {
 				intentFoundation(t, db, &job)
 			}
 			req := foundationRequest(job)
-			req.Artifact = syntheticIntent()
+			source := job
+			if source.ProcessingClaim == "" {
+				source.ProcessingClaim = strings.Repeat("a", 64)
+			}
+			req.Artifact = syntheticIntent(source)
 			switch scenario {
 			case "stale_claim":
 				req.ProcessingClaim = uuid.NewString()
@@ -197,7 +206,7 @@ func TestOCRLifecycleIntentAndClaimRejections(t *testing.T) {
 			require.Error(t, db.Transaction(func(tx *gorm.DB) error {
 				if scenario == "ready_without_intent" {
 					req.Artifact.VerifiedAt = req.Now
-					return (finalizationRepository{}).readyInTx(tx, req)
+					return (finalizationRepository{}).readyInTx(tx, req, metadataOnlyReadiness(req))
 				}
 				return (finalizationRepository{}).recordIntentInTx(tx, req)
 			}))
@@ -284,7 +293,7 @@ func TestOCRLifecycleReadinessCancellationLocks(t *testing.T) {
 			if scenario == "cancel_then_ready" {
 				require.NoError(t, r.cancelInTx(first, cancel))
 			} else {
-				require.NoError(t, r.readyInTx(first, req))
+				require.NoError(t, r.readyInTx(first, req, metadataOnlyReadiness(req)))
 			}
 			assertFoundation(t, observer, job, "processing", "reserved", 0, 50, 0, 3)
 			pid := make(chan int, 1)
@@ -297,7 +306,7 @@ func TestOCRLifecycleReadinessCancellationLocks(t *testing.T) {
 					}
 					pid <- id
 					if scenario == "cancel_then_ready" {
-						return r.readyInTx(tx, req)
+						return r.readyInTx(tx, req, metadataOnlyReadiness(req))
 					}
 					return r.cancelInTx(tx, cancel)
 				})
@@ -454,7 +463,7 @@ func TestOCRLifecycleAcceptanceAndLease(t *testing.T) {
 					candidate.State = "processing"
 				case "direct_ready_later_verification", "direct_ready_equal_verification":
 					candidate.State = "ready"
-					candidate.Artifact = syntheticIntent()
+					candidate.Artifact = artifactDescriptor{ArtifactID: uuid.NewString(), ArtifactKey: "rejected-shortcut.pdf", SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1}
 					candidate.Artifact.VerifiedAt = candidate.CreatedAt
 					if scenario == "direct_ready_later_verification" {
 						candidate.Artifact.VerifiedAt = candidate.CreatedAt.Add(time.Second)
@@ -464,7 +473,7 @@ func TestOCRLifecycleAcceptanceAndLease(t *testing.T) {
 				case "forged_claim":
 					candidate.ProcessingClaim = uuid.NewString()
 				case "prepopulated_intent":
-					candidate.Artifact = syntheticIntent()
+					candidate.Artifact = artifactDescriptor{ArtifactID: uuid.NewString(), ArtifactKey: "rejected-shortcut.pdf", SHA256: strings.Repeat("a", 64), ByteSize: 128, PageCount: 1, ContentType: "application/pdf", ValidationVersion: 1}
 				case "future_placeholder":
 					candidate.NextAttemptAt = &candidate.CreatedAt
 				case "reservation_expired":
