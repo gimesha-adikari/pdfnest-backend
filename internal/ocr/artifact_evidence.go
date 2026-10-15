@@ -91,13 +91,13 @@ func (e artifactEvidence) matches(job *ocrFinalization, req finalizationRequest)
 }
 
 type artifactStore interface {
-	persist(context.Context, string, string) error
+	persist(context.Context, string, string, string, int64) error
 	read(context.Context, string, int64) (*storage.ArtifactFile, error)
 }
 type selectedArtifactStore struct{}
 
-func (selectedArtifactStore) persist(ctx context.Context, key, path string) error {
-	return storage.SaveObjectFile(ctx, key, path, "application/pdf")
+func (selectedArtifactStore) persist(ctx context.Context, key, path, digest string, size int64) error {
+	return storage.CreateArtifactIfAbsent(ctx, key, path, digest, size)
 }
 func (selectedArtifactStore) read(ctx context.Context, key string, limit int64) (*storage.ArtifactFile, error) {
 	return storage.ReadArtifact(ctx, key, limit)
@@ -127,9 +127,13 @@ func (v artifactVerifier) persist(ctx context.Context, intent artifactVerificati
 	if err != nil || !file.Mode().IsRegular() || file.Size() <= 0 || file.Size() > v.maxBytes {
 		return errArtifactEvidence
 	}
-	// Existing adapters allow replacement. No false write-once/immutable claim:
-	// exclusive writer fencing or conditional versions remain an activation gate.
-	if err := v.store.persist(ctx, intent.request.Artifact.ArtifactKey, path); err != nil {
+	// The captured intent authorizes starting this exclusive write. It does not
+	// extend the claim lease; readiness rechecks SQL authority after readback.
+	if err := v.store.persist(ctx, intent.request.Artifact.ArtifactKey, path, intent.request.Artifact.SHA256, intent.request.Artifact.ByteSize); err != nil {
+		var classified *storage.ArtifactCreateError
+		if errors.As(err, &classified) {
+			return err
+		}
 		return errArtifactWriteUncertain
 	}
 	return nil
