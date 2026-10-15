@@ -42,8 +42,9 @@ type recoveryRequest struct {
 	TaskID, OwnerID, ReservationID string
 	ExpectedState                  string
 	ExpectedRevision               int64
-	Now                            time.Time
-	Authority                      recoveryAuthority
+	// Trusted lifecycle chronology only; lease eligibility uses database time.
+	Now       time.Time
+	Authority recoveryAuthority
 }
 
 // Recovery is terminal SQL bookkeeping only. Preserve task-first lock order,
@@ -93,10 +94,14 @@ func (finalizationRepository) acquireRecoveryInTx(tx *gorm.DB, req recoveryReque
 	if err != nil {
 		return "", err
 	}
+	now, err := recoveryNowInTx(tx)
+	if err != nil {
+		return "", err
+	}
 	// PostgreSQL persists microseconds. Validate the persisted deadline rather
 	// than accepting an apparent extension that truncates to the same instant.
 	until = until.Truncate(time.Microsecond)
-	if job.NextAttemptAt == nil || job.NextAttemptAt.IsZero() || job.NextAttemptAt.After(req.Now) || !until.After(req.Now) || (job.RecoveryLeaseUntil != nil && req.Now.Before(*job.RecoveryLeaseUntil)) {
+	if job.NextAttemptAt == nil || job.NextAttemptAt.IsZero() || job.NextAttemptAt.After(now) || !until.After(now) || (job.RecoveryLeaseUntil != nil && now.Before(*job.RecoveryLeaseUntil)) {
 		return "", errRecoveryClaim
 	}
 	claim, err := randomAuthority()
@@ -114,8 +119,12 @@ func (finalizationRepository) renewRecoveryInTx(tx *gorm.DB, req recoveryRequest
 	if err != nil {
 		return err
 	}
+	now, err := recoveryNowInTx(tx)
+	if err != nil {
+		return err
+	}
 	until = until.Truncate(time.Microsecond)
-	if !holdsRecovery(job, claim, req.Now) || !until.After(req.Now) || !until.After(*job.RecoveryLeaseUntil) {
+	if !holdsRecovery(job, claim, now) || !until.After(now) || !until.After(*job.RecoveryLeaseUntil) {
 		return errRecoveryClaim
 	}
 	return updateRecoveryOwnership(tx, job, claim, &until)
@@ -128,10 +137,24 @@ func (finalizationRepository) relinquishRecoveryInTx(tx *gorm.DB, req recoveryRe
 	if err != nil {
 		return err
 	}
-	if !holdsRecovery(job, claim, req.Now) {
+	now, err := recoveryNowInTx(tx)
+	if err != nil {
+		return err
+	}
+	if !holdsRecovery(job, claim, now) {
 		return errRecoveryClaim
 	}
 	return updateRecoveryOwnership(tx, job, "", nil)
+}
+
+// Read on the validated caller transaction only after task and reservation
+// locks are held. Unlike now()/transaction_timestamp(), clock_timestamp() does
+// not retain the time from before a lock wait. This is an eligibility check,
+// not a guarantee that a delayed transaction will commit before lease expiry.
+func recoveryNowInTx(tx *gorm.DB) (time.Time, error) {
+	var now time.Time
+	err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error
+	return now, err
 }
 
 func holdsRecovery(job *ocrFinalization, claim string, now time.Time) bool {

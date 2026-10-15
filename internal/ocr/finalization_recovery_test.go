@@ -30,13 +30,36 @@ func recoveryRequestFor(t *testing.T, job ocrFinalization) recoveryRequest {
 	authority, err := trustedRecovery(context.Background(), fixtureRecoveryVerifier{task: job.TaskID})
 	require.NoError(t, err)
 	return recoveryRequest{TaskID: job.TaskID, OwnerID: job.OwnerID, ReservationID: job.ReservationID,
-		ExpectedState: job.State, ExpectedRevision: job.Revision, Now: job.UpdatedAt.Add(time.Minute), Authority: authority}
+		ExpectedState: job.State, ExpectedRevision: job.Revision, Now: job.UpdatedAt, Authority: authority}
 }
 
 func recoveryTerminal(t *testing.T, db *gorm.DB, state string, used int) (ocrFinalization, finalizationRequest, recoveryRequest) {
 	t.Helper()
-	job, _ := foundationReady(t, db, used)
+	// Recovery needs real database expiry, not the shared fixtures' seconds of
+	// future lifecycle time. Exercise the same repository transitions using
+	// explicit microsecond logical steps; do not change the shared fixtures.
+	job, _, _ := foundationAccepted(t, db, used)
+	r := finalizationRepository{}
+	for _, stage := range []string{"claim", "intent", "ready"} {
+		req := foundationRequest(job)
+		req.Now = job.UpdatedAt.Add(time.Microsecond)
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+			switch stage {
+			case "claim":
+				_, err := r.claimInTx(tx, req, job.CreatedAt.Add(time.Minute))
+				return err
+			case "intent":
+				req.Artifact = syntheticIntent(job)
+				return r.recordIntentInTx(tx, req)
+			default:
+				req.Artifact.VerifiedAt = req.Now
+				return r.readyInTx(tx, req, metadataOnlyReadiness(req))
+			}
+		}))
+		reloadFoundation(t, db, &job)
+	}
 	success := foundationRequest(job)
+	success.Now = job.UpdatedAt.Add(time.Microsecond)
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 		if state == "succeeded" {
 			return (finalizationRepository{}).succeedInTx(tx, success)
@@ -44,12 +67,28 @@ func recoveryTerminal(t *testing.T, db *gorm.DB, state string, used int) (ocrFin
 		return endFoundation(tx, success, state, "CONTROLLED_STOP")
 	}))
 	reloadFoundation(t, db, &job)
+	require.True(t, recoveryDatabaseNow(t, db).After(job.UpdatedAt), "logical lifecycle must precede real recovery eligibility")
 	req := recoveryRequestFor(t, job)
 	// Explicit synthetic obligation, not a production scheduling/retention rule.
 	require.NoError(t, db.Model(&ocrFinalization{}).Where("task_id = ?", job.TaskID).UpdateColumns(map[string]any{
 		"next_attempt_at": req.Now, "cleanup_not_before": req.Now.Add(24 * time.Hour), "download_expires_at": req.Now.Add(time.Hour),
 	}).Error)
 	return job, success, req
+}
+
+func recoveryDatabaseNow(t *testing.T, db *gorm.DB) time.Time {
+	t.Helper()
+	var now time.Time
+	require.NoError(t, db.Raw("SELECT clock_timestamp()").Scan(&now).Error)
+	return now
+}
+
+// Controlled fixture expiration changes no clocks, lifecycle fields or tokens.
+func expireRecoveryLease(t *testing.T, db *gorm.DB, job ocrFinalization) time.Time {
+	t.Helper()
+	var expired time.Time
+	require.NoError(t, db.Raw("UPDATE ocr_finalizations SET recovery_lease_until = clock_timestamp() - interval '1 microsecond' WHERE task_id = ? RETURNING recovery_lease_until", job.TaskID).Scan(&expired).Error)
+	return expired
 }
 
 func acquireRecovery(t *testing.T, db *gorm.DB, req recoveryRequest, until time.Time) string {
@@ -99,7 +138,6 @@ func TestOCRRecoveryClaims(t *testing.T) {
 				until := req.Now.Add(time.Minute)
 				token := acquireRecovery(t, db, req, until)
 				assertRecoveryOwnership(t, observer, job, before, token, &until)
-				req.Now = req.Now.Add(time.Second)
 				renewed := until.Add(time.Minute)
 				require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, req, token, renewed) }))
 				assertRecoveryOwnership(t, observer, job, before, token, &renewed)
@@ -149,17 +187,17 @@ func TestOCRRecoveryClaims(t *testing.T) {
 		before := observeReplay(t, observer, job)
 		until := req.Now.Add(time.Minute)
 		old := acquireRecovery(t, db, req, until)
-		req.Now = until // Equality is expiry, not an active lease.
+		expired := expireRecoveryLease(t, db, job)
+		require.True(t, req.Now.Before(expired))
+		until = recoveryDatabaseNow(t, db).Add(time.Minute)
 		require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, req, old, until.Add(time.Minute)) }), errRecoveryClaim)
 		require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.relinquishRecoveryInTx(tx, req, old) }), errRecoveryClaim)
-		until = until.Add(time.Minute)
 		current := acquireRecovery(t, db, req, until)
 		require.NotEqual(t, old, current)
 		assertRecoveryOwnership(t, observer, job, before, current, &until)
 		// The stale request time predates old expiry: rejection must be from
 		// superseded ownership, not merely the old holder's expired timestamp.
 		stale := req
-		stale.Now = req.Now.Add(-time.Second)
 		require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, stale, old, until.Add(time.Minute)) }), errRecoveryClaim)
 		require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.relinquishRecoveryInTx(tx, stale, old) }), errRecoveryClaim)
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, success) }))
@@ -196,7 +234,6 @@ func TestOCRRecoveryClaims(t *testing.T) {
 				job, _, req := recoveryTerminal(t, db, "succeeded", 0)
 				until := req.Now.Add(time.Minute)
 				token := acquireRecovery(t, db, req, until)
-				before := observeReplay(t, observer, job)
 				next := until.Add(time.Minute)
 				switch scenario {
 				case "wrong_claim":
@@ -204,7 +241,7 @@ func TestOCRRecoveryClaims(t *testing.T) {
 				case "empty_claim":
 					token = ""
 				case "expired":
-					req.Now = until
+					expireRecoveryLease(t, db, job)
 				case "equal_deadline":
 					next = until
 				case "earlier_deadline":
@@ -214,6 +251,7 @@ func TestOCRRecoveryClaims(t *testing.T) {
 				case "rounded_deadline":
 					next = until.Add(time.Nanosecond)
 				}
+				before := observeReplay(t, observer, job)
 				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, req, token, next) }), errRecoveryClaim)
 				if scenario == "wrong_claim" || scenario == "empty_claim" || scenario == "expired" {
 					require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.relinquishRecoveryInTx(tx, req, token) }), errRecoveryClaim)
@@ -459,13 +497,15 @@ func TestOCRRecoveryContention(t *testing.T) {
 					until := req.Now.Add(time.Minute)
 					old := acquireRecovery(t, db, req, until)
 					oldReq := req
-					oldReq.Now = req.Now.Add(time.Second) // Valid before old expiry.
 					takeover := req
-					takeover.Now = until
 					next := until.Add(time.Minute)
 					first := db.Begin()
 					require.NoError(t, first.Error)
 					defer first.Rollback()
+					// Expiry is controlled SQL fixture state, not request time
+					// travel. Rollback restores the genuinely unexpired old lease.
+					expired := expireRecoveryLease(t, first, job)
+					require.True(t, oldReq.Now.Before(expired))
 					newToken, err := r.acquireRecoveryInTx(first, takeover, next)
 					require.NoError(t, err)
 					require.NotEqual(t, old, newToken)
@@ -483,8 +523,8 @@ func TestOCRRecoveryContention(t *testing.T) {
 					}
 					got := receiveRecovery(t, result)
 					if rollback {
-						// No takeover committed; the old token is still authoritative
-						// at its caller-supplied pre-expiry timestamp.
+						// Both expiry setup and takeover rolled back: the old lease
+						// is still unexpired according to the actual database clock.
 						require.NoError(t, got.err)
 						if operation == "renew" {
 							assertRecoveryOwnership(t, observer, job, before, old, &next)
@@ -522,7 +562,7 @@ func TestOCRRecoveryCAS(t *testing.T) {
 	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return updateRecoveryOwnership(tx, &staleLease, "", nil) }), errRecoveryClaim)
 	require.Equal(t, before, observeReplay(t, observer, job))
 	staleToken := before.Task
-	req.Now = renewed
+	expireRecoveryLease(t, db, job)
 	current := acquireRecovery(t, db, req, renewed.Add(time.Minute))
 	require.NotEqual(t, token, current)
 	before = observeReplay(t, observer, job)
@@ -531,4 +571,202 @@ func TestOCRRecoveryCAS(t *testing.T) {
 	staleToken.RecoveryLeaseUntil = before.Task.RecoveryLeaseUntil
 	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return updateRecoveryOwnership(tx, &staleToken, "", nil) }), errRecoveryClaim)
 	require.Equal(t, before, observeReplay(t, observer, job))
+}
+
+// PR #23 accepted stale renew/relinquish, false future deadlines and future
+// obligations, but rejected a genuinely expired takeover. The historical run
+// is recorded in the qualification report; assert corrected outcomes here.
+func TestOCRRecoveryClockCharacterization(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	r := finalizationRepository{}
+	for _, scenario := range []string{"stale_renewal", "stale_relinquishment", "expired_appears_active", "false_future_deadline", "not_due_appears_due"} {
+		t.Run(scenario, func(t *testing.T) {
+			db, observer := foundationDB(t)
+			job, _, req := recoveryTerminal(t, db, "succeeded", 0)
+			until := recoveryDatabaseNow(t, db).Add(time.Minute)
+			token := ""
+			if scenario != "false_future_deadline" && scenario != "not_due_appears_due" {
+				token = acquireRecovery(t, db, req, until)
+				expired := expireRecoveryLease(t, db, job)
+				require.True(t, req.Now.Before(expired))
+				require.True(t, recoveryDatabaseNow(t, db).After(expired))
+			}
+			if scenario == "false_future_deadline" {
+				until = recoveryDatabaseNow(t, db).Add(-time.Microsecond)
+				require.True(t, until.After(req.Now))
+			}
+			if scenario == "not_due_appears_due" {
+				due := recoveryDatabaseNow(t, db).Add(time.Minute)
+				req.Now = due
+				until = due.Add(time.Minute)
+				require.NoError(t, db.Model(&ocrFinalization{}).Where("task_id = ?", job.TaskID).UpdateColumn("next_attempt_at", due).Error)
+			}
+			before := observeReplay(t, observer, job)
+			switch scenario {
+			case "stale_renewal":
+				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, req, token, until) }), errRecoveryClaim)
+				require.Equal(t, before, observeReplay(t, observer, job))
+			case "stale_relinquishment":
+				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.relinquishRecoveryInTx(tx, req, token) }), errRecoveryClaim)
+				require.Equal(t, before, observeReplay(t, observer, job))
+			case "expired_appears_active":
+				claim := acquireRecovery(t, db, req, until)
+				require.NotEqual(t, token, claim)
+				assertRecoveryOwnership(t, observer, job, before, claim, &until)
+			default:
+				err := db.Transaction(func(tx *gorm.DB) error { _, err := r.acquireRecoveryInTx(tx, req, until); return err })
+				require.ErrorIs(t, err, errRecoveryClaim)
+				require.Equal(t, before, observeReplay(t, observer, job))
+			}
+			assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
+		})
+	}
+}
+
+// Actual expiry must pass while a writer waits, without changing claim/lease
+// fixture state. Exercise waits on both required locks and both lock-release
+// outcomes. The observed clocks prove that a transaction-time or pre-lock
+// timestamp would produce the wrong eligibility decision.
+func TestOCRRecoveryClockLockWait(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	r := finalizationRepository{}
+	for _, lock := range []string{"task", "reservation"} {
+		for _, operation := range []string{"renew", "relinquish", "acquire_deadline", "acquire_takeover"} {
+			for _, rollback := range []bool{false, true} {
+				name := lock + "/" + operation + map[bool]string{false: "/blocker_commits", true: "/blocker_rolls_back"}[rollback]
+				t.Run(name, func(t *testing.T) {
+					db, observer := foundationDB(t)
+					job, success, req := recoveryTerminal(t, db, "succeeded", 0)
+					before := observeReplay(t, observer, job)
+					deadline := recoveryDatabaseNow(t, db).Add(2 * time.Second)
+					token := ""
+					if operation != "acquire_deadline" {
+						token = acquireRecovery(t, db, req, deadline)
+					}
+					waitingState := observeReplay(t, observer, job)
+					first := db.Begin()
+					require.NoError(t, first.Error)
+					defer first.Rollback()
+					var lockedID string
+					if lock == "task" {
+						require.NoError(t, first.Raw("SELECT task_id FROM ocr_finalizations WHERE task_id = ? FOR UPDATE", job.TaskID).Scan(&lockedID).Error)
+						require.Equal(t, job.TaskID, lockedID)
+					} else {
+						// This barrier never requests a task lock afterward.
+						require.NoError(t, first.Raw("SELECT id FROM billing_reservations WHERE id = ? FOR UPDATE", job.ReservationID).Scan(&lockedID).Error)
+						require.Equal(t, job.ReservationID, lockedID)
+					}
+					type sampledClock struct{ TransactionTime, BeforeLock time.Time }
+					started := make(chan sampledClock, 1)
+					proposed := deadline.Add(time.Minute)
+					if operation == "acquire_deadline" {
+						proposed = deadline
+					}
+					result := waitRecoveryWriter(t, db, observer, first, func(tx *gorm.DB) (string, error) {
+						var sampled sampledClock
+						if err := tx.Raw("SELECT transaction_timestamp() AS transaction_time, clock_timestamp() AS before_lock").Scan(&sampled).Error; err != nil {
+							return "", err
+						}
+						started <- sampled
+						switch operation {
+						case "renew":
+							return "", r.renewRecoveryInTx(tx, req, token, proposed)
+						case "relinquish":
+							return "", r.relinquishRecoveryInTx(tx, req, token)
+						default:
+							return r.acquireRecoveryInTx(tx, req, proposed)
+						}
+					})
+					sampled := <-started // Sent before the already-observed lock wait.
+					require.True(t, sampled.TransactionTime.Before(deadline))
+					require.True(t, sampled.BeforeLock.Before(deadline))
+					require.True(t, recoveryDatabaseNow(t, observer).Before(deadline), "writer must be blocked before expiry")
+					require.Eventually(t, func() bool {
+						var now time.Time
+						err := observer.Raw("SELECT clock_timestamp()").Scan(&now).Error
+						return err == nil && !now.Before(deadline)
+					}, 5*time.Second, 5*time.Millisecond, "observe actual PostgreSQL expiry while the writer is blocked")
+					require.Equal(t, waitingState, observeReplay(t, observer, job), "no partial ownership while blocked")
+					if rollback {
+						require.NoError(t, first.Rollback().Error)
+					} else {
+						require.NoError(t, first.Commit().Error)
+					}
+					got := receiveRecovery(t, result)
+					if operation == "acquire_takeover" {
+						require.NoError(t, got.err)
+						require.NotEmpty(t, got.token)
+						require.NotEqual(t, token, got.token)
+						assertRecoveryOwnership(t, observer, job, before, got.token, &proposed)
+						require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.renewRecoveryInTx(tx, req, token, proposed.Add(time.Minute)) }), errRecoveryClaim)
+						require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.relinquishRecoveryInTx(tx, req, token) }), errRecoveryClaim)
+					} else {
+						require.ErrorIs(t, got.err, errRecoveryClaim)
+						require.Empty(t, got.token)
+						require.Equal(t, waitingState, observeReplay(t, observer, job))
+					}
+					current := observeReplay(t, observer, job)
+					require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, success) }))
+					require.Equal(t, current, observeReplay(t, observer, job))
+					assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
+				})
+			}
+		}
+	}
+}
+
+func TestOCRRecoveryClockPrecision(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	db, observer := foundationDB(t)
+	job, _, req := recoveryTerminal(t, db, "succeeded", 0)
+	before := observeReplay(t, observer, job)
+	rawUntil := recoveryDatabaseNow(t, db).Add(time.Minute).Add(123 * time.Nanosecond)
+	until := rawUntil.Truncate(time.Microsecond)
+	token := acquireRecovery(t, db, req, rawUntil)
+	assertRecoveryOwnership(t, observer, job, before, token, &until)
+	current := observeReplay(t, observer, job)
+	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error {
+		return (finalizationRepository{}).renewRecoveryInTx(tx, req, token, until.Add(time.Nanosecond))
+	}), errRecoveryClaim)
+	require.Equal(t, current, observeReplay(t, observer, job))
+	// Exact equality is a pure predicate boundary. Standard repository APIs
+	// above/below always obtain real PostgreSQL time; there is no injected clock.
+	require.True(t, holdsRecovery(&current.Task, token, until.Add(-time.Nanosecond)))
+	require.False(t, holdsRecovery(&current.Task, token, until))
+	expired := expireRecoveryLease(t, db, job)
+	current = observeReplay(t, observer, job)
+	assertOptionalTime(t, &expired, current.Task.RecoveryLeaseUntil)
+	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).relinquishRecoveryInTx(tx, req, token) }), errRecoveryClaim)
+	require.Equal(t, current, observeReplay(t, observer, job))
+}
+
+// Demonstrate, rather than conceal, the remaining check-to-commit gap.
+func TestOCRRecoveryClockDelayedCommit(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	db, observer := foundationDB(t)
+	job, _, req := recoveryTerminal(t, db, "succeeded", 0)
+	before := observeReplay(t, observer, job)
+	until := recoveryDatabaseNow(t, db).Add(time.Second)
+	tx := db.Begin()
+	require.NoError(t, tx.Error)
+	defer tx.Rollback()
+	token, err := (finalizationRepository{}).acquireRecoveryInTx(tx, req, until)
+	require.NoError(t, err)
+	require.True(t, recoveryDatabaseNow(t, observer).Before(until))
+	require.Equal(t, before, observeReplay(t, observer, job))
+	require.Eventually(t, func() bool {
+		var now time.Time
+		err := observer.Raw("SELECT clock_timestamp()").Scan(&now).Error
+		return err == nil && !now.Before(until)
+	}, 5*time.Second, 5*time.Millisecond)
+	require.NoError(t, tx.Commit().Error)
+	assertRecoveryOwnership(t, observer, job, before, token, &until)
+	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error {
+		return (finalizationRepository{}).renewRecoveryInTx(tx, req, token, until.Add(time.Minute))
+	}), errRecoveryClaim)
+	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return (finalizationRepository{}).relinquishRecoveryInTx(tx, req, token) }), errRecoveryClaim)
+	next := until.Add(time.Minute)
+	current := acquireRecovery(t, db, req, next)
+	require.NotEqual(t, token, current)
+	assertRecoveryOwnership(t, observer, job, before, current, &next)
 }
