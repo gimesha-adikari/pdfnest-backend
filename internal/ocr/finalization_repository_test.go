@@ -459,6 +459,17 @@ func TestOCRFoundationReservationStateRejections(t *testing.T) {
 				var count int64
 				require.NoError(t, observer.Model(&config.UsageLog{}).Where("user_id = ?", job.OwnerID).Count(&count).Error)
 				require.Zero(t, count)
+				var sub config.Subscription
+				var absent config.BillingReservation
+				require.ErrorIs(t, observer.First(&absent, "id = ?", job.ReservationID).Error, gorm.ErrRecordNotFound)
+				require.NoError(t, observer.Where("user_id = ?", job.OwnerID).First(&sub).Error)
+				require.Zero(t, sub.UsedUnits3h)
+				require.Zero(t, sub.UsedUnitsDaily)
+				require.Zero(t, sub.UsedUnitsMonthly)
+				require.Equal(t, 50, sub.CustomCredits)
+				require.Equal(t, job.Artifact.ArtifactID, row.Artifact.ArtifactID)
+				require.Equal(t, job.Artifact.ArtifactKey, row.Artifact.ArtifactKey)
+				require.Equal(t, job.Artifact.SHA256, row.Artifact.SHA256)
 			}
 		})
 	}

@@ -32,6 +32,23 @@ func testBinding(res *config.BillingReservation) ReservationBinding {
 		ToolName: res.ToolName, Units: res.Units, PlanUnits: res.PlanUnits, CreditUnits: res.CreditUnits}
 }
 
+func assertStrictState(t *testing.T, observer *gorm.DB, reservationID, owner, status string, used, credits, logs int) {
+	t.Helper()
+	var reservation config.BillingReservation
+	var subscription config.Subscription
+	var count int64
+	require.NoError(t, observer.First(&reservation, "id = ?", reservationID).Error)
+	require.NoError(t, observer.Where("user_id = ?", owner).First(&subscription).Error)
+	require.NoError(t, observer.Model(&config.UsageLog{}).Where("user_id = ?", owner).Count(&count).Error)
+	require.Equal(t, status, reservation.Status)
+	require.Equal(t, owner, reservation.UserID)
+	require.Equal(t, used, subscription.UsedUnits3h)
+	require.Equal(t, used, subscription.UsedUnitsDaily)
+	require.Equal(t, used, subscription.UsedUnitsMonthly)
+	require.Equal(t, credits, subscription.CustomCredits)
+	require.EqualValues(t, logs, count)
+}
+
 func TestStrictSettlementInCallerTransaction(t *testing.T) {
 	for _, tc := range []struct {
 		name                                       string
@@ -67,6 +84,7 @@ func TestStrictSettlementInCallerTransaction(t *testing.T) {
 			require.Equal(t, tc.credits > 0, logs[0].IsCredit)
 			require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return Default.SettleReservationInTx(tx, binding, time.Now()) }), ErrReservationCommitted)
 			require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return Default.ReleaseReservationInTx(tx, binding, time.Now()) }), ErrReservationCommitted)
+			assertStrictState(t, observer, res.ID, owner, "committed", tc.wantUsed, tc.wantCredits, 1)
 		})
 	}
 }
@@ -123,6 +141,16 @@ func TestStrictReservationRejections(t *testing.T) {
 			} else {
 				require.Zero(t, logs)
 			}
+			status, used, wantLogs := "reserved", 0, 0
+			switch name {
+			case "committed":
+				status, used, wantLogs = "committed", 7, 1
+			case "released":
+				status = "released"
+			case "unknown_state":
+				status = "unknown"
+			}
+			assertStrictState(t, observer, res.ID, owner, status, used, 50, wantLogs)
 		})
 	}
 }
@@ -159,6 +187,7 @@ func TestStrictTransactionRollbackAndRelease(t *testing.T) {
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return Default.ReleaseReservationInTx(tx, b, time.Now()) }))
 	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return Default.ReleaseReservationInTx(tx, b, time.Now()) }), ErrReservationReleased)
 	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return Default.SettleReservationInTx(tx, b, time.Now()) }), ErrReservationReleased)
+	assertStrictState(t, observer, res.ID, owner, "released", 0, 50, 0)
 }
 
 func TestStrictSettlementSynchronizesAllWindows(t *testing.T) {
@@ -185,4 +214,5 @@ func TestStrictSettlementSynchronizesAllWindows(t *testing.T) {
 	var logs int64
 	require.NoError(t, observer.Model(&config.UsageLog{}).Where("user_id = ?", owner).Count(&logs).Error)
 	require.EqualValues(t, 1, logs)
+	assertStrictState(t, observer, res.ID, owner, "committed", 7, 50, 1)
 }

@@ -130,6 +130,8 @@ git diff --check
 
 Final regular and race runs: billing **55 top-level / 77 including subtests**, tasks **29 / 45**, OCR **21 / 96**; zero failures/skips. The 6 new OCR foundation top-level tests account for 64 events including subtests. Existing guest, free-mode, mode-transition, callback and S2-07 characterization cases executed without opt-in skips. Go vet passed; formatting and whitespace checks passed. Initial new-API build failures and the deliberate constraint-red experiment are development evidence, not passing checks; the final gates supersede them.
 
+A final test-only follow-up expanded every strict rejection/settlement snapshot to explicitly re-read reservation state, all three counters, credits and usage logs, plus the missing-reservation case's descriptor association. Both full commands were repeated on a fresh disposable instance at the same loopback endpoints; counts remained unchanged. No runtime source changed in that follow-up.
+
 No frontend/browser suite was repeated because no frontend code, public status, HTTP request or task protocol changed. Actual PDF artifact validation/publication remains covered by unchanged legacy tests, not by these metadata-only foundation tests. No full OCR algorithm or external object-store integration is claimed.
 
 ## Runtime-inert and migration proof
