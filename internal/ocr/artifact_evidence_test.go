@@ -82,11 +82,11 @@ type faultArtifactStore struct {
 	readHook    func(context.Context, string, int64) (*storage.ArtifactFile, error)
 }
 
-func (s faultArtifactStore) persist(ctx context.Context, key, path string) error {
+func (s faultArtifactStore) persist(ctx context.Context, key, path, digest string, size int64) error {
 	if s.persistHook != nil {
 		return s.persistHook(ctx, key, path)
 	}
-	return (selectedArtifactStore{}).persist(ctx, key, path)
+	return (selectedArtifactStore{}).persist(ctx, key, path, digest, size)
 }
 func (s faultArtifactStore) read(ctx context.Context, key string, limit int64) (*storage.ArtifactFile, error) {
 	if s.readHook != nil {

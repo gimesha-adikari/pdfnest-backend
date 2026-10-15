@@ -26,6 +26,8 @@ import (
 type Store struct {
 	client *minio.Client
 	bucket string
+	// Only package tests set this for faithful loopback conditional-PUT simulation.
+	artifactConditionalTest bool
 }
 
 var (
