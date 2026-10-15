@@ -41,9 +41,9 @@ func createLocalArtifact(ctx context.Context, root, key, source, digest string, 
 	}
 	// Each component is opened relative to an already held directory descriptor.
 	// O_NOFOLLOW rejects even an in-root symlink alias to another task namespace.
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := openArtifactRoot(root)
 	if err != nil {
-		return localCreateFailure(err)
+		return err
 	}
 	dirs := []int{fd}
 	defer func() {
