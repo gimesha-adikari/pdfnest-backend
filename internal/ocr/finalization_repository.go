@@ -168,6 +168,10 @@ func terminal(state string) bool {
 }
 
 func lockFinalization(tx *gorm.DB, req finalizationRequest) (*ocrFinalization, error) {
+	return lockFinalizationWithReplay(tx, req, false)
+}
+
+func lockFinalizationWithReplay(tx *gorm.DB, req finalizationRequest, successReplay bool) (*ocrFinalization, error) {
 	if err := billing.RequirePostgresTransaction(tx); err != nil {
 		return nil, err
 	}
@@ -178,7 +182,17 @@ func lockFinalization(tx *gorm.DB, req finalizationRequest) (*ocrFinalization, e
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("task_id = ?", req.TaskID).First(&job).Error; err != nil {
 		return nil, err
 	}
-	if job.ProtocolVersion != 1 || job.OwnerID != req.OwnerID || job.ReservationID != req.ReservationID || job.ToolName != billing.ImageToTextPDF.Name || req.Now.Before(job.UpdatedAt) {
+	chronology := job.UpdatedAt
+	if successReplay && job.State == "succeeded" && req.ExpectedState == "ready" {
+		// Acknowledgment uses the immutable decision time, even if unrelated
+		// recovery bookkeeping later advances UpdatedAt. All bindings and the
+		// original/resulting lifecycle revision are still checked by succeedInTx.
+		if job.DecidedAt == nil || job.DecidedAt.IsZero() {
+			return nil, errFinalizationBinding
+		}
+		chronology = *job.DecidedAt
+	}
+	if job.ProtocolVersion != 1 || job.OwnerID != req.OwnerID || job.ReservationID != req.ReservationID || job.ToolName != billing.ImageToTextPDF.Name || req.Now.Before(chronology) {
 		return nil, errFinalizationBinding
 	}
 	return &job, nil
@@ -192,7 +206,7 @@ func checkRevision(job *ocrFinalization, req finalizationRequest) error {
 }
 
 func (finalizationRepository) succeedInTx(tx *gorm.DB, req finalizationRequest) error {
-	job, err := lockFinalization(tx, req)
+	job, err := lockFinalizationWithReplay(tx, req, true)
 	if err != nil {
 		return err
 	}
@@ -326,6 +340,11 @@ func updateDecision(tx *gorm.DB, job *ocrFinalization, state, code string, now t
 }
 
 func updateLifecycle(tx *gorm.DB, job *ocrFinalization, updates map[string]any, now time.Time) error {
+	// Terminal revisions belong to the authoritative decision. Future recovery
+	// bookkeeping must fence independently using a recovery claim/token.
+	if terminal(job.State) {
+		return errFinalizationTerminal
+	}
 	updates["revision"] = job.Revision + 1
 	updates["updated_at"] = now
 	result := tx.Model(&ocrFinalization{}).Where("task_id = ? AND revision = ? AND state = ?", job.TaskID, job.Revision, job.State).Updates(updates)

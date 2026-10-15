@@ -5,6 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"pdfnest-backend/config"
+	"pdfnest-backend/internal/billing"
+
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -14,8 +17,8 @@ import (
 // of the dormant OCR finalization repository's success replay logic across synthetic
 // recovery metadata, revision, and chronology changes.
 //
-// M1-S2-16: Characterizes whether later maintenance operations (such as cleanup lease claims)
-// preserve or invalidate legitimate idempotency retries of already-settled tasks.
+// M1-S2-16 cases A-F are retained. M1-S2-17 changes only case D's original-time
+// replay expectation and adds decision chronology, terminal guards and lock barriers.
 func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 	t.Setenv("BILLING_MODE", "normal")
 
@@ -36,7 +39,9 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 		// Verify durable initial settlement
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 
-		// Replay original request with same timestamp (req.Now == job.UpdatedAt)
+		before := observeReplay(t, observer, job)
+
+		// Replay original request with the persisted decision timestamp
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 			return r.succeedInTx(tx, req)
 		}))
@@ -47,6 +52,12 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 			return r.succeedInTx(tx, laterReq)
 		}))
+
+		// The resulting revision is also an allowed acknowledgment of this decision.
+		resultReq := req
+		resultReq.ExpectedRevision = 5
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, resultReq) }))
+		require.Equal(t, before, observeReplay(t, observer, job))
 
 		// Durable assertions: no double billing, exactly 1 usage log, 50 credits, revision 5
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
@@ -83,10 +94,14 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			"download_expires_at":  downloadExpiresAt,
 		}).Error)
 
+		before := observeReplay(t, observer, job)
+
 		// Replay original request
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 			return r.succeedInTx(tx, req)
 		}))
+
+		require.Equal(t, before, observeReplay(t, observer, job))
 
 		// Verify state, billing, and accounting remain unchanged
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
@@ -127,6 +142,8 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			"recovery_lease_until": leaseUntil,
 		}).Error)
 
+		before := observeReplay(t, observer, job)
+
 		// Retry original success request (which carries ExpectedRevision = 4, ExpectedState = "ready")
 		// The current repository checks:
 		// req.ExpectedRevision != job.Revision && req.ExpectedRevision != job.Revision-1
@@ -136,6 +153,8 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			return r.succeedInTx(tx, req)
 		})
 		require.ErrorIs(t, err, errFinalizationRevision, "replay must be rejected when maintenance has incremented revision beyond job.Revision-1")
+
+		require.Equal(t, before, observeReplay(t, observer, job))
 
 		// Authoritative SQL decision and billing remain committed and uncorrupted
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 6)
@@ -158,23 +177,26 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 		// Simulate maintenance advancing UpdatedAt while leaving Revision = 5
 		maintUpdate := req.Now.Add(time.Minute)
 		require.NoError(t, db.Model(&ocrFinalization{}).Where("task_id = ?", job.TaskID).Updates(map[string]any{
-			"updated_at": maintUpdate,
+			"updated_at":           maintUpdate,
+			"recovery_claim":       strings.Repeat("c", 64),
+			"recovery_lease_until": maintUpdate.Add(time.Minute),
 		}).Error)
 
-		// Retry using original request timestamp (req.Now predates maintUpdate)
-		// lockFinalization checks: req.Now.Before(job.UpdatedAt)
-		// Expected characterization: Rejected with errFinalizationBinding.
-		err := db.Transaction(func(tx *gorm.DB) error {
-			return r.succeedInTx(tx, req)
-		})
-		require.ErrorIs(t, err, errFinalizationBinding, "replay with original timestamp must be rejected when UpdatedAt was advanced by maintenance")
+		before := observeReplay(t, observer, job)
 
-		// Contrast: a retry with fresh timestamp (after maintUpdate) succeeds because Revision is still 5
+		// PR #21 rejected this original-time replay with errFinalizationBinding.
+		// M1-S2-17 uses DecidedAt for an exact already-succeeded acknowledgment.
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+			return r.succeedInTx(tx, req)
+		}))
+
+		// A later timestamp remains valid too; neither retry rewrites maintenance.
 		freshReq := req
 		freshReq.Now = maintUpdate.Add(time.Second)
 		require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
 			return r.succeedInTx(tx, freshReq)
 		}))
+		require.Equal(t, before, observeReplay(t, observer, job))
 
 		// Authoritative SQL decision and billing remain committed and uncorrupted
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
@@ -200,6 +222,8 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			"revision":   7,
 		}).Error)
 
+		before := observeReplay(t, observer, job)
+
 		// 1. Replay with pre-decision revision (4): 4 != 7 && 4 != 6 -> rejected
 		err := db.Transaction(func(tx *gorm.DB) error {
 			return r.succeedInTx(tx, req)
@@ -213,6 +237,7 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			return r.succeedInTx(tx, postReq)
 		})
 		require.ErrorIs(t, err, errFinalizationRevision)
+		require.Equal(t, before, observeReplay(t, observer, job))
 
 		// Authoritative SQL decision and billing remain committed and uncorrupted
 		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 7)
@@ -231,10 +256,12 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			req := foundationRequest(job)
 			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
 
+			before := observeReplay(t, observer, job)
 			wrongReq := req
 			wrongReq.OwnerID = uuid.NewString()
 			err := db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, wrongReq) })
 			require.ErrorIs(t, err, errFinalizationBinding)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 		})
 
@@ -245,10 +272,12 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			req := foundationRequest(job)
 			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
 
+			before := observeReplay(t, observer, job)
 			wrongReq := req
 			wrongReq.ReservationID = uuid.NewString()
 			err := db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, wrongReq) })
 			require.ErrorIs(t, err, errFinalizationBinding)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 		})
 
@@ -259,10 +288,12 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			req := foundationRequest(job)
 			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
 
+			before := observeReplay(t, observer, job)
 			wrongReq := req
 			wrongReq.ProcessingClaim = uuid.NewString()
 			err := db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, wrongReq) })
 			require.ErrorIs(t, err, errFinalizationBinding)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 		})
 
@@ -273,10 +304,12 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			req := foundationRequest(job)
 			require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
 
+			before := observeReplay(t, observer, job)
 			conflictReq := req
 			conflictReq.Artifact.SHA256 = strings.Repeat("d", 64)
 			err := db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, conflictReq) })
 			require.ErrorIs(t, err, errFinalizationBinding)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
 		})
 
@@ -292,11 +325,14 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			}))
 			assertFoundation(t, observer, job, "cancelled", "released", 0, 50, 0, 5)
 
+			before := observeReplay(t, observer, job)
+
 			// Attempt succeedInTx on cancelled task
 			err := db.Transaction(func(tx *gorm.DB) error {
 				return r.succeedInTx(tx, req)
 			})
 			require.ErrorIs(t, err, errFinalizationTerminal)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "cancelled", "released", 0, 50, 0, 5)
 		})
 
@@ -312,12 +348,201 @@ func TestOCRSuccessReplayMaintenanceCharacterization(t *testing.T) {
 			}))
 			assertFoundation(t, observer, job, "failed", "released", 0, 50, 0, 5)
 
+			before := observeReplay(t, observer, job)
+
 			// Attempt succeedInTx on failed task
 			err := db.Transaction(func(tx *gorm.DB) error {
 				return r.succeedInTx(tx, req)
 			})
 			require.ErrorIs(t, err, errFinalizationTerminal)
+			require.Equal(t, before, observeReplay(t, observer, job))
 			assertFoundation(t, observer, job, "failed", "released", 0, 50, 0, 5)
 		})
 	})
+
+	// A timestamp between artifact verification and the actual decision must
+	// fail even after maintenance; artifact chronology alone is insufficient.
+	t.Run("pre_decision_timestamp", func(t *testing.T) {
+		db, observer := foundationDB(t)
+		job, _ := foundationReady(t, db, 0)
+		req := foundationRequest(job)
+		req.Now = req.Now.Add(10 * time.Second)
+		r := finalizationRepository{}
+		require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
+		require.NoError(t, db.Model(&ocrFinalization{}).Where("task_id = ?", job.TaskID).Updates(map[string]any{"updated_at": req.Now.Add(time.Minute)}).Error)
+		before := observeReplay(t, observer, job)
+		require.NotNil(t, before.Task.DecidedAt)
+		require.True(t, req.Now.Equal(*before.Task.DecidedAt))
+		req.Now = req.Now.Add(-time.Microsecond)
+		require.True(t, req.Now.After(req.Artifact.VerifiedAt))
+		require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }), errFinalizationBinding)
+		require.Equal(t, before, observeReplay(t, observer, job))
+		assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
+	})
+
+	t.Run("terminal_lifecycle_update_guard", func(t *testing.T) {
+		for _, state := range []string{"succeeded", "cancelled", "failed"} {
+			t.Run(state, func(t *testing.T) {
+				db, observer := foundationDB(t)
+				job, _ := foundationReady(t, db, 0)
+				req := foundationRequest(job)
+				require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+					if state == "succeeded" {
+						return (finalizationRepository{}).succeedInTx(tx, req)
+					}
+					return endFoundation(tx, req, state, "CONTROLLED_STOP")
+				}))
+				before := observeReplay(t, observer, job)
+				updates := map[string]any{"recovery_claim": strings.Repeat("f", 64), "artifact_byte_size": int64(129), "decided_at": req.Now.Add(time.Second)}
+				var guardErr error
+				// Commit even after the helper rejects, proving the guard itself
+				// prevents mutation rather than relying on caller rollback.
+				require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+					locked, err := lockFinalization(tx, foundationRequest(before.Task))
+					if err != nil {
+						return err
+					}
+					guardErr = updateLifecycle(tx, locked, updates, req.Now.Add(2*time.Second))
+					return nil
+				}))
+				require.ErrorIs(t, guardErr, errFinalizationTerminal)
+				require.NotContains(t, updates, "revision")
+				require.NotContains(t, updates, "updated_at")
+				require.Equal(t, before, observeReplay(t, observer, job))
+				used, logs, reservation := 0, 0, "released"
+				if state == "succeeded" {
+					used, logs, reservation = 7, 1, "committed"
+				}
+				assertFoundation(t, observer, job, state, reservation, used, 50, logs, 5)
+			})
+		}
+	})
+
+	// Original case F retains owner/reservation/claim/artifact and terminal
+	// rejection tests. Add the missing replay-specific state/revision/time and
+	// reservation-status boundaries, rather than duplicating that matrix.
+	t.Run("additional_replay_bindings", func(t *testing.T) {
+		for _, scenario := range []string{"wrong_task", "wrong_state", "stale_revision", "future_revision", "zero_time", "released_reservation", "reserved_reservation", "unknown_reservation"} {
+			t.Run(scenario, func(t *testing.T) {
+				db, observer := foundationDB(t)
+				job, _ := foundationReady(t, db, 0)
+				req := foundationRequest(job)
+				r := finalizationRepository{}
+				require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
+				wrong := req
+				wantErr := errFinalizationBinding
+				resState := "committed"
+				switch scenario {
+				case "wrong_task":
+					other, _ := foundationReady(t, db, 0)
+					otherBefore := observeReplay(t, observer, other)
+					t.Cleanup(func() { require.Equal(t, otherBefore, observeReplay(t, observer, other)) })
+					wrong.TaskID = other.TaskID
+				case "wrong_state":
+					wrong.ExpectedState = "succeeded"
+					wantErr = errFinalizationRevision
+				case "stale_revision":
+					wrong.ExpectedRevision = 3
+					wantErr = errFinalizationRevision
+				case "future_revision":
+					wrong.ExpectedRevision = 6
+					wantErr = errFinalizationRevision
+				case "zero_time":
+					wrong.Now = time.Time{}
+				default:
+					// Unsupported privileged SQL corruption is not a release API.
+					resState = strings.TrimSuffix(scenario, "_reservation")
+					require.NoError(t, db.Model(&config.BillingReservation{}).Where("id = ?", job.ReservationID).Update("status", resState).Error)
+					wantErr = billing.ErrReservationState
+				}
+				before := observeReplay(t, observer, job)
+				require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, wrong) }), wantErr)
+				require.Equal(t, before, observeReplay(t, observer, job))
+				assertFoundation(t, observer, job, "succeeded", resState, 7, 50, 1, 5)
+			})
+		}
+	})
+
+	t.Run("maintenance_replay_lock_barrier", func(t *testing.T) {
+		for _, rollback := range []bool{false, true} {
+			t.Run(map[bool]string{false: "maintenance_commits", true: "maintenance_rolls_back"}[rollback], func(t *testing.T) {
+				db, observer := foundationDB(t)
+				job, _ := foundationReady(t, db, 0)
+				req := foundationRequest(job)
+				r := finalizationRepository{}
+				require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return r.succeedInTx(tx, req) }))
+				before := observeReplay(t, observer, job)
+				maintenance := db.Begin()
+				require.NoError(t, maintenance.Error)
+				defer maintenance.Rollback()
+				var maintenancePID int
+				require.NoError(t, maintenance.Raw("SELECT pg_backend_pid()").Scan(&maintenancePID).Error)
+				require.NoError(t, maintenance.Model(&ocrFinalization{}).Where("task_id = ?", job.TaskID).Updates(map[string]any{
+					"updated_at": req.Now.Add(time.Minute), "recovery_claim": strings.Repeat("e", 64),
+					"recovery_lease_until": req.Now.Add(5 * time.Minute),
+				}).Error)
+				// Expected committed state comes from SQL, before replay runs.
+				maintained := observeReplay(t, maintenance, job)
+				require.Equal(t, before, observeReplay(t, observer, job), "uncommitted maintenance must be invisible")
+				pid, result := make(chan int, 1), make(chan error, 1)
+				go func() {
+					result <- db.Transaction(func(tx *gorm.DB) error {
+						var id int
+						if err := tx.Raw("SELECT pg_backend_pid()").Scan(&id).Error; err != nil {
+							return err
+						}
+						pid <- id
+						return r.succeedInTx(tx, req)
+					})
+				}()
+				select {
+				case id := <-pid:
+					waitForDatabaseLock(t, observer, id)
+					var blockedByMaintenance bool
+					require.NoError(t, observer.Raw("SELECT ? = ANY(pg_blocking_pids(?))", maintenancePID, id).Scan(&blockedByMaintenance).Error)
+					require.True(t, blockedByMaintenance)
+				case <-time.After(5 * time.Second):
+					t.Fatal("replay did not reach row-lock barrier")
+				}
+				if rollback {
+					require.NoError(t, maintenance.Rollback().Error)
+				} else {
+					require.NoError(t, maintenance.Commit().Error)
+				}
+				require.NoError(t, receiveFoundationResult(t, result))
+				if rollback {
+					require.Equal(t, before, observeReplay(t, observer, job))
+				} else {
+					require.Equal(t, maintained, observeReplay(t, observer, job))
+				}
+				assertFoundation(t, observer, job, "succeeded", "committed", 7, 50, 1, 5)
+			})
+		}
+	})
+}
+
+// Full durable snapshots catch any task, recovery, allocation, window-reset or
+// usage-row rewrite. Normal calls use the independent observer pool; only the
+// barrier test uses its maintenance transaction to capture expected uncommitted
+// maintenance values before comparing the final independent observation.
+type replayObservation struct {
+	Task         ocrFinalization
+	Reservation  config.BillingReservation
+	Subscription config.Subscription
+	Usage        []config.UsageLog
+}
+
+func observeReplay(t *testing.T, observer *gorm.DB, job ocrFinalization) replayObservation {
+	t.Helper()
+	var actual replayObservation
+	require.NoError(t, observer.First(&actual.Task, "task_id = ?", job.TaskID).Error)
+	require.NoError(t, observer.First(&actual.Reservation, "id = ?", job.ReservationID).Error)
+	require.NoError(t, observer.First(&actual.Subscription, "user_id = ?", job.OwnerID).Error)
+	require.NoError(t, observer.Where("user_id = ?", job.OwnerID).Order("id").Find(&actual.Usage).Error)
+	var count int64
+	require.NoError(t, observer.Model(&ocrFinalization{}).Where("owner_id = ?", job.OwnerID).Count(&count).Error)
+	require.EqualValues(t, 1, count, "one authoritative task for this synthetic owner")
+	require.NoError(t, observer.Model(&config.BillingReservation{}).Where("user_id = ?", job.OwnerID).Count(&count).Error)
+	require.EqualValues(t, 1, count, "one exact reservation without duplicate allocation")
+	return actual
 }
