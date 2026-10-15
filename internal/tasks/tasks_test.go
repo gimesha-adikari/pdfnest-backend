@@ -75,6 +75,30 @@ func TestTaskRegistry_RedisOperations(t *testing.T) {
 	}
 }
 
+func TestSetWithResultURLKeepsExplicitOwnerAndLocalPath(t *testing.T) {
+	client := setupTestRedis(t)
+	reg := &TaskRegistry{client: client}
+	const taskID = "local-pdf-result"
+	const owner = "synthetic-owner"
+	const resultPath = "/tmp/pdfnest-test-storage/outputs/tasks/local-pdf-result/result.pdf"
+
+	accepted, err := reg.SetWithResultURL(taskID, "COMPLETED", 100, resultPath, "", owner)
+	if err != nil || !accepted {
+		t.Fatalf("SetWithResultURL failed: accepted=%v err=%v", accepted, err)
+	}
+
+	task, err := reg.Get(taskID)
+	if err != nil || task == nil {
+		t.Fatalf("Get local task result failed: task=%+v err=%v", task, err)
+	}
+	if task.OwnerIdentity != owner {
+		t.Fatalf("local task result lost explicit owner: got %q want %q", task.OwnerIdentity, owner)
+	}
+	if task.ResultURL != resultPath || task.ResultKey != "" {
+		t.Fatalf("local result must retain path URL without an object key: %+v", task)
+	}
+}
+
 func TestTaskRegistry_MultiInstance(t *testing.T) {
 	client := setupTestRedis(t)
 	defer client.FlushDB(context.Background())
