@@ -116,8 +116,9 @@ func TestOwnerlessTaskRequiresCapabilityForStatusAndDownload(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, response.StatusCode)
 	require.NotContains(t, cancelResponse, "downloadToken")
 
-	request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/tasks/%s?token=%s", taskID, task.DownloadToken), nil)
+	request = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/v1/tasks/%s", taskID), nil)
 	request.Header.Set("X-Test-Identity", "unrelated-identity")
+	request.Header.Set("X-Download-Token", task.DownloadToken)
 	response, requestErr = app.Test(request)
 	require.NoError(t, requestErr)
 	defer response.Body.Close()

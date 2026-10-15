@@ -618,9 +618,6 @@ func handleCancelTask(c *fiber.Ctx) error {
 	}
 
 	capability := strings.TrimSpace(c.Get("X-Download-Token"))
-	if capability == "" {
-		capability = strings.TrimSpace(c.Query("token"))
-	}
 	result, task, err := Registry.CancelTask(id, requesterID, capability)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
