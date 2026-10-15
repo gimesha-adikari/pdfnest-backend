@@ -20,6 +20,7 @@ type ArtifactCreateKind string
 
 const (
 	ArtifactCreateInvalid     ArtifactCreateKind = "invalid_key_or_source"
+	ArtifactCreateUnsafeRoot  ArtifactCreateKind = "unsafe_local_root"
 	ArtifactCreateExists      ArtifactCreateKind = "already_exists"
 	ArtifactCreateConflict    ArtifactCreateKind = "conditional_conflict"
 	ArtifactCreateDenied      ArtifactCreateKind = "denied"
