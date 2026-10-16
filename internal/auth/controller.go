@@ -142,7 +142,6 @@ func sendVerificationEmail(toEmail, rawToken string) error {
 	contactURL := fmt.Sprintf("%s/contact", frontendURL)
 
 	log.Printf("[AUTH EMAIL] preparing verification email for %s", toEmail)
-	log.Printf("[AUTH EMAIL] verify URL: %s", verifyURL)
 
 	htmlBody, err := buildVerificationEmailHTML(verifyURL, contactURL)
 	if err != nil {
