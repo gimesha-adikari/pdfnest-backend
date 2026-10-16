@@ -418,6 +418,11 @@ func (ctrl *Controller) ConvertMarkdownToPDF(c *fiber.Ctx) error {
 
 	outputPath, err := ctrl.service.MarkdownToPdf(c.UserContext(), upload.Path, opts)
 	if err != nil {
+		if errors.Is(err, ErrMarkdownPolicy) {
+			return c.Status(fiber.StatusBadRequest).JSON(APIError{
+				Code: "MARKDOWN_RESOURCE_FORBIDDEN", Message: err.Error(),
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "MARKDOWN_CONVERSION_FAILED",
 			Message: "Markdown vector mapping rendering execution failure: " + err.Error(),
@@ -750,6 +755,12 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Missing input target Markdown file resource payload.",
+		})
+	}
+	if err := checkMarkdownSourceFile(upload.Path); err != nil {
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusBadRequest).JSON(APIError{
+			Code: "MARKDOWN_RESOURCE_FORBIDDEN", Message: err.Error(),
 		})
 	}
 
