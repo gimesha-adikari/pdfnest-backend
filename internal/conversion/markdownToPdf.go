@@ -3,6 +3,7 @@ package conversion
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -34,29 +35,18 @@ func (s *ConversionService) MarkdownToPdf(ctx context.Context, inputMdPath strin
 		return "", err
 	}
 
-	// The output is owned here until every print, byte-budget and security
-	// check has succeeded. Never leave a partially written successful result.
+	// The output stays private until streaming, PDF validation and the browser
+	// policy-event boundary have all succeeded.
 	file, err := os.CreateTemp("", "md-compiled-*.pdf")
 	if err != nil {
 		return "", err
 	}
-	defer func() {
-		_ = file.Close()
-		if err != nil {
-			_ = os.Remove(file.Name())
-		}
-	}()
-	if err = browser.printPDF(file, opts); err != nil {
+	output, err = completeMarkdownPDFOutput(ctx, file,
+		func(writer io.Writer) error { return browser.printPDF(writer, opts) },
+		browser.sealPolicyEvents,
+	)
+	if err != nil {
 		return "", err
 	}
-	if err = browser.policyError(); err != nil {
-		return "", err
-	}
-	if err = ctx.Err(); err != nil {
-		return "", err
-	}
-	if err = file.Close(); err != nil {
-		return "", err
-	}
-	return file.Name(), nil
+	return output, nil
 }

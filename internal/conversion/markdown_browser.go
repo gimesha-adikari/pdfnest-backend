@@ -2,7 +2,6 @@ package conversion
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +22,7 @@ import (
 	cdpio "github.com/chromedp/cdproto/io"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"pdfnest-backend/internal/process"
 )
@@ -327,11 +327,7 @@ func (b *markdownBrowser) printPDF(writer io.Writer, options PrintOptions) error
 			b.fail("browser PDF spool exceeds its workspace budget")
 			return b.policyError()
 		}
-		total := 0
-		for {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+		return readMarkdownPDFStream(ctx, writer, func(ctx context.Context) (markdownPDFStreamChunk, error) {
 			// cdproto.IO.read's convenience Do discards base64Encoded. Preserve
 			// that flag explicitly; arbitrary PDF bytes are usually base64.
 			var chunk struct {
@@ -340,42 +336,38 @@ func (b *markdownBrowser) printPDF(writer io.Writer, options PrintOptions) error
 				EOF    bool   `json:"eof"`
 			}
 			if err := cdp.Execute(ctx, cdpio.CommandRead, cdpio.Read(stream).WithSize(64<<10), &chunk); err != nil {
-				return err
+				return markdownPDFStreamChunk{}, err
 			}
-			data := []byte(chunk.Data)
-			if chunk.Base64 {
-				data, err = base64.StdEncoding.DecodeString(chunk.Data)
-				if err != nil {
-					return err
-				}
-			}
-			total, err = writeMarkdownPDFChunk(writer, data, total)
-			if err != nil {
-				return err
-			}
-			if chunk.EOF {
-				break
-			}
-			if len(data) == 0 {
-				return fmt.Errorf("browser returned an empty PDF stream chunk")
-			}
-		}
-		return b.policyError()
+			return markdownPDFStreamChunk{Data: chunk.Data, Base64Encoded: chunk.Base64, EOF: chunk.EOF}, nil
+		})
 	}))
 }
 
-func writeMarkdownPDFChunk(writer io.Writer, data []byte, total int) (int, error) {
-	if len(data) > markdownMaxPDFBytes-total {
-		return total, markdownPolicyError("PDF exceeds 32 MiB")
-	}
-	if total == 0 && !strings.HasPrefix(string(data), "%PDF-") {
-		return total, fmt.Errorf("browser returned an invalid PDF stream")
-	}
-	written, err := writer.Write(data)
-	if err == nil && written != len(data) {
-		err = io.ErrShortWrite
-	}
-	return total + written, err
+// sealPolicyEvents stops loading and disables every CDP event domain used by
+// the Markdown policy. The final Runtime command is an ordered marker on the
+// same target session: target events received before its response have passed
+// through chromedp's synchronous target listener before this method returns.
+// Static generated content has no script or outstanding network resource once
+// setDocument and printPDF complete, so disabling these sources closes the
+// policy-event boundary without relying on a timer or browser shutdown races.
+func (b *markdownBrowser) sealPolicyEvents() error {
+	return b.run(
+		page.StopLoading(),
+		fetch.Disable(),
+		network.Disable(),
+		audits.Disable(),
+		page.Disable(),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			_, exception, err := runtime.Evaluate("void 0").Do(ctx)
+			if err != nil {
+				return err
+			}
+			if exception != nil {
+				return fmt.Errorf("could not confirm browser policy-event boundary")
+			}
+			return nil
+		}),
+	)
 }
 
 func (b *markdownBrowser) close() {

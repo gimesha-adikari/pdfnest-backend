@@ -319,3 +319,78 @@ Test5_PostgreSQLUniqueConstraints
 Test6_PostgreSQLForeignKeyRejection
 Test7_CyclicVersionSnapshotRelationshipAndDeletionSafety
 ```
+
+## M1-S2-24R1 — PDF stream integrity follow-up
+
+The Markdown service now treats Chromium's protocol `eof` as stream completion,
+copies each bounded `IO.read` chunk to its private output file, and validates
+the complete file before returning a path. The five-byte `%PDF-` header is
+checked across chunk boundaries. Empty streams, missing protocol completion,
+malformed base64, short writes, cancellation, and output over 32 MiB fail and
+remove the partial file.
+
+Validation uses the repository's pinned `github.com/pdfcpu/pdfcpu` v0.12.1
+parser with `ValidationStrict`, followed by `api.PageCountFile`; zero-page files
+are rejected. Local synthetic fixtures confirmed strict rejection of a missing
+EOF marker, an invalid root, a broken page tree, and a damaged in-use xref
+entry. pdfcpu can reconstruct a truncated final xref when the `startxref`
+section is absent, even with strict validation enabled. A bounded trailer check
+therefore verifies the final `%%EOF`, parses the terminal `startxref` number,
+and requires that it point to a classic xref table or xref-stream object before
+pdfcpu validation runs. The pdfcpu parser remains responsible for the complete
+structure; this check prevents its missing-xref recovery path from establishing
+success.
+
+Chromium 155.0.8059.39 emits `%PDF-1.4` while using the `/Tabs` page-tree entry,
+which pdfcpu strict mode correctly rejects as unavailable in PDF 1.4. The
+renderer updates only the eight-byte header declaration to `%PDF-1.5` before
+strict validation; object bytes and xref offsets are unchanged. Real local
+Chromium output passed strict validation and the existing `pdfinfo`,
+`pdftotext`, `pdfimages`, layout, page-size, link-annotation, and embedded-image
+assertions after this correction.
+
+Before publishing an output path, the renderer stops loading, disables the
+Fetch, Network, Audits and Page event domains, then issues a Runtime marker on
+the same target session. In chromedp v0.15.1, target messages (including event
+callbacks and command responses) are processed in order by the target event
+loop, and listener callbacks run synchronously. The marker response therefore
+follows policy events already delivered to that target; domain shutdown stops
+those policy event sources for the static, script-disabled generated document.
+A deterministic completion-boundary test dispatches a forbidden window event
+concurrently at this boundary and confirms the output path remains empty and
+the file is removed. No timing sleep is used to establish the boundary.
+
+pdfcpu validation itself has no context parameter and cannot be forcibly
+interrupted while parsing. The input file remains capped at 32 MiB and the
+service checks cancellation immediately before and after validation and again
+after the browser-policy boundary. A parser operation that exceeds the service
+deadline can therefore finish before cancellation is returned to the caller.
+
+### Local verification
+
+On Go 1.26.4 and Google Chrome 155.0.8059.39, both commands passed with 73
+top-level tests and 199 passing JSON test events (including subtests), zero
+failures, and four skips:
+
+```text
+go test -json -count=1 -timeout=180s ./internal/conversion ./internal/netguard ./internal/process
+go test -race -json -count=1 -timeout=240s ./internal/conversion ./internal/netguard ./internal/process
+```
+
+The skips were the opt-in public HTTPS HTML integration test and three
+PostgreSQL-backed account-reservation tests. Local PostgreSQL was not available
+(`pg_isready -h 127.0.0.1 -p 5432` returned no response), so database-backed
+tests and the repository-wide suite were not run. The conversion package's
+local Chromium PDF test did run and checked actual generated PDF metadata,
+extracted text, image content, links, paper sizing, margins, and strict
+structural validation. These checks passed:
+
+```text
+go vet ./internal/conversion ./internal/netguard ./internal/process
+go build ./...
+gofmt -l internal/conversion/markdownToPdf.go internal/conversion/markdown_browser.go internal/conversion/markdown_pdf.go internal/conversion/markdown_pdf_test.go
+git diff --check
+```
+
+The `gofmt -l` command returned no files. No external-network test or
+production service was contacted.
