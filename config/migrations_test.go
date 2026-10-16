@@ -100,7 +100,11 @@ func migrationDatabase(t *testing.T) (*gorm.DB, *sql.DB, string, *migrationTrace
 		defer r.Close()
 		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
-		_, e = r.ExecContext(c, `DROP DATABASE "`+name+`" WITH (FORCE)`)
+		// All task-owned pools have closed before this cleanup. Do not use
+		// FORCE: signaling a background/other-role backend requires privileges
+		// unrelated to migration ownership. Normal DROP retains its own bounded
+		// backend interlock and must still fail if owned clients remain.
+		_, e = r.ExecContext(c, `DROP DATABASE "`+name+`"`)
 		require.NoError(t, e)
 	})
 	return db, s, u.String(), l
@@ -588,9 +592,7 @@ func TestManagedSchemaRejectsInvalidUniqueIndex(t *testing.T) {
 	var valid bool
 	require.NoError(t, obs.QueryRow("SELECT indisvalid FROM pg_catalog.pg_index WHERE indexrelid='public.idx_users_email'::regclass").Scan(&valid))
 	require.False(t, valid)
-	l.reset()
-	require.Error(t, runManagedSchemaMigrations(db, false, testMigrationLimits()))
-	require.Empty(t, l.ddl())
+	assertIndexPolicyRejected(t, db, obs, l)
 }
 
 func TestUnmanagedMigrationRemainsAutomaticAndAtomic(t *testing.T) {
@@ -700,4 +702,214 @@ func TestManagedMigrationRejectsUnversionedCollation(t *testing.T) {
 	l.reset()
 	require.Error(t, runManagedSchemaMigrations(db, true, testMigrationLimits()))
 	require.Empty(t, l.ddl())
+}
+
+// Inspect the actual extra index rows as well as the historical catalog and
+// ledger. A failed validation must not repair or write any of these objects.
+func assertIndexPolicyRejected(t *testing.T, db *gorm.DB, obs *sql.DB, l *migrationTrace) {
+	t.Helper()
+	snapshot := func() string {
+		var value string
+		require.NoError(t, obs.QueryRow(`SELECT md5(coalesce((SELECT string_agg(to_jsonb(x)::text||to_jsonb(c)::text,E'\n' ORDER BY x.indexrelid) FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class c ON c.oid=x.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public'),'')|| (SELECT jsonb_agg(s ORDER BY version)::text FROM public.schema_migrations s))`).Scan(&value))
+		return migrationSnapshot(t, obs) + value
+	}
+	before := snapshot()
+	l.reset()
+	if err := ValidateManagedSchema(db); err == nil {
+		t.Error("startup accepted unsupported additional index")
+	} else {
+		require.Contains(t, err.Error(), "schema incompatible:")
+	}
+	if err := runManagedSchemaMigrations(db, false, testMigrationLimits()); err == nil {
+		t.Error("managed migrate accepted unsupported additional index")
+	} else {
+		require.Contains(t, err.Error(), "schema incompatible:")
+	}
+	require.Empty(t, l.ddl())
+	require.Equal(t, before, snapshot(), "rejection must preserve catalogs and ledger")
+	l.mu.Lock()
+	statements := append([]string(nil), l.statements...)
+	l.mu.Unlock()
+	for _, statement := range statements {
+		command := strings.ToUpper(strings.TrimSpace(statement))
+		require.False(t, strings.HasPrefix(command, "INSERT ") || strings.HasPrefix(command, "UPDATE ") || strings.HasPrefix(command, "DELETE "), "no ledger/application DML during rejection")
+	}
+	assertNoMigrationLocks(t, obs)
+}
+
+func TestManagedSchemaAdditionalIndexPolicy(t *testing.T) {
+	for _, tc := range []struct{ name, ddl string }{
+		{"missing_required", `DROP INDEX public.idx_users_email`},
+		{"altered_required", `DROP INDEX public.idx_users_email; CREATE INDEX idx_users_email ON public.users(email)`},
+		{"include_payload", `CREATE INDEX additional_ticket_payload ON public.contact_tickets(id) INCLUDE(message)`},
+		{"unsupported_varchar_width", `CREATE INDEX additional_wide_varchar ON public.studio_assets(r2_key)`},
+		{"unbounded_text_key", `CREATE INDEX additional_message ON public.contact_tickets(message)`},
+		{"different_collation", `CREATE INDEX additional_collation ON public.users(password_hash COLLATE "C")`},
+		{"descending", `CREATE INDEX additional_desc ON public.users(session_version DESC)`},
+		{"nulls_first", `CREATE INDEX additional_nulls ON public.users(session_version NULLS FIRST)`},
+		{"nondefault_opclass", `CREATE INDEX additional_pattern ON public.users(password_hash varchar_pattern_ops)`},
+		{"expression", `CREATE INDEX additional_expression ON public.users((session_version+1))`},
+		{"predicate", `CREATE INDEX additional_partial ON public.users(session_version) WHERE session_version>0`},
+		{"fillfactor", `CREATE INDEX additional_storage ON public.users(session_version) WITH(fillfactor=70)`},
+		{"deduplication", `CREATE INDEX additional_dedup ON public.users(session_version) WITH(deduplicate_items=off)`},
+		{"multiple_keys", `CREATE INDEX additional_multiple ON public.users(session_version,id)`},
+		{"nonhistorical_key", `ALTER TABLE public.users ADD COLUMN extra_key bigint; CREATE INDEX additional_extra ON public.users(extra_key)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			require.NoError(t, db.Exec(tc.ddl).Error)
+			assertIndexPolicyRejected(t, db, independentMigrationObserver(t, dsn), l)
+		})
+	}
+}
+
+func TestManagedSchemaAdditionalIndexPositive(t *testing.T) {
+	for _, tc := range []struct{ name, ddl string }{
+		{"uuid", `CREATE INDEX additional_bounded ON public.users(id)`},
+		{"bigint", `CREATE INDEX additional_bounded ON public.users(session_version)`},
+		{"bounded_varchar", `CREATE INDEX additional_bounded ON public.users(password_hash)`},
+		{"explicit_defaults", `CREATE INDEX additional_bounded ON public.users(password_hash COLLATE "default" text_ops ASC NULLS LAST)`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			require.NoError(t, db.Exec(tc.ddl).Error)
+			obs := independentMigrationObserver(t, dsn)
+			before := migrationSnapshot(t, obs)
+			l.reset()
+			require.NoError(t, ValidateManagedSchema(db))
+			require.NoError(t, runManagedSchemaMigrations(db, false, testMigrationLimits()))
+			require.Empty(t, l.ddl())
+			require.Equal(t, before, migrationSnapshot(t, obs))
+			// 255 four-byte characters exercise the accepted varchar's maximum bytes.
+			require.NoError(t, db.Create(&User{ID: "00000000-0000-0000-0000-000000000003", Email: "bounded@example.invalid", PasswordHash: strings.Repeat("🙂", 255)}).Error)
+		})
+	}
+}
+
+func TestManagedSchemaAdditionalIndexOversizeCharacterization(t *testing.T) {
+	for _, shape := range []string{"key", "include"} {
+		t.Run(shape, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			obs := independentMigrationObserver(t, dsn)
+			insert := `INSERT INTO public.contact_tickets(id,ticket_number,email,category,subject,message) SELECT '00000000-0000-0000-0000-000000000004','synthetic-ticket','synthetic@example.invalid','synthetic','synthetic',string_agg(md5(g::text),'') FROM generate_series(1,1024) g`
+			require.NoError(t, db.Exec(insert).Error, "historically valid unbounded text must store without extra index")
+			require.NoError(t, db.Exec("DELETE FROM public.contact_tickets").Error)
+			ddl := `CREATE INDEX additional_wide ON public.contact_tickets(message)`
+			if shape == "include" {
+				ddl = `CREATE INDEX additional_wide ON public.contact_tickets(id) INCLUDE(message)`
+			}
+			require.NoError(t, db.Exec(ddl).Error)
+			err := db.Exec(insert).Error
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "54000", "actual PostgreSQL oversized index row, not a model validation")
+			var rows int
+			require.NoError(t, obs.QueryRow("SELECT count(*) FROM public.contact_tickets").Scan(&rows))
+			require.Zero(t, rows)
+			t.Logf("%s: synthetic 32768-byte message succeeds without extra index, fails with SQLSTATE 54000", shape)
+			assertIndexPolicyRejected(t, db, obs, l)
+		})
+	}
+}
+
+func TestManagedSchemaAdditionalIndexIncomplete(t *testing.T) {
+	for _, phase := range []string{"not_ready", "ready_not_valid"} {
+		t.Run(phase, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			obs := independentMigrationObserver(t, dsn)
+			block, e := obs.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+			require.NoError(t, e)
+			defer block.Rollback()
+			var blocker int
+			require.NoError(t, block.QueryRow("SELECT pg_backend_pid()").Scan(&blocker))
+			if phase == "not_ready" {
+				_, e = block.Exec("UPDATE public.users SET session_version=session_version WHERE false")
+			} else {
+				_, e = block.Exec("SELECT * FROM public.users")
+			}
+			require.NoError(t, e)
+			build, _, _ := migrationPool(t, dsn, "m1s222r_build")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- build.WithContext(ctx).Exec("CREATE INDEX CONCURRENTLY additional_incomplete ON public.users(session_version)").Error
+			}()
+			pid, owner := migrationBlocker(t, obs, "m1s222r_build")
+			require.Equal(t, blocker, owner)
+			var valid, ready, live bool
+			require.NoError(t, obs.QueryRow("SELECT indisvalid,indisready,indislive FROM pg_index WHERE indexrelid='public.additional_incomplete'::regclass").Scan(&valid, &ready, &live))
+			require.False(t, valid)
+			require.Equal(t, phase == "ready_not_valid", ready)
+			require.True(t, live)
+			cancel()
+			require.Error(t, migrationResult(t, done))
+			awaitMigrationBackendCleanup(t, obs, pid)
+			require.NoError(t, block.Rollback())
+			require.NoError(t, obs.QueryRow("SELECT indisvalid,indisready,indislive FROM pg_index WHERE indexrelid='public.additional_incomplete'::regclass").Scan(&valid, &ready, &live))
+			t.Logf("%s: actual canceled concurrent index valid=%t ready=%t live=%t build=%d blocker=%d", phase, valid, ready, live, pid, owner)
+			assertIndexPolicyRejected(t, db, obs, l)
+		})
+	}
+}
+
+func TestManagedSchemaAdditionalIndexNotLive(t *testing.T) {
+	db, _, dsn, l := migrationDatabase(t)
+	historicalSchema(t, db)
+	require.NoError(t, db.Exec("CREATE INDEX additional_dead ON public.users(session_version)").Error)
+	obs := independentMigrationObserver(t, dsn)
+	first, e := obs.Begin()
+	require.NoError(t, e)
+	defer first.Rollback()
+	_, e = first.Exec("SELECT * FROM public.users")
+	require.NoError(t, e)
+	var firstPID int
+	require.NoError(t, first.QueryRow("SELECT pg_backend_pid()").Scan(&firstPID))
+	drop, _, _ := migrationPool(t, dsn, "m1s222r_drop")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- drop.WithContext(ctx).Exec("DROP INDEX CONCURRENTLY public.additional_dead").Error }()
+	pid, blocker := migrationBlocker(t, obs, "m1s222r_drop")
+	require.Equal(t, firstPID, blocker)
+	// Open a reader after invalidation's first wait has already selected lockers.
+	// It holds the second wait after DROP commits ready=false/live=false.
+	second, e := obs.Begin()
+	require.NoError(t, e)
+	defer second.Rollback()
+	_, e = second.Exec("SELECT * FROM public.users")
+	require.NoError(t, e)
+	var secondPID int
+	require.NoError(t, second.QueryRow("SELECT pg_backend_pid()").Scan(&secondPID))
+	require.NoError(t, first.Rollback())
+	wait, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var dead bool
+		require.NoError(t, obs.QueryRowContext(wait, `SELECT NOT x.indislive AND $1=ANY(pg_blocking_pids($2)) FROM pg_index x WHERE x.indexrelid='public.additional_dead'::regclass`, secondPID, pid).Scan(&dead))
+		if dead {
+			break
+		}
+		select {
+		case <-tick.C:
+		case <-wait.Done():
+			t.Fatal("concurrent DROP did not reach dead-index barrier")
+		}
+	}
+	cancel()
+	require.Error(t, migrationResult(t, done))
+	awaitMigrationBackendCleanup(t, obs, pid)
+	require.NoError(t, second.Rollback())
+	var valid, ready, live bool
+	require.NoError(t, obs.QueryRow("SELECT indisvalid,indisready,indislive FROM pg_index WHERE indexrelid='public.additional_dead'::regclass").Scan(&valid, &ready, &live))
+	require.False(t, valid)
+	require.False(t, ready)
+	require.False(t, live)
+	t.Logf("actual canceled concurrent DROP valid=%t ready=%t live=%t drop=%d first=%d second=%d", valid, ready, live, pid, firstPID, secondPID)
+	assertIndexPolicyRejected(t, db, obs, l)
 }

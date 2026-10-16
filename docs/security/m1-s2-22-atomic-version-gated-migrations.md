@@ -16,7 +16,7 @@ The unchanged version is `20260918_01_admin_subscription_mutation`. The frozen c
 
 Inventory: **27 tables** (26 application models plus ledger), **367 columns, 101 indexes, 19 FKs, five sequences**. Required public ordinary tables/columns must match types/lengths, nullability, defaults, identity and generated status. Required indexes must match name/definition/uniqueness/primary status and be valid/ready. Required FKs must match actions/columns/deferrability, be validated and have all four normal enforcement triggers enabled. Sequence declared type/start/increment/bounds/cache/cycle/ownership must match; live sequence counters are not read/reset.
 
-Extra columns on required tables must be nullable built-in pg_catalog base types without defaults/identity/generated behavior. Extra indexes must be nonunique plain-column btrees without expressions/predicates, using default built-in opclasses. Extra CHECK/UNIQUE/EXCLUSION constraints, FKs involving either end of a required table (including other schemas), enabled application triggers/rewrite rules, RLS and non-permanent tables reject. Applied ledger user write triggers are allowed because the gate is SELECT-only; a rejecting ledger trigger proves there are no ledger writes. Unconnected extra tables/harmless additions are allowed. No automatic repair or implicit adoption.
+Extra columns on required tables must be nullable built-in pg_catalog base types without defaults/identity/generated behavior. The initial extra-index policy accepted nonunique plain-column btrees with default built-in opclasses; independent review found that insufficient. The M1-S2-22R correction below supersedes that policy. Extra CHECK/UNIQUE/EXCLUSION constraints, FKs involving either end of a required table (including other schemas), enabled application triggers/rewrite rules, RLS and non-permanent tables reject. Applied ledger user write triggers are allowed because the gate is SELECT-only; a rejecting ledger trigger proves there are no ledger writes. Unconnected extra tables/harmless additions are allowed. No automatic repair or implicit adoption.
 
 | Observed state | Managed migrate | Managed startup |
 | --- | --- | --- |
@@ -108,3 +108,58 @@ Railway `/app/server migrate` is unchanged in configuration. F-09 remains held; 
 ## Local closure
 
 Before shutdown the task-owned server had zero advisory locks and zero other client sessions. It was stopped cleanly; port 5562 is no longer listening. Only the independently verified task-owned `pgdata` was removed. Evidence/manifests remain in the durable local task directory. Final free disk approximately 9.2 GiB. Original branch refs, outer staging/unrelated diff and frontend `AGENTS.md` diff matched the preservation hashes; protected historical directories were not modified.
+
+## M1-S2-22R — Extra-index policy correction
+
+Independent review of `75403f1c8eb0685b2c25fc41c50362c325e5876d` returned **CHANGES REQUIRED**, superseding the earlier local source-review conclusion above. Read permanent document 21 at documentation commit `9537e69a4d2ce813f6c8acd7e0ad531e8fc6c288`. Both blockers were source-confirmed: the extra-index loop ignored lifecycle flags, and its SQL ignored INCLUDE payloads. This correction stays on draft PR #26 with that reviewed commit as direct parent. Only `schema_contract.go`, `migrations_test.go` and this report change. The frozen JSON, literal fixture, version and transaction runner are byte-for-byte preserved.
+
+### Supported additional-index class
+
+Acceptance on a required historical table now requires **all** of:
+
+- `indisvalid`, `indisready`, `indislive` true, enforced by the actual Go rejection predicate. Required indexes now also require `indislive`; their frozen definition checks remain.
+- Nonunique/nonprimary ordinary btree; `indnatts = indnkeyatts = 1`. Every index attribute is a key: no INCLUDE, multikey, expression or predicate. Each key/opclass/collation/option vector must have cardinality one; no `indcheckxmin` or exclusion state.
+- The one key must be a column in the frozen historical contract, with valid/non-dropped table/index attribute metadata. Supported types are built-in **bigint (`int8`), UUID, or varchar(1–255)**. Other types/widths are unqualified and rejected, not claimed intrinsically unsafe.
+- For varchar, server encoding must be UTF8 and block size at least 8192 bytes. One key has at most 1020 encoded payload bytes; the positive control inserts 255 four-byte characters. This avoids treating arbitrary variable-width or composite tuples as bounded. No new restrictions are imposed on the already-reviewed required index definitions.
+- `indoption[0] = 0` (default ASC/NULLS LAST), key collation equals its column collation, and collatable keys use `pg_catalog."default"`; noncollatable keys use OID zero. Explicit different collations reject, even if the local locale happens to compare similarly. An explicitly named default collation/opclass/order with the same catalog state passes.
+- A pg_catalog default opclass belonging to the selected access method; no per-key `attoptions`, per-index `reloptions`, or nondefault tablespace (`reltablespace = 0`). Explicit storage overrides, including fillfactor/deduplication, are outside the supported class.
+
+The optional catalog joins are LEFT JOINs, with the entire eligibility expression `coalesce((...), false)`. Missing metadata cannot turn a NULL comparison into acceptance; the missing key name defaults to empty and additionally fails frozen-column membership. Normal SQL expression indexes exercise absent simple-key attribute metadata and reject. No catalog corruption was used to fabricate malformed vectors/NULL rows. Parameterized built-in `text_ops(foo=true)` was separately attempted: PostgreSQL rejected creation with `operator class text_ops has no options`. This is a database rejection, not a claimed validator test of an existing parameterized index; the source still explicitly rejects non-NULL per-key options.
+
+This narrow class does not promise zero index maintenance cost, immunity to resource exhaustion, or correctness of an unqualified database locale/provider upgrade. Other server versions, small-block builds, non-UTF8 varchar environments, custom tablespaces/opclass options and malformed system catalogs were not qualified. Those restrictions fail closed where represented in the predicate; no platform-wide safety claim follows.
+
+Catalog meanings and INCLUDE limitations were checked against primary PostgreSQL documentation: [pg_index](https://www.postgresql.org/docs/18/catalog-pg-index.html), [CREATE INDEX](https://www.postgresql.org/docs/18/sql-createindex.html). The concurrent-drop experiment also followed the PostgreSQL [index lifecycle implementation](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/catalog/index.c), then verified actual server behavior.
+
+### New PostgreSQL evidence
+
+Fresh PostgreSQL **18.6**, UTF8, 8192-byte blocks, loopback **127.0.0.1:5563**, task-owned roles/data directory. Protected historical clusters and the prior task's stopped cluster were not reused. Durable local evidence: `/home/gimesha/Documents/Codex/2026-10-16/m1-s2-22r-1tw8kygb/`.
+
+Before changing runtime source, negative assertions failed against the reviewed implementation for both entry points. Real canceled concurrent builds produced `valid=false,ready=false,live=true` and `valid=false,ready=true,live=true` on nonunique bigint indexes. A canceled concurrent DROP, with two separately held reader barriers, produced `valid=false,ready=false,live=false`. All three were accepted before correction; no system catalog was edited. Natural DROP also clears valid/ready, so a fabricated live=false-only state was not tested; explicit rejection of each flag is enforced in source. The RED evidence retains 14 unsafe accepted leaf cases across policy, oversize and lifecycle characterizations, with existing rejecting cases and positive controls retained separately.
+
+A deterministic 32768-byte synthetic message stored in `contact_tickets` without an extra index. With either `contact_tickets(message)` or `contact_tickets(id) INCLUDE(message)`, the same insert failed with **SQLSTATE 54000** and left zero rows. Thus the wide-key risk is independently reproduced, not inferred from INCLUDE alone. Both index shapes now reject through managed migrate and startup.
+
+All index negatives exercise **both** entry points with compatibility-category errors, zero captured DDL/DML, unchanged independent historical/index-catalog snapshots and exact ledger rows/timestamp, and no migration advisory locks. Cases include missing/altered/invalid required indexes; invalid/not-ready/non-live nonunique extras; INCLUDE; unbounded text; unsupported varchar width; different collation; DESC/NULLS FIRST; nondefault opclass; expression/predicate; storage overrides; multikey and nonhistorical key. Positive controls retain UUID, bigint, bounded varchar and explicitly spelled default settings, plus all required historical indexes. The preexisting harmless-additions control remains accepted.
+
+Normal/race logs contain the exact CREATE/DROP blocker PIDs. Ordering uses real `pg_blocking_pids`, persisted flags and transaction cleanup barriers, not sleeps. Failed concurrent operations are deliberate fixtures, not migration-runner operations or evidence of safe index completion. One subsequent full race run failed in the preexisting test-database cleanup, not in migration/index assertions: nonsuperuser `DROP DATABASE ... WITH (FORCE)` returned 42501 because it could not signal a process. The exact intervening backend was not captured, so autovacuum involvement is a hypothesis, not a confirmed finding. All index cases passed in that run; there was no race-detector diagnostic. The narrowly related fixture cleanup now uses normal DROP after task-owned pools close, retaining its deadline and failure assertion instead of requiring cross-role termination privileges. No runtime transaction behavior changed. The failed JSON/server evidence is preserved; final normal/race reruns below pass. No unresolved test failure remains.
+
+### Commands and results
+
+```sh
+export PLATEN_MIGRATION_TEST_DATABASE_URL='postgres://m1s222r_test@127.0.0.1:5563/test_m1s222r_root?sslmode=disable'
+export PLATEN_MIGRATION_TEST_ADMIN_DATABASE_URL='postgres://m1s222r_admin@127.0.0.1:5563/test_m1s222r_root?sslmode=disable'
+go test -p 1 ./config -count=1 -timeout=4m -json
+go test -race -p 1 ./config -count=1 -timeout=5m -json
+go vet ./config .
+gofmt -l config/schema_contract.go config/migrations_test.go
+git diff --check
+```
+
+Final normal and race runs: **29 top-level tests, 90 leaf cases (80 migration cases), 105 pass events including parent tests each**, zero skips/failures and no race diagnostics. This includes atomic initialization, read-only repeat, independent/churning/small-pool concurrency, late rollback, cancellation and timeout regressions. Vet, formatting and whitespace pass.
+
+The exact existing auth/billing/Studio commands in the earlier section were rerun with only task-owned fixture URLs changed to `test_m1s222r_auth`, `test_m1s222r_billing`, `test_m1s222r_studio` on port 5563. Auth remained local-outbox only. Auth **22 leaf**, billing **4**, Studio **1** pass; zero skips/failures. Independently executed compatibility validation accepted all three complete historical schemas afterward. Synthetic-token auth logs remain local and are not published. GitHub compilation/container checks are separate and do not execute this PostgreSQL/race matrix.
+
+### Disposition and release boundary
+
+Both reported blockers are corrected and locally qualified. The new immutable head must receive another **independent source review before engineering acceptance**; this implementation report does not grant acceptance. F-09 remains on production HOLD regardless of these results. Production catalog compatibility, backups/restoration, recoverable state, permissions, provider/locale qualification, actual deployment coordination and readiness remain unqualified. No production query/migration/configuration change, merge, ready promotion, deployment or OCR/F-09 branch modification is authorized or performed.
+
+M1-S2-22R closure: the verified task cluster was stopped with zero advisory locks/other client sessions; port 5563 is closed and only its disposable data directory was removed. Local evidence and SHA-256 manifest remain. Disk remains approximately 9.2 GiB free. Unrelated changes, original refs, protected historical directories and PRs #24/#25 were preserved. The correction is published as an additive commit on PR #26; exact immutable head and returned CI state are recorded in its publication metadata and the implementation handoff, with no claim that CI executes PostgreSQL regressions.

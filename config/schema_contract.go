@@ -35,6 +35,8 @@ type schemaIndex struct {
 	Primary    bool   `json:"primary"`
 	Valid      bool   `json:"-"`
 	Ready      bool   `json:"-"`
+	Live       bool   `json:"-"`
+	KeyName    string `json:"-"`
 	SafeExtra  bool   `json:"-"`
 }
 type schemaForeignKey struct {
@@ -138,12 +140,27 @@ func validateHistoricalContract(tx *gorm.DB) error {
 	var indexes []schemaIndex
 	if err = tx.Raw(`SELECT t.relname AS "table",i.relname AS name,
  pg_catalog.pg_get_indexdef(i.oid) AS definition,x.indisunique AS "unique",
- x.indisprimary AS "primary",x.indisvalid AS valid,x.indisready AS ready,
- (x.indexprs IS NULL AND x.indpred IS NULL AND am.amname='btree' AND
- NOT EXISTS(SELECT 1 FROM unnest(x.indclass) o(oid) JOIN pg_catalog.pg_opclass op ON op.oid=o.oid JOIN pg_catalog.pg_namespace ns ON ns.oid=op.opcnamespace WHERE ns.nspname<>'pg_catalog' OR NOT op.opcdefault)) AS safe_extra
+ x.indisprimary AS "primary",x.indisvalid AS valid,x.indisready AS ready,x.indislive AS live,
+ coalesce(a.attname,'') AS key_name,
+ coalesce((x.indnatts=x.indnkeyatts AND x.indnkeyatts=1 AND
+ cardinality(x.indkey)=1 AND cardinality(x.indclass)=1 AND cardinality(x.indcollation)=1 AND cardinality(x.indoption)=1 AND
+ x.indexprs IS NULL AND x.indpred IS NULL AND NOT x.indcheckxmin AND NOT x.indisexclusion AND
+ i.relkind='i' AND i.reloptions IS NULL AND i.reltablespace=0 AND am.amname='btree' AND
+ a.attnum>0 AND NOT a.attisdropped AND tn.nspname='pg_catalog' AND ty.typtype='b' AND
+ (ty.typname IN ('int8','uuid') OR
+ (ty.typname='varchar' AND a.atttypmod BETWEEN 5 AND 259 AND
+ pg_catalog.current_setting('server_encoding')='UTF8' AND pg_catalog.current_setting('block_size')::integer>=8192)) AND
+ x.indoption[0]=0 AND x.indcollation[0]=a.attcollation AND
+ (a.attcollation=0 OR a.attcollation='pg_catalog."default"'::pg_catalog.regcollation) AND
+ ons.nspname='pg_catalog' AND op.opcdefault AND op.opcmethod=i.relam AND
+ ia.attnum=1 AND NOT ia.attisdropped AND ia.attoptions IS NULL),false) AS safe_extra
  FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
- JOIN pg_catalog.pg_am am ON am.oid=i.relam
+ LEFT JOIN pg_catalog.pg_am am ON am.oid=i.relam
  JOIN pg_catalog.pg_class t ON t.oid=x.indrelid JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+ LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=t.oid AND a.attnum=x.indkey[0]
+ LEFT JOIN pg_catalog.pg_type ty ON ty.oid=a.atttypid LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid=ty.typnamespace
+ LEFT JOIN pg_catalog.pg_opclass op ON op.oid=x.indclass[0] LEFT JOIN pg_catalog.pg_namespace ons ON ons.oid=op.opcnamespace
+ LEFT JOIN pg_catalog.pg_attribute ia ON ia.attrelid=i.oid AND ia.attnum=1
  WHERE n.nspname='public'`).Scan(&indexes).Error; err != nil {
 		return fmt.Errorf("inspect schema indexes: %w", err)
 	}
@@ -153,15 +170,21 @@ func validateHistoricalContract(tx *gorm.DB) error {
 	}
 	for _, i := range expected.Indexes {
 		got, ok := actualIndexes[i.Table+"."+i.Name]
-		if !ok || !got.Valid || !got.Ready || got.Definition != i.Definition || got.Unique != i.Unique || got.Primary != i.Primary {
+		if !ok || !got.Valid || !got.Ready || !got.Live || got.Definition != i.Definition || got.Unique != i.Unique || got.Primary != i.Primary {
 			return fmt.Errorf("schema incompatible: required index %s is missing or differs", i.Name)
 		}
 	}
 	for _, i := range expected.Indexes {
 		delete(actualIndexes, i.Table+"."+i.Name)
 	}
+	// Extras are deliberately single bounded historical keys, not arbitrary
+	// nonunique btrees: even a text key can make otherwise valid writes fail.
+	historicalKeys := make(map[string]bool, len(expected.Columns))
+	for _, c := range expected.Columns {
+		historicalKeys[c.Table+"."+c.Name] = true
+	}
 	for _, i := range actualIndexes {
-		if requiredTables[i.Table] && (i.Unique || i.Primary || !i.SafeExtra) {
+		if requiredTables[i.Table] && (i.Unique || i.Primary || !i.Valid || !i.Ready || !i.Live || !i.SafeExtra || !historicalKeys[i.Table+"."+i.KeyName]) {
 			return fmt.Errorf("schema incompatible: additional write-affecting index on %s", i.Table)
 		}
 	}
