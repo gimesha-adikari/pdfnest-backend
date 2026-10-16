@@ -18,6 +18,7 @@ import (
 )
 
 const managedSchemaVersion = "20260918_01_admin_subscription_mutation"
+const priorManagedSchemaVersion = "20260914_01"
 
 func schemaModels() []interface{} {
 	return []interface{}{
@@ -155,7 +156,7 @@ func inspectManagedSchema(tx *gorm.DB) (managedSchemaState, error) {
 		if e := tx.Raw("SELECT version FROM public.schema_migrations ORDER BY version").Scan(&versions).Error; e != nil {
 			return schemaEmpty, fmt.Errorf("read migration ledger: %w", e)
 		}
-		if len(versions) != 1 || versions[0] != managedSchemaVersion {
+		if !recognizedManagedSchemaVersions(versions) {
 			return schemaEmpty, fmt.Errorf("schema incompatible: missing or unrecognized migration version; require an approved migration/adoption plan")
 		}
 		return schemaApplied, nil
@@ -175,6 +176,21 @@ func inspectManagedSchema(tx *gorm.DB) (managedSchemaState, error) {
 	}
 	return schemaEmpty, nil
 }
+
+// recognize only the exact ledger histories written by the historical runner;
+// unknown or duplicate records must fail closed even when the current marker is present.
+func recognizedManagedSchemaVersions(versions []string) bool {
+	switch len(versions) {
+	case 1:
+		return versions[0] == managedSchemaVersion
+	case 2:
+		return (versions[0] == priorManagedSchemaVersion && versions[1] == managedSchemaVersion) ||
+			(versions[0] == managedSchemaVersion && versions[1] == priorManagedSchemaVersion)
+	default:
+		return false
+	}
+}
+
 func checkManagedReadOnly(db *gorm.DB, l migrationLimits) (managedSchemaState, error) {
 	state := schemaEmpty
 	err := db.Transaction(func(tx *gorm.DB) error {

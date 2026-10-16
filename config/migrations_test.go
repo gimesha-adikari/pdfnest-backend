@@ -157,6 +157,100 @@ func migrationSnapshot(t *testing.T, s *sql.DB) string {
 	require.NoError(t, s.QueryRow(migrationSnapshotSQL).Scan(&v))
 	return v
 }
+
+func migrationLedgerSnapshot(t *testing.T, s *sql.DB) string {
+	t.Helper()
+	var exists bool
+	require.NoError(t, s.QueryRow(`SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname='schema_migrations' AND c.relkind='r')`).Scan(&exists))
+	if !exists {
+		return "<missing>"
+	}
+	var value string
+	require.NoError(t, s.QueryRow(`SELECT coalesce(jsonb_agg(jsonb_build_array(version,applied_at::text) ORDER BY version)::text,'[]') FROM public.schema_migrations`).Scan(&value))
+	return value
+}
+
+func assertManagedGateIsReadOnly(t *testing.T, l *migrationTrace) {
+	t.Helper()
+	require.Empty(t, l.ddl())
+	l.mu.Lock()
+	statements := append([]string(nil), l.statements...)
+	l.mu.Unlock()
+	for _, statement := range statements {
+		command := strings.ToUpper(strings.TrimSpace(statement))
+		for _, prefix := range []string{"INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ", "MERGE ", "CREATE ", "ALTER ", "DROP ", "COMMENT ", "GRANT ", "REVOKE "} {
+			require.False(t, strings.HasPrefix(command, prefix), "managed compatibility gate issued write-capable SQL: %s", statement)
+		}
+		require.NotContains(t, strings.ToLower(statement), "pg_advisory", "already-applied compatibility checks must not acquire migration advisory locks")
+	}
+}
+
+func assertManagedLedgerGate(t *testing.T, db *gorm.DB, obs *sql.DB, l *migrationTrace, accepted bool) {
+	t.Helper()
+	before := migrationSnapshot(t, obs) + migrationLedgerSnapshot(t, obs)
+	l.reset()
+	startupErr := ValidateManagedSchema(db)
+	migrationErr := runManagedSchemaMigrations(db, false, testMigrationLimits())
+	if accepted {
+		require.NoError(t, startupErr, "managed startup rejected an approved historical version set")
+		require.NoError(t, migrationErr, "managed migration path rejected an approved historical version set")
+	} else {
+		require.Error(t, startupErr, "managed startup accepted an unsupported historical version set or schema")
+		require.Error(t, migrationErr, "managed migration path accepted an unsupported historical version set or schema")
+	}
+	assertManagedGateIsReadOnly(t, l)
+	require.Equal(t, before, migrationSnapshot(t, obs)+migrationLedgerSnapshot(t, obs), "compatibility checks must leave catalog and ledger unchanged")
+	assertNoMigrationLocks(t, obs)
+}
+
+func TestManagedMigrationHistoricalLedgerCompatibility(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    []string
+		accepted bool
+	}{
+		{name: "current_version_only", accepted: true},
+		{name: "both_known_versions", setup: []string{`INSERT INTO public.schema_migrations(version,applied_at) VALUES ('20260914_01','2000-01-01T00:00:00Z')`}, accepted: true},
+		{name: "prior_version_only", setup: []string{`UPDATE public.schema_migrations SET version='20260914_01'`}},
+		{name: "unknown_additional_version", setup: []string{`INSERT INTO public.schema_migrations(version,applied_at) VALUES ('synthetic_unknown_marker','2000-01-01T00:00:00Z')`}},
+		{name: "unknown_replaces_prior_version", setup: []string{`INSERT INTO public.schema_migrations(version,applied_at) VALUES ('20260914_01','2000-01-01T00:00:00Z')`, `UPDATE public.schema_migrations SET version='synthetic_unknown_marker' WHERE version='20260914_01'`}},
+		{name: "unknown_replaces_current_version", setup: []string{`UPDATE public.schema_migrations SET version='synthetic_unknown_marker'`, `INSERT INTO public.schema_migrations(version,applied_at) VALUES ('20260914_01','2000-01-01T00:00:00Z')`}},
+		{name: "empty_ledger", setup: []string{`DELETE FROM public.schema_migrations`}},
+		{name: "malformed_empty_version", setup: []string{`UPDATE public.schema_migrations SET version=''`}},
+		{name: "duplicate_current_version", setup: []string{`ALTER TABLE public.schema_migrations DROP CONSTRAINT schema_migrations_pkey`, `INSERT INTO public.schema_migrations(version,applied_at) VALUES ('20260918_01_admin_subscription_mutation','2000-01-01T00:00:00Z')`}},
+		{name: "missing_ledger", setup: []string{`DROP TABLE public.schema_migrations`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			for _, statement := range tc.setup {
+				require.NoError(t, db.Exec(statement).Error)
+			}
+			obs := independentMigrationObserver(t, dsn)
+			assertManagedLedgerGate(t, db, obs, l, tc.accepted)
+		})
+	}
+}
+
+func TestManagedMigrationRecognizedHistoryStillRejectsStructuralDrift(t *testing.T) {
+	for _, tc := range []struct{ name, change string }{
+		{"column", `ALTER TABLE public.users ALTER COLUMN password_hash TYPE varchar(20)`},
+		{"index", `DROP INDEX public.idx_users_email`},
+		{"foreign_key", `ALTER TABLE public.subscriptions DROP CONSTRAINT fk_subscriptions_user`},
+		{"sequence", `ALTER SEQUENCE public.contact_ticket_sequence INCREMENT BY 2`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, dsn, l := migrationDatabase(t)
+			historicalSchema(t, db)
+			require.NoError(t, db.Exec(`INSERT INTO public.schema_migrations(version,applied_at) VALUES ('20260914_01','2000-01-01T00:00:00Z')`).Error)
+			require.NoError(t, db.Exec(tc.change).Error)
+			obs := independentMigrationObserver(t, dsn)
+			assertManagedLedgerGate(t, db, obs, l, false)
+		})
+	}
+}
+
 func assertNoMigrationLocks(t *testing.T, s *sql.DB) {
 	t.Helper()
 	var n int
