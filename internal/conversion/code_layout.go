@@ -12,26 +12,26 @@ const codeStyles = `
 			*, *:before, *:after {
 				box-sizing: border-box !important;
 			}
-			html, body { 
+			html, body {
 				/* MATCHED: Applied exact image_6c40da.png editor palette */
-				background-color: #1e1e24 !important; 
-				color: #e3e3e6 !important; 
+				background-color: #1e1e24 !important;
+				color: #e3e3e6 !important;
 				font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 				padding: 0;
 				margin: 0;
 				width: 100%;
 			}
 			@media print {
-				html, body { 
-					background-color: #1e1e24 !important; 
-					color: #e3e3e6 !important; 
+				html, body {
+					background-color: #1e1e24 !important;
+					color: #e3e3e6 !important;
 				}
 				.code-wrapper {
 					padding-top: 2rem !important;
 					padding-bottom: 2rem !important;
 				}
-				pre { 
-					page-break-inside: auto !important; 
+				pre {
+					page-break-inside: auto !important;
 				}
 				tr, p, pre, code {
 					page-break-inside: avoid;
@@ -46,25 +46,25 @@ const codeStyles = `
 			}
 
 			/* Reverted structure format matching original setup while updating background attributes */
-			pre[class*="language-"] { 
-				background-color: #18181c !important; 
-				padding: 1.5rem !important; 
-				border-radius: 0.75rem; 
+			pre[class*="language-"] {
+				background-color: #18181c !important;
+				padding: 1.5rem !important;
+				border-radius: 0.75rem;
 				border: 1px solid #2d2d34;
 				font-size: 13px !important;
 				line-height: 1.6 !important;
 				width: 100% !important;
 				max-w: 100% !important;
 				white-space: pre-wrap !important;       /* Wraps scripts past margins safely */
-				word-wrap: break-word !important;       
+				word-wrap: break-word !important;
 				word-break: break-all !important;
 				box-sizing: border-box !important;
 			}
-			
+
 			code[class*="language-"] {
 				color: #e3e3e6 !important;
 				font-family: inherit !important;
-				white-space: pre-wrap !important;       
+				white-space: pre-wrap !important;
 				word-break: break-all !important;
 			}
  .token-comment { color: #999; }
