@@ -2,21 +2,27 @@ package conversion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
 	htmlparser "golang.org/x/net/html"
 )
 
-// Keep the existing HTTP request ceiling. HTML, PDF, browser workspace and
-// execution remain subject to the shared offline-renderer budgets.
-const codeMaxSourceBytes = 100 << 20
+// Raw Code sources are admitted up to 16 MiB, independently of the shared HTTP
+// upload ceiling. The separate generated-HTML budget is also 16 MiB: escaping,
+// highlighting and document markup can make the effective source capacity lower.
+const codeMaxSourceBytes = 16 << 20
+
+// ErrCodeSourceTooLarge is safe to expose without filenames or engine details.
+var ErrCodeSourceTooLarge = errors.New("code source exceeds the 16 MiB raw-source limit")
 
 // Only these canonical identifiers may reach either a lexer or an attribute.
 // Never use lexer filename guessing or content analysis on caller input.
@@ -35,7 +41,9 @@ func readCodeSource(ctx context.Context, path string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	// Nonblocking open lets descriptor metadata reject FIFOs without waiting
+	// for a writer, including a pathname changed after upload staging.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -44,15 +52,27 @@ func readCodeSource(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > codeMaxSourceBytes {
-		return nil, fmt.Errorf("code source must be a regular file no larger than 100 MiB")
+	return readCodeSourceFrom(ctx, file, info)
+}
+
+// Admission precedes any source allocation/read. The descriptor's metadata is
+// authoritative here; a bounded reader still rejects growth after that snapshot.
+func readCodeSourceFrom(ctx context.Context, reader io.Reader, info os.FileInfo) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	source, err := io.ReadAll(io.LimitReader(file, codeMaxSourceBytes+1))
+	if !info.Mode().IsRegular() || info.Size() < 0 {
+		return nil, fmt.Errorf("code source must be a regular file with a valid size")
+	}
+	if info.Size() > codeMaxSourceBytes {
+		return nil, ErrCodeSourceTooLarge
+	}
+	source, err := io.ReadAll(io.LimitReader(codeSourceReader{ctx: ctx, reader: reader}, codeMaxSourceBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(source) > codeMaxSourceBytes {
-		return nil, fmt.Errorf("code source exceeds 100 MiB")
+		return nil, ErrCodeSourceTooLarge
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -60,12 +80,25 @@ func readCodeSource(ctx context.Context, path string) ([]byte, error) {
 	return source, nil
 }
 
+// Check cancellation between bounded reads without leaving a read goroutine.
+type codeSourceReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r codeSourceReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
 func prepareCodeDocument(ctx context.Context, source []byte, filename string) (document string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if len(source) > codeMaxSourceBytes {
-		return "", fmt.Errorf("code source exceeds 100 MiB")
+		return "", ErrCodeSourceTooLarge
 	}
 	// Escaping cannot shrink source text; reject impossible HTML budgets before
 	// tokenization or allocating expanded escaped output.

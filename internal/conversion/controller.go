@@ -457,6 +457,11 @@ func (ctrl *Controller) ConvertCodeToPDF(c *fiber.Ctx) error {
 
 	outputPath, err := ctrl.service.CodeToPdf(c.UserContext(), upload.Path, upload.Header.Filename, opts)
 	if err != nil {
+		if errors.Is(err, ErrCodeSourceTooLarge) {
+			return c.Status(fiber.StatusRequestEntityTooLarge).JSON(APIError{
+				Code: "CODE_SOURCE_TOO_LARGE", Message: ErrCodeSourceTooLarge.Error(),
+			})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    "CODE_CONVERSION_FAILED",
 			Message: "Source script rendering pipeline processing crashed: " + err.Error(),
