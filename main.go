@@ -39,6 +39,16 @@ import (
 )
 
 func main() {
+	// The private highlighting worker must run before configuration, databases,
+	// background services or HTTP initialization. It never renders in Chromium.
+	if handled, err := conversion.RunCodeHighlightWorker(os.Args[1:]); handled {
+		if err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	dir, err := os.Getwd()
 	if err == nil {
 		log.Printf("[DEBUG] Current working directory of the process is: %s", dir)
