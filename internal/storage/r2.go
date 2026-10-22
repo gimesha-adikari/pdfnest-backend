@@ -371,13 +371,14 @@ type PresignRequest struct {
 }
 
 type PresignItem struct {
-	Name      string            `json:"name"`
-	Size      int64             `json:"size"`
-	Type      string            `json:"type"`
-	Key       string            `json:"key"`
-	UploadURL string            `json:"uploadUrl"`
-	Method    string            `json:"method"`
-	Headers   map[string]string `json:"headers,omitempty"`
+	Name            string            `json:"name"`
+	Size            int64             `json:"size"`
+	Type            string            `json:"type"`
+	Key             string            `json:"key"`
+	UploadURL       string            `json:"uploadUrl"`
+	Method          string            `json:"method"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	WithCredentials bool              `json:"withCredentials,omitempty"`
 }
 
 type PresignResponse struct {

@@ -9,4 +9,5 @@ import (
 func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	group := router.Group("/storage", middleware.Protect())
 	group.Post("/r2/presign", ctrl.PresignUploads)
+	group.Put("/local-ocr-image", ctrl.UploadLocalOCRImage)
 }
