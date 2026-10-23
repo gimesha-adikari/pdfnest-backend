@@ -1,20 +1,27 @@
 package storage
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
+	"errors"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
 
-type Controller struct{}
+type Controller struct {
+	uploadGrantKey []byte
+	now            func() time.Time
+}
 
 func NewController() *Controller {
-	return &Controller{}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		key = nil // Issuance and verification fail closed without signing authority.
+	}
+	return &Controller{uploadGrantKey: key, now: time.Now}
 }
 
 type APIError struct {
@@ -49,25 +56,30 @@ func (ctrl *Controller) PresignUploads(c *fiber.Ctx) error {
 	// Preserve the existing owner-scoped object-key contract while routing only
 	// local-development searchable-PDF image uploads through the filesystem
 	// adapter shared with the Worker. Managed environments always select R2.
-	if !RemoteStorageEnabled() && req.Purpose == "image_to_text_pdf" {
+	if localOCRUploadsEnabled() && req.Purpose == "image_to_text_pdf" {
 		items := make([]PresignItem, 0, len(req.Files))
 		for _, file := range req.Files {
-			if file.Size <= 0 || file.Size > maxLocalOCRUploadBytes || !isLocalOCRImageType(file.Type) {
+			mediaType := canonicalLocalOCRMediaType(file.Type)
+			if file.Size <= 0 || file.Size > maxLocalOCRUploadBytes || mediaType == "" {
 				return c.Status(fiber.StatusBadRequest).JSON(APIError{
 					Code:    "INVALID_LOCAL_OCR_UPLOAD",
 					Message: "Local searchable-PDF uploads require JPG, PNG, or WebP images up to 100 MiB each.",
 				})
 			}
+			grant, err := ctrl.issueLocalOCRGrant(owner, file.Key, file.Size, mediaType)
+			if err != nil {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(APIError{Code: "LOCAL_UPLOAD_UNAVAILABLE", Message: "Local upload authorization is unavailable."})
+			}
 			query := url.Values{}
-			query.Set("key", file.Key)
-			query.Set("size", strconv.FormatInt(file.Size, 10))
+			query.Set("grant", grant)
 			items = append(items, PresignItem{
 				Name:            file.Name,
 				Size:            file.Size,
-				Type:            file.Type,
+				Type:            mediaType,
 				Key:             file.Key,
 				UploadURL:       strings.TrimRight(c.BaseURL(), "/") + "/api/storage/local-ocr-image?" + query.Encode(),
 				Method:          "PUT",
+				Headers:         map[string]string{"Content-Type": mediaType},
 				WithCredentials: true,
 			})
 		}
@@ -94,38 +106,42 @@ func (ctrl *Controller) PresignUploads(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) UploadLocalOCRImage(c *fiber.Ctx) error {
-	if RemoteStorageEnabled() {
+	if !localOCRUploadsEnabled() {
 		return c.SendStatus(fiber.StatusNotFound)
 	}
 	owner, _ := c.Locals("user_id").(string)
-	key := c.Query("key")
-	if !IsOwnedKey(key, owner, "image_to_text_pdf") {
+	grant, err := ctrl.verifyLocalOCRGrant(c.Query("grant"), owner)
+	if err != nil {
 		return c.Status(fiber.StatusForbidden).JSON(APIError{Code: "UPLOAD_NOT_OWNED", Message: "Upload is not authorized."})
 	}
 
-	expectedSize, err := strconv.ParseInt(c.Query("size"), 10, 64)
+	expectedSize := grant.Size
 	contentLength := int64(c.Context().Request.Header.ContentLength())
-	if err != nil || expectedSize <= 0 || expectedSize > maxLocalOCRUploadBytes || contentLength != expectedSize {
+	if contentLength != expectedSize {
 		return c.Status(fiber.StatusRequestEntityTooLarge).JSON(APIError{Code: "INVALID_LOCAL_UPLOAD_SIZE", Message: "Upload size does not match its authorized size."})
 	}
-	if !isLocalOCRImageType(c.Get(fiber.HeaderContentType)) {
+	if canonicalLocalOCRMediaType(c.Get(fiber.HeaderContentType)) != grant.MediaType {
 		return c.Status(fiber.StatusUnsupportedMediaType).JSON(APIError{Code: "INVALID_LOCAL_OCR_MEDIA_TYPE", Message: "Only JPG, PNG, or WebP images are accepted."})
 	}
 	body := c.Body()
 	if int64(len(body)) != expectedSize {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{Code: "LOCAL_UPLOAD_LENGTH_MISMATCH", Message: "Upload body length did not match its authorized size."})
 	}
-	if _, _, err := SaveLocalStream(context.Background(), key, bytes.NewReader(body)); err != nil {
+	if err := validateLocalOCRImage(body, grant.MediaType); err != nil {
+		return c.Status(fiber.StatusUnsupportedMediaType).JSON(APIError{Code: "INVALID_LOCAL_OCR_IMAGE", Message: "Upload must contain a valid supported image within the image dimension limits."})
+	}
+	// Recheck expiry after bounded decoding, immediately before consuming the grant.
+	if _, err := ctrl.verifyLocalOCRGrant(c.Query("grant"), owner); err != nil {
+		return c.Status(fiber.StatusForbidden).JSON(APIError{Code: "UPLOAD_NOT_OWNED", Message: "Upload is not authorized."})
+	}
+	if err := publishLocalOCRImage(grant, body, ctrl.now); err != nil {
+		if errors.Is(err, errLocalOCRGrantExpired) {
+			return c.Status(fiber.StatusForbidden).JSON(APIError{Code: "UPLOAD_NOT_OWNED", Message: "Upload is not authorized."})
+		}
+		if errors.Is(err, errLocalOCRGrantUsed) {
+			return c.Status(fiber.StatusConflict).JSON(APIError{Code: "LOCAL_UPLOAD_ALREADY_USED", Message: "This upload authorization has already been used. Request a new upload."})
+		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{Code: "LOCAL_UPLOAD_FAILED", Message: "Could not persist the local searchable-PDF input."})
 	}
 	return c.SendStatus(fiber.StatusNoContent)
-}
-
-func isLocalOCRImageType(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(strings.SplitN(value, ";", 2)[0])) {
-	case "image/jpeg", "image/jpg", "image/png", "image/webp":
-		return true
-	default:
-		return false
-	}
 }
