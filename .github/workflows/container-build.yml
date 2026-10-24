@@ -35,6 +35,15 @@ jobs:
       - name: Verify preview scale safety
         run: go test ./internal/conversion -run 'Preview|PageToImage' -count=1
 
+      - name: Verify offline Markdown and Code PDF safety
+        env:
+          APP_ENV: test
+          STORAGE_MODE: local
+          GOMAXPROCS: '2'
+        run: |
+          command -v google-chrome || command -v chromium || command -v chromium-browser || command -v google-chrome-stable
+          go test ./internal/conversion -run '^(TestMarkdown|TestCode)' -count=1 -p 1 -parallel 1 -timeout 5m
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
