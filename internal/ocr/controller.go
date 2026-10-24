@@ -579,8 +579,13 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 			}
 			localResultPath := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(r2Key))
 			// Keep the local fallback as a durable filesystem result URL. The
-			// managed branch above persists an R2 key and uses SetWithKey.
-			_ = tasks.Registry.Set(id, "COMPLETED", 100, localResultPath, "")
+			// managed branch above persists an R2 key. Preserve the task owner
+			// when publishing this local-path result as well.
+			published, publishErr := tasks.Registry.SetWithResultURL(id, "COMPLETED", 100, localResultPath, "", owner, reservationID, string(reservationKind))
+			if publishErr != nil || !published {
+				_ = os.Remove(localResultPath)
+				log.Printf("[OCR TASK] failed to publish local result for task %s", id)
+			}
 			return
 		}
 

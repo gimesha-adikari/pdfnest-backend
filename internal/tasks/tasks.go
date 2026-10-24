@@ -39,6 +39,32 @@ type TaskStatus struct {
 	UpdatedAt       int64  `json:"updatedAt,omitempty"`
 }
 
+// TaskStatusResponse contains only fields intended for task clients. Storage
+// keys, local result paths, owner IDs, and billing reservation metadata remain
+// in the registry and are never serialized by status or progress endpoints.
+type TaskStatusResponse struct {
+	ID            string `json:"id"`
+	Status        string `json:"status"`
+	Progress      int    `json:"progress"`
+	DownloadToken string `json:"downloadToken,omitempty"`
+	Error         string `json:"error,omitempty"`
+	UpdatedAt     int64  `json:"updatedAt,omitempty"`
+}
+
+func publicTaskStatus(task *TaskStatus) *TaskStatusResponse {
+	if task == nil {
+		return nil
+	}
+	return &TaskStatusResponse{
+		ID:            task.ID,
+		Status:        task.Status,
+		Progress:      task.Progress,
+		DownloadToken: task.DownloadToken,
+		Error:         task.Error,
+		UpdatedAt:     task.UpdatedAt,
+	}
+}
+
 type TaskRegistry struct {
 	client *redis.Client
 }
@@ -136,8 +162,9 @@ return cjson.encode({ result = "HEALTHY", payload = val })
 const atomicCancelTaskLua = `
 local key = KEYS[1]
 local owner = ARGV[1]
-local now = tonumber(ARGV[2])
-local ttlSeconds = tonumber(ARGV[3]) or 3600
+local capability = ARGV[2]
+local now = tonumber(ARGV[3])
+local ttlSeconds = tonumber(ARGV[4]) or 3600
 
 local val = redis.call('GET', key)
 if not val or val == '' then
@@ -147,7 +174,9 @@ end
 local data = cjson.decode(val)
 local curStatus = data.status
 
-if data.ownerIdentity and data.ownerIdentity ~= '' and owner and owner ~= '' and data.ownerIdentity ~= owner then
+local ownerMatches = data.ownerIdentity and data.ownerIdentity ~= '' and owner and owner ~= '' and data.ownerIdentity == owner
+local capabilityMatches = data.downloadToken and data.downloadToken ~= '' and capability and capability ~= '' and data.downloadToken == capability
+if not ownerMatches and not capabilityMatches then
     return cjson.encode({ result = "UNAUTHORIZED", payload = val })
 end
 
@@ -325,16 +354,37 @@ func (r *TaskRegistry) SetWithKey(id string, status string, progress int, result
 	if len(reservationID) > 1 {
 		resKind = reservationID[1]
 	}
-	return r.setWithKey(id, status, progress, resultKey, errStr, ownerIdentity, resID, resKind)
+	resultURL := ""
+	if resultKey != "" {
+		resultURL = "r2://" + resultKey
+	}
+	return r.setWithResultURL(id, status, progress, resultKey, resultURL, errStr, ownerIdentity, resID, resKind)
+}
+
+// SetWithResultURL records an explicitly owned task whose artifact is addressed
+// by a local result URL rather than an object-storage key.
+func (r *TaskRegistry) SetWithResultURL(id string, status string, progress int, resultURL string, errStr string, ownerIdentity string, reservationID ...string) (bool, error) {
+	var resID, resKind string
+	if len(reservationID) > 0 {
+		resID = reservationID[0]
+	}
+	if len(reservationID) > 1 {
+		resKind = reservationID[1]
+	}
+	return r.setWithResultURL(id, status, progress, "", resultURL, errStr, ownerIdentity, resID, resKind)
 }
 
 // SetWithKeyAndBilling records the reservation store with the task at
 // creation time. Later status updates preserve both fields from Redis.
 func (r *TaskRegistry) SetWithKeyAndBilling(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
-	return r.setWithKey(id, status, progress, resultKey, errStr, ownerIdentity, reservationID, reservationKind)
+	resultURL := ""
+	if resultKey != "" {
+		resultURL = "r2://" + resultKey
+	}
+	return r.setWithResultURL(id, status, progress, resultKey, resultURL, errStr, ownerIdentity, reservationID, reservationKind)
 }
 
-func (r *TaskRegistry) setWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
+func (r *TaskRegistry) setWithResultURL(id string, status string, progress int, resultKey string, resultURL string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
@@ -370,16 +420,13 @@ func (r *TaskRegistry) setWithKey(id string, status string, progress int, result
 		Status:          status,
 		Progress:        progress,
 		ResultKey:       resultKey,
+		ResultURL:       resultURL,
 		Error:           errStr,
 		UpdatedAt:       time.Now().Unix(),
 		OwnerIdentity:   ownerIdentity,
 		ReservationID:   resID,
 		ReservationKind: resKind,
 		DownloadToken:   dlToken,
-	}
-
-	if resultKey != "" {
-		task.ResultURL = "r2://" + resultKey
 	}
 
 	data, err := json.Marshal(task)
@@ -477,7 +524,7 @@ type cancelLuaResult struct {
 	Payload string `json:"payload"`
 }
 
-func (r *TaskRegistry) CancelTask(id string, ownerIdentity string) (string, *TaskStatus, error) {
+func (r *TaskRegistry) CancelTask(id string, ownerIdentity string, capabilityToken ...string) (string, *TaskStatus, error) {
 	client := r.getClient()
 	if client == nil {
 		return "ERROR", nil, errors.New("redis client not configured")
@@ -488,8 +535,12 @@ func (r *TaskRegistry) CancelTask(id string, ownerIdentity string) (string, *Tas
 
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 	now := time.Now().Unix()
+	token := ""
+	if len(capabilityToken) > 0 {
+		token = strings.TrimSpace(capabilityToken[0])
+	}
 
-	res, err := client.Eval(ctx, atomicCancelTaskLua, []string{key}, ownerIdentity, now, int(TaskTTL.Seconds())).Result()
+	res, err := client.Eval(ctx, atomicCancelTaskLua, []string{key}, ownerIdentity, token, now, int(TaskTTL.Seconds())).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return "NOT_FOUND", nil, nil
@@ -548,7 +599,7 @@ func handleGetTaskStatus(c *fiber.Ctx) error {
 	if !canReadTask(c, task) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"code": "FORBIDDEN", "message": "You are not authorized to view this task."})
 	}
-	return c.JSON(task)
+	return c.JSON(publicTaskStatus(task))
 }
 
 func canReadTask(c *fiber.Ctx, task *TaskStatus) bool {
@@ -566,7 +617,8 @@ func handleCancelTask(c *fiber.Ctx) error {
 		requesterID = c.IP()
 	}
 
-	result, task, err := Registry.CancelTask(id, requesterID)
+	capability := strings.TrimSpace(c.Get("X-Download-Token"))
+	result, task, err := Registry.CancelTask(id, requesterID, capability)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"code":    "TASK_STORAGE_UNAVAILABLE",
@@ -592,5 +644,5 @@ func handleCancelTask(c *fiber.Ctx) error {
 		}
 	}
 
-	return c.JSON(task)
+	return c.JSON(publicTaskStatus(task))
 }

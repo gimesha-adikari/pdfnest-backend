@@ -33,7 +33,7 @@ func RegisterRoutes(router fiber.Router) {
 		taskId := c.Params("id")
 		for {
 			progressData := getTaskProgress(taskId)
-			err := c.WriteJSON(progressData)
+			err := c.WriteJSON(publicTaskStatus(progressData))
 			if err != nil {
 				break
 			}
