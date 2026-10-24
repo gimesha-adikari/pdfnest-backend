@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"image/jpeg"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -147,8 +148,8 @@ func (s *ConversionService) ConvertPageToImageStream(
 		return nil, fmt.Errorf("page number must be greater than or equal to 1")
 	}
 
-	if scale <= 0 {
-		return nil, fmt.Errorf("preview scale must be greater than 0")
+	if math.IsNaN(scale) || math.IsInf(scale, 0) || scale <= 0 || scale > 600.0/72.0 {
+		return nil, fmt.Errorf("preview scale must be finite, positive and at most 600/72")
 	}
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID == "" {
@@ -217,6 +218,9 @@ func (s *ConversionService) ConvertPageToImageStream(
 		return imageBytes, nil
 	}
 
+	if !errors.Is(err, ErrPreviewSessionNotFound) {
+		return nil, err
+	}
 	globalPreviewSessions.deleteByHash(ownerID, sourceHash)
 
 	workerSession, recreateErr := s.createWorkerPreviewSession(
@@ -653,9 +657,9 @@ func (s *ConversionService) GetPreviewSessionPage(
 		)
 	}
 
-	if scale <= 0 {
+	if math.IsNaN(scale) || math.IsInf(scale, 0) || scale <= 0 || scale > 600.0/72.0 {
 		return nil, fmt.Errorf(
-			"preview scale must be greater than 0",
+			"preview scale must be finite, positive and at most 600/72",
 		)
 	}
 	ownerID = strings.TrimSpace(ownerID)
