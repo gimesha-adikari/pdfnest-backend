@@ -920,21 +920,13 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
 		r2Store, r2Err := storage.Default()
-		isProd := os.Getenv("APP_ENV") == "production"
 
 		if r2Err != nil || r2Store == nil {
-			if isProd {
-				releaseBilling()
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
-				return
-			}
-			if err := lease.commit(); err != nil {
-				releaseBilling()
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-				return
-			}
-			billingSettled = true
-			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+			// A temporary path is neither a durable object key nor a deliverable
+			// result: the common cleanup below removes it. Never publish or charge
+			// a successful task when its output cannot be persisted, in any venue.
+			releaseBilling()
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Result storage is unavailable. No document was published.", owner)
 			return
 		}
 

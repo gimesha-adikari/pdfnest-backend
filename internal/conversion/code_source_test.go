@@ -1,6 +1,7 @@
 package conversion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -288,4 +289,55 @@ func TestCodeSourceHTMLExpansionBudgetIsIndependent(t *testing.T) {
 		t.Fatalf("admissible raw source never reached highlighting: %v", err)
 	}
 	assertMarkdownNoArtifacts(t, dir)
+}
+
+// Exercise the real multipart upload middleware with the application's 100 MiB
+// HTTP ceiling. The source-specific 16 MiB rejection must originate at the
+// controller/service, not from a fake upload context or the transport limit.
+func TestCodeSourceOversizeMultipartHTTPContract(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	app := fiber.New(fiber.Config{BodyLimit: 100 << 20})
+	controller := NewController(&ConversionService{})
+	var observed int64
+	app.Post("/api/conversion/code-to-pdf", uploads.Prepare(), func(c *fiber.Ctx) error {
+		upload, err := uploads.MustFile(c, "file")
+		if err != nil {
+			return err
+		}
+		stat, err := os.Stat(upload.Path)
+		if err != nil {
+			return err
+		}
+		observed = stat.Size()
+		return controller.ConvertCodeToPDF(c)
+	})
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", "synthetic.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := (16 << 20) + 1
+	if _, err := part.Write(bytes.Repeat([]byte("x"), size)); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/api/conversion/code-to-pdf", &body)
+	request.Header.Set("Content-Type", form.FormDataContentType())
+	response, err := app.Test(request, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var result APIError
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if observed != int64(size) || response.StatusCode != 413 || result.Code != "CODE_SOURCE_TOO_LARGE" {
+		t.Fatalf("received=%d status=%d result=%+v", observed, response.StatusCode, result)
+	}
+	t.Logf("received full %d-byte source; HTTP %d code=%s", observed, response.StatusCode, result.Code)
 }
