@@ -32,6 +32,9 @@ jobs:
       - name: Verify Go Backend Compilation
         run: go build ./...
 
+      - name: Verify preview scale safety
+        run: go test ./internal/conversion -run 'Preview|PageToImage' -count=1
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
