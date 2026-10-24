@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"pdfnest-backend/config"
@@ -29,6 +30,7 @@ import (
 	"pdfnest-backend/internal/studio"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/user"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -266,9 +268,14 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+	listenHost := strings.TrimSpace(os.Getenv("BACKEND_LISTEN_HOST"))
+	listenAddress := ":" + port
+	if listenHost != "" {
+		listenAddress = net.JoinHostPort(listenHost, port)
+	}
 
-	log.Printf("Platen PDF Engine starting securely on port %s...", port)
-	if err := app.Listen(":" + port); err != nil {
+	log.Printf("Platen PDF Engine starting securely on %s...", listenAddress)
+	if err := app.Listen(listenAddress); err != nil {
 		log.Fatalf("Server dynamic socket capture failed: %v", err)
 	}
 }
