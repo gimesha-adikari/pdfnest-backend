@@ -41,7 +41,19 @@ func TestCloneGitRepository_LocalFixturePreservesDefaultHeadAndFiles(t *testing.
 	recordPath := filepath.Join(t.TempDir(), "git-args.txt")
 	bin := t.TempDir()
 	gitShim := filepath.Join(bin, "git")
-	shim := fmt.Sprintf("#!/bin/sh\nif [ \"$3\" = clone ]; then\n  printf '%%s\\n' \"$@\" > %s\n  exec /usr/bin/git \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" %s \"$9\"\nfi\nexec /usr/bin/git \"$@\"\n", shellQuote(recordPath), shellQuote("file://"+filepath.ToSlash(repository)))
+	shim := fmt.Sprintf(`#!/bin/bash
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == clone ]]; then
+    printf '%%s\n' "$@" > %s
+    for ((j=i+1; j<${#args[@]}; j++)); do
+      if [[ "${args[$j]}" == https://* ]]; then args[$j]=%s; fi
+    done
+    exec /usr/bin/git -c protocol.file.allow=always "${args[@]}"
+  fi
+done
+exec /usr/bin/git "$@"
+`, shellQuote(recordPath), shellQuote("file://"+filepath.ToSlash(repository)))
 	require.NoError(t, os.WriteFile(gitShim, []byte(shim), 0o700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -50,7 +62,7 @@ func TestCloneGitRepository_LocalFixturePreservesDefaultHeadAndFiles(t *testing.
 	defer sandbox.Cleanup()
 
 	fixtureURL := "https://8.8.8.8/fixture-repository.git"
-	result, err := CloneGitRepository(context.Background(), fixtureURL, sandbox, AcquisitionLimits{GitTimeout: 10 * time.Second})
+	result, err := cloneGitRepository(context.Background(), fixtureURL, sandbox, AcquisitionLimits{GitTimeout: 10 * time.Second}, gitShim)
 	require.NoError(t, err)
 	assert.Equal(t, expectedHead, result.CommitHash)
 	assert.Equal(t, "fixture-repository", result.RepositoryName)
@@ -61,12 +73,21 @@ func TestCloneGitRepository_LocalFixturePreservesDefaultHeadAndFiles(t *testing.
 	assert.Equal(t, "1", strings.TrimSpace(runFixtureGit(t, "-C", sandbox.RootPath, "rev-list", "--count", "HEAD")), "production shallow clone remains depth one")
 	args, err := os.ReadFile(recordPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(args), "-c\nhttp.followRedirects=false\nclone\n--depth\n1\n--no-tags\n--single-branch\nhttps://8.8.8.8/fixture-repository.git\n")
+	assert.Contains(t, string(args), "clone\n--depth\n1\n--no-tags\n--single-branch\n--\nhttps://8.8.8.8/fixture-repository.git\n")
+	for _, option := range []string{"http.followRedirects=false", "http.proxy=http://127.0.0.1:", "http.sslVerify=true", "protocol.allow=never", "protocol.https.allow=always", "credential.helper=", "core.hooksPath=/dev/null", "init.templateDir="} {
+		assert.Contains(t, string(args), option)
+	}
 	_, err = os.Stat(filepath.Join(sandbox.RootPath, "feature-only.txt"))
 	assert.ErrorIs(t, err, os.ErrNotExist, "single-branch clone must not ingest feature-only files")
 	content, err := os.ReadFile(filepath.Join(sandbox.RootPath, "README.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "second revision\n", string(content))
+	limited, err := NewSandbox(t.TempDir(), "limited-real-fixture")
+	require.NoError(t, err)
+	_, err = cloneGitRepository(context.Background(), fixtureURL, limited,
+		AcquisitionLimits{MaxFileCount: 2, MaxExtractedBytes: 1 << 20, GitTimeout: 5 * time.Second}, gitShim)
+	require.ErrorIs(t, err, ErrGitResourceLimit, "real small clone rejects a deliberately tiny file budget")
+	require.True(t, limited.IsClosed())
 }
 
 func TestCloneGitRepository_ClassifiesUnreachableTransportOutput(t *testing.T) {
@@ -80,7 +101,7 @@ func TestCloneGitRepository_ClassifiesUnreachableTransportOutput(t *testing.T) {
 	require.NoError(t, err)
 	defer sandbox.Cleanup()
 
-	_, err = CloneGitRepository(context.Background(), "https://8.8.8.8/fixture-repository.git", sandbox, AcquisitionLimits{GitTimeout: 5 * time.Second})
+	_, err = cloneGitRepository(context.Background(), "https://8.8.8.8/fixture-repository.git", sandbox, AcquisitionLimits{GitTimeout: 5 * time.Second}, gitShim)
 	require.ErrorIs(t, err, ErrGitUnreachable)
 }
 

@@ -21,7 +21,7 @@ func TestCloneDeadlineTerminatesInheritedOutputPipes(t *testing.T) {
 	limits := DefaultAcquisitionLimits()
 	limits.GitTimeout = 100 * time.Millisecond
 	started := time.Now()
-	_, err = CloneGitRepository(context.Background(), "https://8.8.8.8/repository.git", sandbox, limits)
+	_, err = cloneGitRepository(context.Background(), "https://8.8.8.8/repository.git", sandbox, limits, filepath.Join(bin, "git"))
 	require.ErrorIs(t, err, ErrGitTimeout)
 	require.Less(t, time.Since(started), 2*time.Second, "transport descendants must not outlive the clone deadline")
 }

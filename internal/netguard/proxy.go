@@ -38,6 +38,12 @@ func publicIP(ip netip.Addr) bool {
 	return true
 }
 
+// IsPublicIP exposes the same destination policy to acquisition preflight.
+func IsPublicIP(ip net.IP) bool {
+	addr, ok := netip.AddrFromSlice(ip)
+	return ok && publicIP(addr)
+}
+
 func ValidateURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Hostname() == "" || strings.Contains(u.Hostname(), "%") {
@@ -112,20 +118,35 @@ func dialPublic(ctx context.Context, address string, lookup resolver, dial func(
 }
 
 type Proxy struct {
-	URL         string
-	server      *http.Server
-	transport   *http.Transport
-	connections sync.Map
-	closed      atomic.Bool
-	slots       chan struct{}
-	dial        func(context.Context, string) (net.Conn, error)
+	URL           string
+	server        *http.Server
+	transport     *http.Transport
+	connections   sync.Map
+	closed        atomic.Bool
+	slots         chan struct{}
+	dial          func(context.Context, string) (net.Conn, error)
+	connectHost   string
+	tunnelTimeout time.Duration
 }
 
 func Start(ctx context.Context) (*Proxy, error) {
-	p := &Proxy{slots: make(chan struct{}, 16)}
+	return start(ctx, "", 90*time.Second, nil)
+}
+
+// StartGit confines CONNECT to the original HTTPS Git authority. TLS remains
+// end-to-end in Git; this proxy never decrypts or replaces its certificate checks.
+func StartGit(ctx context.Context, hostname string, timeout time.Duration) (*Proxy, error) {
+	return start(ctx, net.JoinHostPort(hostname, "443"), timeout, nil)
+}
+
+func start(ctx context.Context, connectHost string, timeout time.Duration, dial func(context.Context, string) (net.Conn, error)) (*Proxy, error) {
+	p := &Proxy{slots: make(chan struct{}, 16), connectHost: connectHost, tunnelTimeout: timeout}
 	d := &net.Dialer{Timeout: 5 * time.Second}
-	p.dial = func(ctx context.Context, address string) (net.Conn, error) {
-		return dialPublic(ctx, address, net.DefaultResolver.LookupIPAddr, d.DialContext)
+	p.dial = dial
+	if p.dial == nil {
+		p.dial = func(ctx context.Context, address string) (net.Conn, error) {
+			return dialPublic(ctx, address, net.DefaultResolver.LookupIPAddr, d.DialContext)
+		}
 	}
 	p.transport = &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, address string) (net.Conn, error) { return p.dial(ctx, address) }, ResponseHeaderTimeout: 15 * time.Second, MaxIdleConns: 16, MaxIdleConnsPerHost: 4, IdleConnTimeout: 15 * time.Second}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -144,6 +165,10 @@ func (p *Proxy) Close() {
 	p.connections.Range(func(key, value any) bool { _ = key.(net.Conn).Close(); return true })
 }
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.connectHost != "" && (r.Method != http.MethodConnect || !strings.EqualFold(r.Host, p.connectHost)) {
+		http.Error(w, ErrForbidden.Error(), http.StatusForbidden)
+		return
+	}
 	select {
 	case p.slots <- struct{}{}:
 		defer func() { <-p.slots }()
@@ -203,7 +228,7 @@ func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request) {
 	if p.closed.Load() {
 		return
 	}
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(p.tunnelTimeout)
 	_ = client.SetDeadline(deadline)
 	_ = upstream.SetDeadline(deadline)
 	if _, err = buffer.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {

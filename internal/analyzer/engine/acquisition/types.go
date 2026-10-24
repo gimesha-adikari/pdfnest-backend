@@ -25,7 +25,8 @@ var (
 	// ErrGitTimeout is returned when Git clone exceeds the acquisition deadline.
 	ErrGitTimeout = errors.New("GIT_TIMEOUT: git clone operation timed out")
 
-	// ErrGitResourceLimit is returned when Git clone process is terminated due to memory or system resource limits.
+	// ErrGitResourceLimit covers detected scratch limits and process resource termination.
+	// Scratch growth is monitored; it is not an OS-enforced filesystem quota.
 	ErrGitResourceLimit = errors.New("GIT_RESOURCE_LIMIT: git clone process exceeded system resource limits")
 
 	// ErrGitUnreachable is returned when the remote Git host or network target is unreachable.
@@ -58,6 +59,7 @@ var (
 
 // AcquisitionLimits encapsulates operational resource limits and timeouts for repository acquisition.
 type AcquisitionLimits struct {
+	// Git applies these limits to all scratch files, including .git metadata.
 	MaxExtractedBytes     int64
 	MaxFileCount          int
 	MaxDecompressionRatio float64

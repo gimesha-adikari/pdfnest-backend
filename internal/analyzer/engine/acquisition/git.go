@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"pdfnest-backend/internal/analyzer/engine"
+	"pdfnest-backend/internal/netguard"
 	"pdfnest-backend/internal/process"
 )
 
@@ -71,10 +71,13 @@ func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
 	}
 
 	// 2. Reject embedded user credentials
-	if parsed.User != nil {
+	if parsed.User != nil || parsed.Opaque != "" || parsed.Fragment != "" {
 		return fmt.Errorf("embedded credentials in git url are prohibited for security")
 	}
 
+	if _, err := netguard.ValidateURL(trimmed); err != nil {
+		return ErrSSRFBlocked
+	}
 	hostname := parsed.Hostname()
 	if hostname == "" {
 		return fmt.Errorf("missing hostname in git url")
@@ -126,6 +129,9 @@ func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
 		return fmt.Errorf("%w: dns lookup failed for host %s: %v", ErrGitUnreachable, hostname, err)
 	}
 
+	if len(ips) == 0 {
+		return ErrSSRFBlocked
+	}
 	for _, ip := range ips {
 		if isIPBlocked(ip) {
 			return ErrSSRFBlocked
@@ -136,6 +142,9 @@ func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
 }
 
 func isIPBlocked(ip net.IP) bool {
+	if !netguard.IsPublicIP(ip) {
+		return true
+	}
 	if ip4 := ip.To4(); ip4 != nil {
 		if ip4.IsLoopback() || ip4.IsPrivate() || ip4.IsLinkLocalUnicast() || ip4.IsLinkLocalMulticast() || ip4.IsUnspecified() {
 			return true
@@ -182,10 +191,23 @@ func CloneGitRepository(
 	sandbox *Sandbox,
 	limits AcquisitionLimits,
 ) (*AcquisitionResult, error) {
+	return cloneGitRepository(ctx, gitURL, sandbox, limits, "/usr/bin/git")
+}
+
+// gitBinary is an internal test seam; public acquisition always uses the system
+// Git and a fixed helper PATH, never an inherited caller-supplied executable.
+func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, limits AcquisitionLimits, gitBinary string) (*AcquisitionResult, error) {
 	if sandbox == nil || sandbox.IsClosed() {
 		return nil, ErrSandboxClosed
 	}
 
+	success := false
+	defer func() {
+		if !success {
+			_ = sandbox.Cleanup()
+		}
+	}()
+	gitURL = strings.TrimSpace(gitURL)
 	if err := ValidateGitURL(gitURL); err != nil {
 		return nil, err
 	}
@@ -200,27 +222,35 @@ func CloneGitRepository(
 
 	startTime := time.Now()
 
-	// Prepare isolated git clone command with redirects strictly disabled
-	cmd := exec.Command(
-		"git",
-		"-c", "http.followRedirects=false",
-		"clone",
-		"--depth", "1",
-		"--no-tags",
-		"--single-branch",
-		gitURL,
-		sandbox.RootPath,
-	)
-
-	// Strip unsafe environment variables
-	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
-		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"HOME=" + sandbox.RootPath,
+	parsed, _ := url.Parse(gitURL) // Validated above.
+	proxy, err := netguard.StartGit(cloneCtx, parsed.Hostname(), timeout)
+	if err != nil {
+		return nil, fmt.Errorf("%w: guarded transport unavailable", ErrGitAcquisitionFailed)
 	}
-
-	output, err := (process.Runner{}).RunCommand(cloneCtx, 0, cmd)
+	defer proxy.Close()
+	home, err := os.MkdirTemp("", "platen-git-home-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(home)
+	args := []string{
+		"-c", "http.followRedirects=false",
+		"-c", "http.proxy=" + proxy.URL,
+		"-c", "http.sslVerify=true",
+		"-c", "protocol.allow=never",
+		"-c", "protocol.https.allow=always",
+		"-c", "credential.helper=",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "init.templateDir=",
+		"clone", "--depth", "1", "--no-tags", "--single-branch", "--", gitURL, sandbox.RootPath,
+	}
+	cmd := exec.Command(gitBinary, args...)
+	cmd.Dir = home
+	cmd.Env = isolatedGitEnv(home)
+	output, err := runBoundedGit(cloneCtx, cmd, sandbox.RootPath, limits)
+	if errors.Is(err, ErrGitResourceLimit) {
+		return nil, err
+	}
 	if err != nil {
 		_ = sandbox.Cleanup()
 		elapsed := time.Since(startTime).Round(time.Millisecond)
@@ -271,24 +301,21 @@ func CloneGitRepository(
 
 	// Capture commit hash via direct rev-parse
 	var commitHash string
-	revCmd := exec.Command("git", "-C", sandbox.RootPath, "rev-parse", "HEAD")
-	revCmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1"}
+	revCmd := exec.Command(gitBinary, "-C", sandbox.RootPath, "rev-parse", "HEAD")
+	revCmd.Env = isolatedGitEnv(home)
+	revCmd.Dir = home
 	if revOut, revErr := (process.Runner{}).RunCommand(cloneCtx, 0, revCmd); revErr == nil {
 		commitHash = strings.TrimSpace(string(revOut))
 	}
 
-	// Calculate file count and bytes
-	var fileCount int
-	var totalBytes int64
-	_ = filepath.WalkDir(sandbox.RootPath, func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			fileCount++
-			if info, infoErr := d.Info(); infoErr == nil {
-				totalBytes += info.Size()
-			}
-		}
-		return nil
-	})
+	fileCount, totalBytes, err := checkGitWorkspace(cloneCtx, sandbox.RootPath, effectiveGitLimits(limits))
+	if err != nil {
+		return nil, err
+	}
+	if cloneCtx.Err() != nil {
+		return nil, fmt.Errorf("%w: acquisition interrupted", ErrGitAcquisitionFailed)
+	}
+	success = true
 
 	repoName := DeriveRepositoryName(gitURL)
 	duration := time.Since(startTime).Milliseconds()

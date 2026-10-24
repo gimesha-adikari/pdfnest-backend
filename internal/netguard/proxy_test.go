@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestPublicDestinationsOnly(t *testing.T) {
@@ -96,4 +97,72 @@ func TestProxyBlocksLocalRequestsAndConnect(t *testing.T) {
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, request)
 	require.Equal(t, 403, rec.Code)
+}
+
+func TestGitProxyRestrictsAuthorityAndRevalidatesRebinding(t *testing.T) {
+	p, err := StartGit(context.Background(), "repo.example", 5*time.Second)
+	require.NoError(t, err)
+	defer p.Close()
+	calls := 0
+	lookup := func(context.Context, string) ([]net.IPAddr, error) {
+		calls++
+		if calls == 1 {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		}
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	sockets := 0
+	dial := func(_ context.Context, _, address string) (net.Conn, error) {
+		sockets++
+		require.Equal(t, "93.184.216.34:443", address)
+		a, b := net.Pipe()
+		b.Close()
+		return a, nil
+	}
+	p.dial = func(ctx context.Context, address string) (net.Conn, error) {
+		return dialPublic(ctx, address, lookup, dial)
+	}
+	c, err := p.dial(context.Background(), "repo.example:443")
+	require.NoError(t, err)
+	c.Close()
+	// Same hostname, changed DNS: the connection-time lookup must reject it.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("CONNECT", "http://repo.example:443", nil)
+	req.Host = "repo.example:443"
+	p.ServeHTTP(rec, req)
+	require.Equal(t, 403, rec.Code)
+	require.Equal(t, 1, sockets)
+	for _, target := range []string{"other.example:443", "repo.example:80", "[::1]:443"} {
+		req := httptest.NewRequest("CONNECT", "http://"+target, nil)
+		req.Host = target
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		require.Equal(t, 403, rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "http://repo.example/", nil))
+	require.Equal(t, 403, rec.Code)
+	require.Equal(t, 2, calls, "forbidden authorities never resolve or connect")
+}
+
+func TestDialIPv6PinsAndRejectsForbiddenForms(t *testing.T) {
+	for _, ip := range []string{"2606:4700:4700::1111", "::ffff:127.0.0.1", "fe80::1", "64:ff9b::7f00:1", "ff02::1", "2001:db8::1"} {
+		calls := 0
+		lookup := func(context.Context, string) ([]net.IPAddr, error) { return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil }
+		c, err := dialPublic(context.Background(), "repo.example:443", lookup, func(_ context.Context, _, addr string) (net.Conn, error) {
+			calls++
+			require.Equal(t, "["+ip+"]:443", addr)
+			a, b := net.Pipe()
+			b.Close()
+			return a, nil
+		})
+		if ip == "2606:4700:4700::1111" {
+			require.NoError(t, err)
+			c.Close()
+			require.Equal(t, 1, calls)
+		} else {
+			require.ErrorIs(t, err, ErrForbidden)
+			require.Zero(t, calls)
+		}
+	}
 }
