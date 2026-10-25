@@ -97,7 +97,9 @@ func (ctrl *Controller) ToggleBanUser(c *fiber.Ctx) error {
 		user.Status = "active"
 	}
 
-	config.DB.Save(&user)
+	if err := config.DB.Model(&config.User{}).Where("id = ?", user.ID).Update("status", user.Status).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed updating user status"})
+	}
 	return c.JSON(fiber.Map{"status": "success", "updated_status": user.Status})
 }
 
@@ -125,7 +127,9 @@ func (ctrl *Controller) UpdateUserRole(c *fiber.Ctx) error {
 	}
 
 	user.Role = req.Role
-	config.DB.Save(&user)
+	if err := config.DB.Model(&config.User{}).Where("id = ?", user.ID).Update("role", user.Role).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": "Failed updating user role"})
+	}
 
 	return c.JSON(fiber.Map{"status": "success", "new_role": user.Role})
 }

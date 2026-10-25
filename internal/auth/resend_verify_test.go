@@ -43,6 +43,7 @@ func TestResendVerification_AUTH004_A_UnknownEmailReturnsGenericSuccess(t *testi
 func TestResendVerification_AUTH004_B_PendingUserRefreshesToken(t *testing.T) {
 	app, _, user, oldToken := setupEmailVerificationMatrixTest(t)
 
+	require.NoError(t, config.DB.Model(&config.User{}).Where("id = ?", user.ID).Update("email_verify_expires_at", time.Now().Add(emailVerificationTTL-emailVerificationCooldown-time.Second)).Error)
 	oldHash := hashVerificationToken(oldToken)
 	req := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+user.Email+`"}`)
 	resp, err := app.Test(req)
