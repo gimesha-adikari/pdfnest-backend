@@ -29,6 +29,29 @@ func SignRequestWithSecret(req *http.Request, secret string) error {
 	if req == nil {
 		return fmt.Errorf("nil request")
 	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	// Discard all caller claims, even if staging fails. Only the bytes that
+	// become req.Body below may be authenticated.
+	for _, name := range []string{"X-Worker-Body-Hash", "X-Worker-Signature", "X-Worker-Timestamp", "X-Worker-Nonce"} {
+		req.Header.Del(name)
+	}
+	body, bodyHash, size, err := stageRequestBody(req.Context(), req.Body, MaxRequestBodyBytes)
+	if err != nil {
+		return fmt.Errorf("stage worker request body: %w", err)
+	}
+	if req.URL == nil || strings.TrimSpace(secret) == "" || (req.ContentLength > 0 && req.ContentLength != size) {
+		_ = body.Close()
+		return fmt.Errorf("invalid worker request target, credentials or body length")
+	}
+	req.Body = body
+	req.ContentLength = size
+	req.TransferEncoding = nil
+	// Automatic transport replay cannot renew a nonce. Deliberate retries must
+	// build a fresh request and pass through signing again.
+	req.GetBody = nil
+	req.Header.Set("X-Worker-Body-Hash", bodyHash)
 
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := uuid.New().String()
@@ -39,23 +62,20 @@ func SignRequestWithSecret(req *http.Request, secret string) error {
 		path += "?" + req.URL.RawQuery
 	}
 
-	bodyHash := req.Header.Get("X-Worker-Body-Hash")
-	var stringToSign string
-	if bodyHash != "" {
-		stringToSign = fmt.Sprintf("%s\n%s\n%s\n%s\n%s", method, path, timestamp, nonce, bodyHash)
-	} else {
-		stringToSign = fmt.Sprintf("%s\n%s\n%s\n%s", method, path, timestamp, nonce)
-	}
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(stringToSign))
-	signature := hex.EncodeToString(mac.Sum(nil))
+	signature := bodySignature(method, path, timestamp, nonce, bodyHash, secret)
 
 	req.Header.Set("X-Worker-Signature", signature)
 	req.Header.Set("X-Worker-Timestamp", timestamp)
 	req.Header.Set("X-Worker-Nonce", nonce)
 
 	return nil
+}
+
+func bodySignature(method, target, timestamp, nonce, digest, secret string) string {
+	canonical := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", strings.ToUpper(method), target, timestamp, nonce, digest)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(canonical))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func SignRequest(req *http.Request) error {
@@ -71,6 +91,7 @@ func (st *signingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if err := SignRequest(req); err != nil {
 		return nil, err
 	}
+	defer req.Body.Close()
 	base := st.transport
 	if base == nil {
 		base = http.DefaultTransport
@@ -98,7 +119,7 @@ func GetWorkerURL() string {
 func CreateMultipartRequest(
 	inputPath string,
 	build func(*multipart.Writer) error,
-) (io.Reader, string, error) {
+) (io.ReadCloser, string, error) {
 	file, err := os.Open(inputPath)
 	if err != nil {
 		return nil, "", err

@@ -131,7 +131,7 @@ func TestRealRendering_EndToEndWorkerRenderer(t *testing.T) {
 			return
 		}
 
-		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce, r.Header.Get("X-Worker-Body-Hash"))
 		mac := hmac.New(sha256.New, []byte(testSecret))
 		mac.Write([]byte(stringToSign))
 		expectedSig := hex.EncodeToString(mac.Sum(nil))
@@ -319,7 +319,7 @@ func TestRealRendering_EndToEndWorkerRenderer_SubTilesAndIntegratedRotation(t *t
 			return
 		}
 
-		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce, r.Header.Get("X-Worker-Body-Hash"))
 		mac := hmac.New(sha256.New, []byte(testSecret))
 		mac.Write([]byte(stringToSign))
 		if sig != hex.EncodeToString(mac.Sum(nil)) {

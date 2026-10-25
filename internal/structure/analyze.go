@@ -41,6 +41,7 @@ func (s *structureService) AnalyzePDF(inputPath, filePassword string) (*PDFAnaly
 	if err != nil {
 		return nil, err
 	}
+	defer body.Close()
 
 	req, err := http.NewRequest(
 		http.MethodPost,

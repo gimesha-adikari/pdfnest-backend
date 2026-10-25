@@ -73,6 +73,7 @@ func (s *structureService) UpdateMetadataPDF(
 	if err != nil {
 		return "", err
 	}
+	defer body.Close()
 
 	req, err := http.NewRequest(
 		http.MethodPost,
@@ -196,6 +197,7 @@ func (s *structureService) GetMetadataPDF(
 	if err != nil {
 		return nil, err
 	}
+	defer body.Close()
 
 	req, err := http.NewRequest(
 		http.MethodPost,

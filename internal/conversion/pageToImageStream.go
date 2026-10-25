@@ -377,6 +377,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 	defer pdfFile.Close()
 
 	pr, pw := io.Pipe()
+	defer pr.Close() // Unblock the producer on construction/signing/transport failure.
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 

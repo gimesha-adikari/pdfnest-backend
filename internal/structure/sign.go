@@ -50,6 +50,7 @@ func SignPdfMulti(
 	if err != nil {
 		return err
 	}
+	defer body.Close()
 
 	req, err := http.NewRequest(
 		http.MethodPost,

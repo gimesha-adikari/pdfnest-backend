@@ -31,6 +31,7 @@ func processOfficeRequest(ctx context.Context, endpoint, format, inputPath, outp
 	defer inputFile.Close()
 
 	pr, pw := io.Pipe()
+	defer pr.Close() // Unblock the producer on construction/signing/transport failure.
 	writer := multipart.NewWriter(pw)
 
 	go func() {

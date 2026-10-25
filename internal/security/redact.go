@@ -48,6 +48,7 @@ func (s *securityService) RedactPageText(
 	if err != nil {
 		return "", err
 	}
+	defer body.Close()
 
 	req, err := http.NewRequest(
 		http.MethodPost,

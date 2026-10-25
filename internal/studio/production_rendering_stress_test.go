@@ -45,7 +45,7 @@ func setupMockPyMuPDFWorkerServer(t *testing.T, secret string) *httptest.Server 
 			return
 		}
 
-		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce, r.Header.Get("X-Worker-Body-Hash"))
 		mac := hmac.New(sha256.New, []byte(secret))
 		mac.Write([]byte(stringToSign))
 		if sig != hex.EncodeToString(mac.Sum(nil)) {
