@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Disposable native PostgreSQL only; never uses the caller's DATABASE_URL.
 set -euo pipefail
+# Optional legacy fixtures must not pick up unrelated caller database settings
+# or PostgreSQL service/password files.
+unset ADMIN001_TEST_DATABASE_URL GIM6_TEST_DATABASE_URL PGHOSTADDR PGSERVICE PGSERVICEFILE PGPASSWORD PGOPTIONS
+export PGPASSFILE=/dev/null
 bindir="$(pg_config --bindir)"
 account_test_root="$(mktemp -d /tmp/platen-account-tests.XXXXXXXX)"
 cleanup() {
