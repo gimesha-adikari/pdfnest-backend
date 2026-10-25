@@ -64,6 +64,7 @@ func (c *Client) Execute(ctx context.Context, inputPath string, request TextRequ
 	if err != nil {
 		return nil, err
 	}
+	defer body.Close()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/internal/ocr/v2/text", body)
 	if err != nil {
 		return nil, err
@@ -138,6 +139,7 @@ func (c *Client) Preview(ctx context.Context, inputPath string, request TextRequ
 	if err != nil {
 		return nil, err
 	}
+	defer body.Close()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/internal/ocr/v2/markup/preview", body)
 	if err != nil {
 		return nil, err

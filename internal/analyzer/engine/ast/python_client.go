@@ -219,6 +219,16 @@ func SelectPythonCandidates(
 
 // AnalyzePython dispatches a static AST analysis request to the Python worker service.
 func (c *PythonClient) AnalyzePython(ctx context.Context, req PythonASTRequest) (*PythonASTResponse, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil python worker request context")
+	}
+	// Staging is part of the request budget, not an extra five-minute phase
+	// before the client's configured HTTP timeout starts.
+	if c.httpClient.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.httpClient.Timeout)
+		defer cancel()
+	}
 	if req.ProtocolVersion == "" {
 		req.ProtocolVersion = "1.0.0"
 	}
@@ -243,7 +253,10 @@ func (c *PythonClient) AnalyzePython(ctx context.Context, req PythonASTRequest) 
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.sharedSecret != "" {
-		_ = worker.SignRequestWithSecret(httpReq, c.sharedSecret)
+		if err := worker.SignRequestWithSecret(httpReq, c.sharedSecret); err != nil {
+			return nil, fmt.Errorf("sign python worker request: %w", err)
+		}
+		defer httpReq.Body.Close()
 	}
 
 	httpResp, err := c.httpClient.Do(httpReq)

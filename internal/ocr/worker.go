@@ -31,6 +31,7 @@ func postSingleFileToWorker(
 	// Stream multipart body through an io.Pipe to avoid buffering the
 	// entire file in Go heap memory before sending to the worker.
 	pr, pw := io.Pipe()
+	defer pr.Close() // Unblock the producer on construction/signing/transport failure.
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 
@@ -91,6 +92,7 @@ func postMultipleFilesToWorker(
 	// Stream multipart body through an io.Pipe to avoid buffering all
 	// input files in Go heap memory before sending to the worker.
 	pr, pw := io.Pipe()
+	defer pr.Close() // Unblock the producer on construction/signing/transport failure.
 	writer := multipart.NewWriter(pw)
 	contentType := writer.FormDataContentType()
 

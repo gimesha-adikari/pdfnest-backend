@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,24 @@ import (
 	"pdfnest-backend/internal/analyzer/engine"
 	"pdfnest-backend/internal/analyzer/engine/parsers"
 )
+
+func TestPythonSigningFailureNeverDispatches(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer server.Close()
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing-spool-directory"))
+	client := NewPythonClient(server.URL, "synthetic", time.Second)
+	_, err := client.AnalyzePython(context.Background(), PythonASTRequest{Files: []PythonFilePayload{{Path: "small.py", Content: strings.Repeat("x", 70<<10)}}})
+	require.ErrorContains(t, err, "sign python worker request")
+	require.False(t, called)
+}
+
+func TestPythonConfiguredTimeoutIncludesSigning(t *testing.T) {
+	client := NewPythonClient("http://127.0.0.1:1", "synthetic", time.Nanosecond)
+	_, err := client.AnalyzePython(context.Background(), PythonASTRequest{Files: []PythonFilePayload{{Path: "small.py", Content: strings.Repeat("x", 70<<10)}}})
+	require.ErrorContains(t, err, "sign python worker request")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
 
 func TestSelectPythonCandidates(t *testing.T) {
 	tmpDir := t.TempDir()

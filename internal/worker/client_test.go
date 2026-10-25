@@ -54,7 +54,7 @@ func TestSignRequest(t *testing.T) {
 		t.Errorf("expected signature headers to be set")
 	}
 
-	stringToSign := "POST\n/api/v1/office/convert?format=docx\n" + ts + "\n" + nonce
+	stringToSign := "POST\n/api/v1/office/convert?format=docx\n" + ts + "\n" + nonce + "\n" + req.Header.Get("X-Worker-Body-Hash")
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(stringToSign))
 	expectedSig := hex.EncodeToString(mac.Sum(nil))
@@ -162,24 +162,23 @@ func TestWorkerAuthenticationContract(t *testing.T) {
 			return
 		}
 
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		digest := sha256.Sum256(body)
+		bodyHash := hex.EncodeToString(digest[:])
+		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", r.Method, r.URL.RequestURI(), ts, nonce, bodyHash)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte(stringToSign))
+		if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) || r.Header.Get("X-Worker-Body-Hash") != bodyHash {
+			http.Error(w, "invalid signature or body", http.StatusUnauthorized)
+			return
+		}
 		nonceMu.Lock()
+		defer nonceMu.Unlock()
 		if seenNonces[nonce] {
-			nonceMu.Unlock()
 			http.Error(w, "nonce replayed", http.StatusUnauthorized)
 			return
 		}
 		seenNonces[nonce] = true
-		nonceMu.Unlock()
-
-		stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", r.Method, r.URL.Path, ts, nonce)
-		mac := hmac.New(sha256.New, []byte(secret))
-		mac.Write([]byte(stringToSign))
-		expectedSig := hex.EncodeToString(mac.Sum(nil))
-
-		if sig != expectedSig {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"authenticated":true}`))
@@ -227,9 +226,12 @@ func TestWorkerAuthenticationContract(t *testing.T) {
 	reqExpired, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/render/page", nil)
 	expiredTs := strconv.FormatInt(time.Now().Unix()-600, 10)
 	nonceExpired := "nonce-expired-123"
-	stringToSign := fmt.Sprintf("POST\n/api/v1/render/page\n%s\n%s", expiredTs, nonceExpired)
+	empty := sha256.Sum256(nil)
+	emptyHash := hex.EncodeToString(empty[:])
+	stringToSign := fmt.Sprintf("POST\n/api/v1/render/page\n%s\n%s\n%s", expiredTs, nonceExpired, emptyHash)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(stringToSign))
+	reqExpired.Header.Set("X-Worker-Body-Hash", emptyHash)
 	reqExpired.Header.Set("X-Worker-Signature", hex.EncodeToString(mac.Sum(nil)))
 	reqExpired.Header.Set("X-Worker-Timestamp", expiredTs)
 	reqExpired.Header.Set("X-Worker-Nonce", nonceExpired)
@@ -245,12 +247,13 @@ func TestWorkerAuthenticationContract(t *testing.T) {
 	// 5. Replayed nonce -> first succeeds, second fails with 401
 	replayNonce := "nonce-replay-unique-456"
 	currentTs := strconv.FormatInt(time.Now().Unix(), 10)
-	strToSignReplay := fmt.Sprintf("POST\n/api/v1/render/page\n%s\n%s", currentTs, replayNonce)
+	strToSignReplay := fmt.Sprintf("POST\n/api/v1/render/page\n%s\n%s\n%s", currentTs, replayNonce, emptyHash)
 	macReplay := hmac.New(sha256.New, []byte(secret))
 	macReplay.Write([]byte(strToSignReplay))
 	sigReplay := hex.EncodeToString(macReplay.Sum(nil))
 
 	reqReplay1, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/render/page", nil)
+	reqReplay1.Header.Set("X-Worker-Body-Hash", emptyHash)
 	reqReplay1.Header.Set("X-Worker-Signature", sigReplay)
 	reqReplay1.Header.Set("X-Worker-Timestamp", currentTs)
 	reqReplay1.Header.Set("X-Worker-Nonce", replayNonce)
@@ -260,6 +263,7 @@ func TestWorkerAuthenticationContract(t *testing.T) {
 	assert.Equal(t, http.StatusOK, respR1.StatusCode, "First request with unique nonce must succeed")
 
 	reqReplay2, _ := http.NewRequest(http.MethodPost, server.URL+"/api/v1/render/page", nil)
+	reqReplay2.Header.Set("X-Worker-Body-Hash", emptyHash)
 	reqReplay2.Header.Set("X-Worker-Signature", sigReplay)
 	reqReplay2.Header.Set("X-Worker-Timestamp", currentTs)
 	reqReplay2.Header.Set("X-Worker-Nonce", replayNonce)
