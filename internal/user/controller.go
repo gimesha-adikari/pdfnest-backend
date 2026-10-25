@@ -1,9 +1,14 @@
 package user
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/authn"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -86,32 +91,54 @@ func (ctrl *Controller) UpdatePassword(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "New password must be at least 8 characters"})
 	}
 
-	var user config.User
-	if err := config.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+	if config.DB == nil {
+		return c.Status(503).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
 	}
-
-	if user.PasswordHash == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "This account uses Google sign-in"})
+	expectedVersion, ok := c.Locals("session_version").(int64)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid or unavailable account session"})
 	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)); err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Incorrect current password"})
+	ctx, cancel := context.WithTimeout(c.UserContext(), 10*time.Second)
+	defer cancel()
+	err = config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user config.User
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&user, "id = ?", userID).Error; err != nil {
+			return err
+		}
+		// Middleware authenticated an earlier snapshot. Recheck its version
+		// after locking so reset/logout/a winning change cannot be overwritten.
+		if user.SessionVersion != expectedVersion || user.Status != "active" || !user.EmailVerified {
+			return authn.ErrInvalid
+		}
+		if user.PasswordHash == "" {
+			return fiber.NewError(400, "This account uses Google sign-in")
+		}
+		if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.CurrentPassword)) != nil {
+			return fiber.NewError(401, "Incorrect current password")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+		if err != nil {
+			return err
+		}
+		return tx.Model(&config.User{}).Where("id = ?", userID).Updates(map[string]any{
+			"password_hash": string(hash), "session_version": gorm.Expr("session_version + ?", 1),
+			"password_reset_token_hash": "", "password_reset_expires_at": time.Time{}, "password_reset_requested_at": time.Time{},
+			"updated_at": time.Now(),
+		}).Error
+	})
+	var requestError *fiber.Error
+	if errors.As(err, &requestError) {
+		return c.Status(requestError.Code).JSON(fiber.Map{"error": requestError.Message})
 	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if errors.Is(err, authn.ErrInvalid) {
+		return c.Status(401).JSON(fiber.Map{"error": "Session changed. Please sign in again."})
+	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to process new password"})
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to update password"})
 	}
-
-	user.PasswordHash = string(hashedPassword)
-	user.UpdatedAt = time.Now()
-
-	if err := config.DB.Save(&user).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update password"})
-	}
-
-	return c.JSON(fiber.Map{"status": "success", "message": "Password updated successfully"})
+	authn.SetSessionCookie(c, "")
+	return c.JSON(fiber.Map{"status": "success", "reauthentication_required": true,
+		"message": "Password updated. All sessions have been signed out. Sign in with your new password."})
 }
 
 // GetPreferences returns user notification/theme/language preferences

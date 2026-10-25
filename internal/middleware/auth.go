@@ -22,6 +22,7 @@ func Protect() fiber.Handler {
 			return c.Status(401).JSON(fiber.Map{"error": "Invalid or unavailable account session"})
 		}
 		c.Locals("user_id", user.ID)
+		c.Locals("session_version", user.SessionVersion)
 		c.Locals("role", user.Role)
 
 		return c.Next()

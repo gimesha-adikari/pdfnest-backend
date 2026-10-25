@@ -604,24 +604,7 @@ func (ctrl *Controller) Login(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
 
-	isProduction := os.Getenv("APP_ENV") == "production"
-
-	cookie := &fiber.Cookie{
-		Name:     "auth_token",
-		Value:    token,
-		Path:     "/",
-		Expires:  time.Now().Add(24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   isProduction,
-	}
-
-	if isProduction {
-		cookie.SameSite = "None"
-	} else {
-		cookie.SameSite = "Lax"
-	}
-
-	c.Cookie(cookie)
+	authn.SetSessionCookie(c, token)
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
 }
@@ -642,7 +625,7 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 
 	var user config.User
 	err = config.DB.Transaction(func(tx *gorm.DB) error {
-		findErr := tx.Where("google_id = ? OR email = ?", googleID, email).First(&user).Error
+		findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("google_id = ? OR email = ?", googleID, email).First(&user).Error
 		if findErr != nil {
 			if !req.PolicyAccepted {
 				return errPolicyConsentRequired
@@ -696,24 +679,7 @@ func (ctrl *Controller) GoogleSignIn(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed generating token"})
 	}
 
-	isProduction := os.Getenv("APP_ENV") == "production"
-
-	cookie := &fiber.Cookie{
-		Name:     "auth_token",
-		Value:    token,
-		Path:     "/",
-		Expires:  time.Now().Add(24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   isProduction,
-	}
-
-	if isProduction {
-		cookie.SameSite = "None"
-	} else {
-		cookie.SameSite = "Lax"
-	}
-
-	c.Cookie(cookie)
+	authn.SetSessionCookie(c, token)
 
 	return c.JSON(fiber.Map{"success": true, "role": user.Role})
 }
@@ -749,25 +715,8 @@ func revokeSession(c *fiber.Ctx) error {
 }
 
 func (ctrl *Controller) Logout(c *fiber.Ctx) error {
-	isProduction := os.Getenv("APP_ENV") == "production"
 	revokeErr := revokeSession(c)
-
-	cookie := &fiber.Cookie{
-		Name:     "auth_token",
-		Value:    "",
-		Path:     "/",
-		Expires:  time.Now().Add(-24 * time.Hour),
-		HTTPOnly: true,
-		Secure:   isProduction,
-	}
-
-	if isProduction {
-		cookie.SameSite = "None"
-	} else {
-		cookie.SameSite = "Lax"
-	}
-
-	c.Cookie(cookie)
+	authn.SetSessionCookie(c, "")
 	if revokeErr != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"success": false,
