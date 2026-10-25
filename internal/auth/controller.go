@@ -28,12 +28,15 @@ var errPolicyConsentRequired = errors.New("policy consent required")
 var errPasswordResetTokenInvalid = errors.New("invalid or expired password reset token")
 
 const (
-	passwordResetTTL      = 30 * time.Minute
-	passwordResetCooldown = 60 * time.Second
+	emailVerificationTTL      = 30 * time.Minute
+	emailVerificationCooldown = 60 * time.Second
+	passwordResetTTL          = 30 * time.Minute
+	passwordResetCooldown     = 60 * time.Second
 )
 
 type Controller struct {
-	service Service
+	resendAdmission *verificationAdmission
+	service         Service
 }
 
 type GoogleAuthRequest struct {
@@ -85,7 +88,7 @@ func isLocal() bool {
 }
 
 func NewController(s Service) *Controller {
-	return &Controller{service: s}
+	return &Controller{service: s, resendAdmission: newVerificationAdmission()}
 }
 
 func normalizeEmail(email string) string {
@@ -175,7 +178,7 @@ If you didn't create this account, you can safely ignore this email.`,
 		Html:    htmlBody,
 	})
 	if err != nil {
-		log.Printf("[AUTH EMAIL] send failed for %s: %v", toEmail, err)
+		log.Print("[AUTH EMAIL] send failed")
 		return err
 	}
 
@@ -313,7 +316,7 @@ func (ctrl *Controller) Register(c *fiber.Ctx) error {
 		Status:               "pending",
 		EmailVerified:        false,
 		EmailVerifyTokenHash: tokenHash,
-		EmailVerifyExpiresAt: time.Now().Add(30 * time.Minute),
+		EmailVerifyExpiresAt: time.Now().Add(emailVerificationTTL),
 	}
 
 	if err := config.DB.Create(&user).Error; err != nil {
@@ -321,7 +324,7 @@ func (ctrl *Controller) Register(c *fiber.Ctx) error {
 	}
 
 	if err := sendVerificationEmail(user.Email, rawToken); err != nil {
-		log.Printf("failed to send verification email to %s: %v", user.Email, err)
+		log.Print("[AUTH EMAIL] initial verification delivery failed")
 		return c.Status(201).JSON(fiber.Map{
 			"message":                 "Account created, but the verification email could not be sent. Use resend verification.",
 			"verification_email_sent": false,
@@ -420,35 +423,48 @@ func (ctrl *Controller) ResendVerification(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Authentication is temporarily unavailable"})
 	}
 
+	if !ctrl.resendAdmission.allow(c.Context().RemoteIP().String(), time.Now()) {
+		return verificationResendResponse(c)
+	}
 	var user config.User
-	if err := config.DB.Where("email = ?", req.Email).First(&user).Error; err != nil {
+	var rawToken string
+	err := config.DB.WithContext(c.UserContext()).Transaction(func(tx *gorm.DB) error {
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("email = ?", req.Email).First(&user).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
+			return nil
 		}
+		if err != nil {
+			return err
+		}
+		if user.EmailVerified {
+			return nil
+		}
+		now := time.Now() // Evaluate after any row-lock wait.
+		// All registration/resend links have the same fixed TTL. The expiry
+		// therefore durably identifies issuance without adding a schema field.
+		if user.EmailVerifyTokenHash != "" && !user.EmailVerifyExpiresAt.IsZero() &&
+			now.Before(user.EmailVerifyExpiresAt.Add(-emailVerificationTTL).Add(emailVerificationCooldown)) {
+			return nil
+		}
+		var hash string
+		rawToken, hash, err = generateVerificationToken()
+		if err != nil {
+			return err
+		}
+		return tx.Model(&config.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+			"email_verify_token_hash": hash, "email_verify_expires_at": now.Add(emailVerificationTTL), "updated_at": now,
+		}).Error
+	})
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"error": "Failed checking user"})
 	}
-
-	if user.EmailVerified {
-		return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
+	// No external delivery before commit. Uncertain/failed commits never send.
+	if rawToken != "" {
+		if err := sendVerificationEmail(user.Email, rawToken); err != nil {
+			log.Print("[AUTH EMAIL] verification resend delivery failed")
+		}
 	}
-
-	rawToken, tokenHash, err := generateVerificationToken()
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed generating verification token"})
-	}
-
-	user.EmailVerifyTokenHash = tokenHash
-	user.EmailVerifyExpiresAt = time.Now().Add(30 * time.Minute)
-
-	if err := config.DB.Save(&user).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed updating verification token"})
-	}
-
-	if err := sendVerificationEmail(user.Email, rawToken); err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed sending verification email"})
-	}
-
-	return c.JSON(fiber.Map{"success": true, "message": "Verification email sent"})
+	return verificationResendResponse(c)
 }
 
 // RequestPasswordReset always returns the same public response for valid

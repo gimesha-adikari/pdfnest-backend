@@ -231,6 +231,9 @@ func TestEmailVerify_G_ResendCreatesIntendedToken(t *testing.T) {
 func TestEmailVerify_H_OldTokenAfterResendRejected(t *testing.T) {
 	app, _, user, oldToken := setupEmailVerificationMatrixTest(t)
 
+	// This fixture is eligible for resend, beyond the durable initial cooldown.
+	require.NoError(t, config.DB.Model(&config.User{}).Where("id = ?", user.ID).Update("email_verify_expires_at", time.Now().Add(emailVerificationTTL-emailVerificationCooldown-time.Second)).Error)
+
 	// Resend verification
 	resendReq := jsonRequest(http.MethodPost, "/resend-verification", `{"email":"`+user.Email+`"}`)
 	resendResp, err := app.Test(resendReq)
