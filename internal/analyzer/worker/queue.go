@@ -131,7 +131,7 @@ func (q *RedisJobQueue) Nack(ctx context.Context, receiptHandle string, retryabl
 
 func (q *RedisJobQueue) PublishProgress(ctx context.Context, taskID string, progress TaskProgress) error {
 	key := fmt.Sprintf("pdfnest:task:%s", taskID)
-	data, err := json.Marshal(progress)
+	data, err := json.Marshal(PublicTaskProgress(progress))
 	if err != nil {
 		return fmt.Errorf("marshal task progress: %w", err)
 	}
@@ -296,7 +296,7 @@ func (q *MemoryJobQueue) Nack(ctx context.Context, receiptHandle string, retryab
 func (q *MemoryJobQueue) PublishProgress(ctx context.Context, taskID string, progress TaskProgress) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.progress[taskID] = progress
+	q.progress[taskID] = PublicTaskProgress(progress)
 	return nil
 }
 

@@ -123,3 +123,28 @@ func runFixtureGit(t *testing.T, args ...string) string {
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
+
+func TestGitDiagnosticErrorIdentities(t *testing.T) {
+	for _, tc := range []struct {
+		name, stderr string
+		cause        error
+	}{
+		{"quota-like", "fatal: EDQUOT ENOSPC disk full /private/scratch", ErrGitAcquisitionFailed},
+		{"generic", "fatal: /private/scratch https://fake:password@example.invalid/repo?token=fake\nremote: arbitrary\033[31m", ErrGitAcquisitionFailed},
+		{"auth", "authentication failed /private/scratch", ErrGitAuthRequired},
+		{"dns", "could not resolve host /private/scratch", ErrGitUnreachable},
+		{"tls", "SSL certificate problem /private/scratch", ErrGitAcquisitionFailed},
+		{"missing", "repository not found /private/scratch", ErrGitInvalidRepository},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sandbox, err := NewSandbox(t.TempDir(), "diagnostic")
+			require.NoError(t, err)
+			shim := filepath.Join(t.TempDir(), "git")
+			require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\nprintf '%s\\n' "+shellQuote(tc.stderr)+" >&2\nexit 128\n"), 0700))
+			_, err = cloneGitRepository(context.Background(), "https://8.8.8.8/fixture.git", sandbox, AcquisitionLimits{GitTimeout: time.Second}, shim)
+			require.ErrorIs(t, err, tc.cause)
+			require.NotErrorIs(t, err, ErrGitResourceLimit, "arbitrary output does not prove a resource quota violation")
+			require.True(t, sandbox.IsClosed())
+		})
+	}
+}

@@ -35,7 +35,7 @@ func ValidateJob(job *AnalyzerJob) error {
 			return fmt.Errorf("%w: gitUrl required for source type git", ErrInvalidJob)
 		}
 		if err := acquisition.ValidateGitURL(job.GitURL); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidJob, err)
+			return fmt.Errorf("%w: %w", ErrInvalidJob, err)
 		}
 	case engine.SourceTypeZip:
 		if job.StagedArchivePath == "" {
@@ -90,7 +90,7 @@ func ExecutePipeline(
 	case engine.SourceTypeGit:
 		res, cloneErr := acquisition.CloneGitRepository(ctx, job.GitURL, sandbox, acqLimits)
 		if cloneErr != nil {
-			return nil, fmt.Errorf("git acquisition failed: %w", cloneErr)
+			return nil, fmt.Errorf("%w: %w", acquisition.ErrGitAcquisitionFailed, cloneErr)
 		}
 		acqResult = res
 

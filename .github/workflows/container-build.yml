@@ -63,6 +63,9 @@ jobs:
       - name: Verify account security with isolated native PostgreSQL
         run: scripts/test-account-security.sh
 
+      - name: Verify Analyzer public failure boundaries
+        run: scripts/test-analyzer-public-errors.sh
+
       - name: Verify repository acquisition security
         run: go test -race ./internal/analyzer/engine/acquisition ./internal/analyzer/engine/exclusion ./internal/netguard -count=1 -timeout=90s
 
