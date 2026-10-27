@@ -33,14 +33,15 @@ import (
 )
 
 var (
-	ErrPageNotFound      = errors.New("studio: page descriptor not found in virtual document model")
-	ErrInvalidTileCoords = errors.New("studio: invalid tile coordinates or dimensions")
-	ErrInvalidTileScale  = errors.New("studio: invalid tile scale factor")
-	ErrTileTooLarge      = errors.New("studio: tile dimension exceeds maximum allowed size (4096px)")
-	ErrVersionMismatch   = errors.New("studio: version does not belong to session document")
-	ErrRenderFailed      = errors.New("studio: real pdf page rendering failed")
-	ErrWorkerBusy        = errors.New("studio: render worker capacity saturated")
-	ErrRenderTimeout     = errors.New("studio: render processing timed out")
+	ErrPageNotFound          = errors.New("studio: page descriptor not found in virtual document model")
+	ErrInvalidTileCoords     = errors.New("studio: invalid tile coordinates or dimensions")
+	ErrInvalidTileScale      = errors.New("studio: invalid tile scale factor")
+	ErrTileTooLarge          = errors.New("studio: tile dimension exceeds maximum allowed size (4096px)")
+	ErrVersionMismatch       = errors.New("studio: version does not belong to session document")
+	ErrRenderFailed          = errors.New("studio: real pdf page rendering failed")
+	ErrWorkerBusy            = errors.New("studio: render worker capacity saturated")
+	ErrRenderTimeout         = errors.New("studio: render processing timed out")
+	ErrPreviewSourceTooLarge = errors.New("studio: source exceeds preview request body limit")
 )
 
 const (
@@ -495,7 +496,7 @@ func (r *studioTileRenderer) rasterizePageTileReal(
 		var workerErr error
 		img, workerErr = r.workerFunc(ctx, pdfPath, page.SourcePageNumber, dpi)
 		if workerErr != nil || img == nil {
-			if errors.Is(workerErr, ErrWorkerBusy) || errors.Is(workerErr, ErrRenderTimeout) {
+			if errors.Is(workerErr, ErrWorkerBusy) || errors.Is(workerErr, ErrRenderTimeout) || errors.Is(workerErr, ErrPreviewSourceTooLarge) {
 				return nil, workerErr
 			}
 			return nil, fmt.Errorf("%w: worker page rasterization failed for page %d: %v", ErrRenderFailed, page.SourcePageNumber, workerErr)
@@ -594,25 +595,41 @@ func (r *studioTileRenderer) defaultRenderWithWorker(
 	}
 	defer file.Close()
 
-	pr, pw := io.Pipe()
-	defer pr.Close() // Unblock the producer on construction/signing/transport failure.
-	writer := multipart.NewWriter(pw)
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat local pdf: %w", err)
+	}
+	// Serialize the identical framing with an empty file to measure overhead.
+	// The source size alone is insufficient: boundaries, headers and fields
+	// also consume the authenticated raw-body envelope.
+	var framing bytes.Buffer
+	probe := multipart.NewWriter(&framing)
+	filename := filepath.Base(pdfPath)
+	if err := writePreviewMultipart(probe, bytes.NewReader(nil), filename, pageNumber, dpi); err != nil {
+		return nil, fmt.Errorf("failed to measure preview multipart: %w", err)
+	}
+	if info.Size() > worker.MaxRequestBodyBytes-int64(framing.Len()) {
+		return nil, ErrPreviewSourceTooLarge
+	}
 
-	go func() {
-		defer file.Close()
-		part, err := writer.CreateFormFile("file", filepath.Base(pdfPath))
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		if _, err := io.Copy(part, file); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = writer.WriteField("page", strconv.Itoa(pageNumber))
-		_ = writer.WriteField("dpi", fmt.Sprintf("%.2f", dpi))
-		_ = writer.Close()
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	if err := writer.SetBoundary(probe.Boundary()); err != nil {
+		_ = pr.Close()
 		_ = pw.Close()
+		return nil, err
+	}
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		err := writePreviewMultipart(writer, file, filename, pageNumber, dpi)
+		_ = pw.CloseWithError(err)
+	}()
+	defer func() {
+		// Closing the reader unblocks writes even when signing or transport
+		// never consumed the body. Join before closing the source file.
+		_ = pr.Close()
+		<-producerDone
 	}()
 
 	workerURL := fmt.Sprintf("%s/api/v1/render/page", worker.GetWorkerURL())
@@ -624,6 +641,11 @@ func (r *studioTileRenderer) defaultRenderWithWorker(
 
 	resp, err := worker.Client.Do(req)
 	if err != nil {
+		// The file could grow after Stat, or signing could reject the final
+		// serialized stream. Keep the signer's authoritative limit intact.
+		if errors.Is(err, worker.ErrRequestBodyTooLarge) {
+			return nil, fmt.Errorf("%w: %w", ErrPreviewSourceTooLarge, err)
+		}
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			atomic.AddUint64(&r.cache.metrics.WorkerTimeouts, 1)
 			return nil, fmt.Errorf("%w: worker request timeout: %v", ErrRenderTimeout, err)
@@ -631,6 +653,10 @@ func (r *studioTileRenderer) defaultRenderWithWorker(
 		return nil, fmt.Errorf("worker network error: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusRequestEntityTooLarge {
+		return nil, ErrPreviewSourceTooLarge
+	}
 
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
@@ -655,4 +681,22 @@ func (r *studioTileRenderer) defaultRenderWithWorker(
 	}
 
 	return img, nil
+}
+
+// Keep the measured framing and transmitted multipart representation identical.
+func writePreviewMultipart(writer *multipart.Writer, source io.Reader, filename string, pageNumber int, dpi float64) error {
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(part, source); err != nil {
+		return err
+	}
+	if err := writer.WriteField("page", strconv.Itoa(pageNumber)); err != nil {
+		return err
+	}
+	if err := writer.WriteField("dpi", fmt.Sprintf("%.2f", dpi)); err != nil {
+		return err
+	}
+	return writer.Close()
 }

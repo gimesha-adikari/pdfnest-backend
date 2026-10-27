@@ -689,6 +689,11 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusGone).JSON(fiber.Map{"error": err.Error()})
 	case errors.Is(err, ErrInvalidBaseVersion), errors.Is(err, ErrConflict), errors.Is(err, ErrIdempotencyConflict):
 		return c.Status(http.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrPreviewSourceTooLarge):
+		return c.Status(http.StatusRequestEntityTooLarge).JSON(fiber.Map{
+			"error": "This PDF is too large for the current preview processing limit.",
+			"code":  "PREVIEW_SOURCE_TOO_LARGE",
+		})
 	case errors.Is(err, ErrWorkerBusy):
 		c.Set("Retry-After", "2")
 		return c.Status(http.StatusTooManyRequests).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_WORKER_BUSY"})
