@@ -41,6 +41,13 @@ jobs:
           STORAGE_MODE: local
         run: go test -race ./internal/studio -run '^TestStudioPreviewBodyLimit' -count=1 -timeout=90s
 
+      - name: Verify Studio PDF source admission
+        env:
+          APP_ENV: test
+          STORAGE_MODE: local
+          GOMAXPROCS: '2'
+        run: go test -race ./internal/storage ./internal/studio -run '^(TestStudioSourceAdmission|TestStudioPDF|TestStudioPresign)' -count=1 -timeout=180s
+
       - name: Verify Worker body signing and transport safety
         run: go test -race ./internal/worker ./internal/ocr ./internal/ocrv2 ./internal/analyzer/engine/ast -count=1 -timeout=120s
 

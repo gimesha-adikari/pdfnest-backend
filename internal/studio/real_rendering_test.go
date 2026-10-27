@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -185,7 +186,7 @@ func TestRealRendering_EndToEndWorkerRenderer(t *testing.T) {
 	t.Setenv("PDFNEST_WORKER_URL", workerServer.URL)
 
 	// 2. Setup production Studio Backend app
-	app, _, _, _, _ := setupTestApp(t)
+	app, _, svc, _, _ := setupTestApp(t)
 	guestID := "guest_e2e_test_" + uuid.New().String()
 
 	// 3. Create deterministic 2-page PDF and save to storage
@@ -225,33 +226,21 @@ func TestRealRendering_EndToEndWorkerRenderer(t *testing.T) {
 		},
 	}
 
-	createBody, _ := json.Marshal(CreateSessionRequest{
+	// Seed trusted rendering geometry internally. Public source adoption derives
+	// fresh page IDs from a validated PDF and is tested separately.
+	fixture := CreateSessionRequest{
 		FileName:         "e2e_render.pdf",
 		FileSize:         int64(len(pdfBytes)),
 		InitialPageCount: 2,
 		SourceAssetID:    assetID,
 		SourceR2Key:      pdfKey,
 		InitialVDM:       initialVDM,
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, err := app.Test(req, 5000)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture.InitialVDM.DocumentID = uuid.NewString()
+	_, sess, ver, err := svc.CreateDocument(context.Background(), identity.Identity{ID: guestID, Type: identity.TypeGuest}, fixture.FileName, fixture.FileSize, fixture.InitialPageCount, fixture.SourceAssetID, fixture.SourceR2Key, fixture.InitialVDM)
+	require.NoError(t, err)
+	sessionID := sess.ID.String()
+	v0ID := ver.ID.String()
 
 	// 4. Fetch Page 1 Tile through the full production pipeline
 	urlP1 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p1ID)
@@ -359,7 +348,7 @@ func TestRealRendering_EndToEndWorkerRenderer_SubTilesAndIntegratedRotation(t *t
 	defer workerServer.Close()
 	t.Setenv("PDFNEST_WORKER_URL", workerServer.URL)
 
-	app, _, _, _, _ := setupTestApp(t)
+	app, _, svc, _, _ := setupTestApp(t)
 	guestID := "guest_subtile_rot_" + uuid.New().String()
 
 	pdfBytes := createDeterministicTestPDF(t)
@@ -416,33 +405,21 @@ func TestRealRendering_EndToEndWorkerRenderer_SubTilesAndIntegratedRotation(t *t
 		},
 	}
 
-	createBody, _ := json.Marshal(CreateSessionRequest{
+	// Seed trusted rendering geometry internally. Public source adoption derives
+	// fresh page IDs from a validated PDF and is tested separately.
+	fixture := CreateSessionRequest{
 		FileName:         "subtile_rotation.pdf",
 		FileSize:         int64(len(pdfBytes)),
 		InitialPageCount: 4,
 		SourceAssetID:    assetID,
 		SourceR2Key:      pdfKey,
 		InitialVDM:       initialVDM,
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, err := app.Test(req, 5000)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture.InitialVDM.DocumentID = uuid.NewString()
+	_, sess, ver, err := svc.CreateDocument(context.Background(), identity.Identity{ID: guestID, Type: identity.TypeGuest}, fixture.FileName, fixture.FileSize, fixture.InitialPageCount, fixture.SourceAssetID, fixture.SourceR2Key, fixture.InitialVDM)
+	require.NoError(t, err)
+	sessionID := sess.ID.String()
+	v0ID := ver.ID.String()
 
 	// 1. Non-full-page sub-tile request on 0° page covering the Blue Box: (tile_x=50, tile_y=100, tile_w=150, tile_h=100)
 	urlSub1 := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=50&tile_y=100&tile_w=150&tile_h=100", sessionID, v0ID, p0DegID)
@@ -581,7 +558,7 @@ func TestRealRendering_GeometricRotations(t *testing.T) {
 }
 
 func TestRealRendering_NoSilentSyntheticFallbackOnWorkerFailure(t *testing.T) {
-	app, _, _, _, _ := setupTestApp(t)
+	app, _, svc, _, _ := setupTestApp(t)
 	guestID := "guest_fail_test_" + uuid.New().String()
 
 	// 1. Create a session pointing to a nonexistent / failing worker asset
@@ -589,7 +566,9 @@ func TestRealRendering_NoSilentSyntheticFallbackOnWorkerFailure(t *testing.T) {
 	p1ID := uuid.New().String()
 	pBlankID := uuid.New().String()
 
-	createBody, _ := json.Marshal(CreateSessionRequest{
+	// Seed trusted rendering geometry internally. Public source adoption derives
+	// fresh page IDs from a validated PDF and is tested separately.
+	fixture := CreateSessionRequest{
 		FileName:         "fail_test.pdf",
 		FileSize:         1000,
 		InitialPageCount: 2,
@@ -616,26 +595,12 @@ func TestRealRendering_NoSilentSyntheticFallbackOnWorkerFailure(t *testing.T) {
 				},
 			},
 		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, err := app.Test(req, 5000)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture.InitialVDM.DocumentID = uuid.NewString()
+	_, sess, ver, err := svc.CreateDocument(context.Background(), identity.Identity{ID: guestID, Type: identity.TypeGuest}, fixture.FileName, fixture.FileSize, fixture.InitialPageCount, fixture.SourceAssetID, fixture.SourceR2Key, fixture.InitialVDM)
+	require.NoError(t, err)
+	sessionID := sess.ID.String()
+	v0ID := ver.ID.String()
 
 	// 2. Request Page 1 (Real Asset with missing PDF) -> MUST NOT return 200 with fake synthetic grid!
 	urlFail := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p1ID)
@@ -673,7 +638,7 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 	}
 
 	// Create Studio repo and mock session with the exact renderer passed to controller
-	app, _, _, renderer, _ := setupTestApp(t)
+	app, _, svc, renderer, _ := setupTestApp(t)
 	renderer.SetWorkerRenderer(slowWorkerRenderer)
 	guestID := "guest_sf_strict_" + uuid.New().String()
 
@@ -689,7 +654,9 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 	assetID := "ast_" + uuid.New().String()
 	p1ID := uuid.New().String()
 
-	createBody, _ := json.Marshal(CreateSessionRequest{
+	// Seed trusted rendering geometry internally. Public source adoption derives
+	// fresh page IDs from a validated PDF and is tested separately.
+	fixture := CreateSessionRequest{
 		FileName:         "sf_strict.pdf",
 		FileSize:         500,
 		InitialPageCount: 1,
@@ -708,26 +675,12 @@ func TestRealRendering_SingleflightStrictProof(t *testing.T) {
 				},
 			},
 		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, err := app.Test(req, 5000)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture.InitialVDM.DocumentID = uuid.NewString()
+	_, sess, ver, err := svc.CreateDocument(context.Background(), identity.Identity{ID: guestID, Type: identity.TypeGuest}, fixture.FileName, fixture.FileSize, fixture.InitialPageCount, fixture.SourceAssetID, fixture.SourceR2Key, fixture.InitialVDM)
+	require.NoError(t, err)
+	sessionID := sess.ID.String()
+	v0ID := ver.ID.String()
 
 	// Synchronization barrier to ensure all 15 requests fire simultaneously on a cold tile
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=0&tile_y=0&tile_w=100&tile_h=100", sessionID, v0ID, p1ID)

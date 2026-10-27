@@ -23,11 +23,11 @@ import (
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
+	"pdfnest-backend/internal/studiosource"
 	"pdfnest-backend/internal/uploads"
 )
 
 const (
-	studioUploadMaxBytesDefault      = int64(200 * 1024 * 1024)
 	studioUploadPageLimit            = 1000
 	studioWatermarkImageMaxBytes     = int64(20 * 1024 * 1024)
 	studioWatermarkImageMaxDimension = 10000
@@ -49,6 +49,9 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 	ident identity.Identity,
 	input SourceUploadInput,
 ) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error) {
+	if ctx.Err() != nil {
+		return nil, nil, nil, ErrSourceStorageUnavailable
+	}
 	fileSize, pageCount, err := validateStudioPDFUpload(input.Path)
 	if err != nil {
 		return nil, nil, nil, err
@@ -61,7 +64,11 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 	assetID := "studio-source-" + uuid.NewString()
 	key := storage.BuildKey("studio/sources", ".pdf")
 	if err := persistStudioSource(ctx, input.Path, key, input.ContentType); err != nil {
-		return nil, nil, nil, fmt.Errorf("persist Studio source: %w", err)
+		cleanupStudioSource(context.Background(), key)
+		if errors.Is(err, storage.ErrStudioPDFTooLarge) {
+			return nil, nil, nil, ErrSourceTooLarge
+		}
+		return nil, nil, nil, ErrSourceStorageUnavailable
 	}
 
 	initialVDM := vdm.DocumentModel{
@@ -85,10 +92,14 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 	if fileName == "." || fileName == "" {
 		fileName = "document.pdf"
 	}
+	if ctx.Err() != nil {
+		cleanupStudioSource(context.Background(), key)
+		return nil, nil, nil, ErrSourceStorageUnavailable
+	}
 	doc, sess, ver, err := s.CreateDocument(ctx, ident, fileName, fileSize, pageCount, assetID, key, initialVDM)
 	if err != nil {
-		cleanupStudioSource(ctx, key)
-		return nil, nil, nil, err
+		cleanupStudioSource(context.Background(), key)
+		return nil, nil, nil, ErrSourceRegistrationFailed
 	}
 	return doc, sess, ver, nil
 }
@@ -219,7 +230,7 @@ func pdfHasEncryptionMarker(path string) (bool, error) {
 }
 
 func studioUploadMaxBytes() int64 {
-	return int64(uploads.GetEnvInt("MAX_STUDIO_UPLOAD_BYTES", int(studioUploadMaxBytesDefault)))
+	return studiosource.MaxPDFBytes
 }
 
 func validateStudioWatermarkImage(path string) (int64, string, error) {
@@ -272,7 +283,7 @@ func containsEncryptedPDFError(message string) bool {
 }
 
 func persistStudioSource(ctx context.Context, sourcePath, key, contentType string) error {
-	return storage.SaveObjectFile(ctx, key, sourcePath, contentType)
+	return storage.SaveStudioPDF(ctx, key, sourcePath)
 }
 
 func cleanupStudioSource(ctx context.Context, key string) {
