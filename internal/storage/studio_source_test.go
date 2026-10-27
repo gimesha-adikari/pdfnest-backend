@@ -1,12 +1,14 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -314,4 +316,48 @@ func TestStudioPDFRepeatedLocalDescriptorCleanup(t *testing.T) {
 	require.LessOrEqual(t, len(after), len(before), "file descriptors must not accumulate")
 	require.Empty(t, studioSpools(t))
 	require.Zero(t, len(studioPDFSlots))
+}
+
+func TestStudioPDFRemotePublicationPreservesEncryption(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		t.Run(fmt.Sprint(encrypted), func(t *testing.T) {
+			t.Setenv("FILE_ENCRYPTION_KEY", "")
+			if encrypted {
+				t.Setenv("FILE_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+			}
+			received := make(chan []byte, 1)
+			studioRemoteStore(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "PUT" || r.URL.Path != "/fixture/studio/sources/synthetic.pdf" {
+					w.WriteHeader(400)
+					return
+				}
+				body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				// The fixture emulates S3 decoding of AWS signed transfer chunks.
+				if r.Header.Get("Content-Encoding") == "aws-chunked" || strings.HasPrefix(r.Header.Get("X-Amz-Content-Sha256"), "STREAMING-") {
+					body, err = io.ReadAll(httputil.NewChunkedReader(bytes.NewReader(body)))
+					if err != nil {
+						w.WriteHeader(400)
+						return
+					}
+				}
+				received <- body
+				w.Header().Set("ETag", `"synthetic"`)
+			})
+			original := []byte("%PDF-1.7 synthetic publication")
+			path := filepath.Join(t.TempDir(), "source.pdf")
+			require.NoError(t, os.WriteFile(path, original, 0600))
+			require.NoError(t, SaveStudioPDF(context.Background(), "studio/sources/synthetic.pdf", path))
+			body := <-received
+			if encrypted {
+				require.NotEqual(t, original, body)
+			}
+			plain, err := decryptData(body)
+			require.NoError(t, err)
+			require.Equal(t, original, plain)
+		})
+	}
 }

@@ -63,7 +63,7 @@ func (s *studioService) CreateDocumentFromSourceUpload(
 
 	assetID := "studio-source-" + uuid.NewString()
 	key := storage.BuildKey("studio/sources", ".pdf")
-	if err := persistStudioSource(ctx, input.Path, key, input.ContentType); err != nil {
+	if err := storage.SaveStudioPDF(ctx, key, input.Path); err != nil {
 		cleanupStudioSource(context.Background(), key)
 		if errors.Is(err, storage.ErrStudioPDFTooLarge) {
 			return nil, nil, nil, ErrSourceTooLarge
@@ -283,7 +283,7 @@ func containsEncryptedPDFError(message string) bool {
 }
 
 func persistStudioSource(ctx context.Context, sourcePath, key, contentType string) error {
-	return storage.SaveStudioPDF(ctx, key, sourcePath)
+	return storage.SaveObjectFile(ctx, key, sourcePath, contentType)
 }
 
 func cleanupStudioSource(ctx context.Context, key string) {

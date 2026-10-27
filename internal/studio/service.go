@@ -339,7 +339,7 @@ func (s *studioService) CreateSecondaryAsset(
 
 	assetID := "studio-merge-source-" + uuid.NewString()
 	key := storage.BuildKey("studio/merge-sources", ".pdf")
-	if err := persistStudioSource(ctx, input.Path, key, "application/pdf"); err != nil {
+	if err := storage.SaveStudioPDF(ctx, key, input.Path); err != nil {
 		cleanupStudioSource(context.Background(), key)
 		if errors.Is(err, storage.ErrStudioPDFTooLarge) {
 			return nil, ErrSourceTooLarge

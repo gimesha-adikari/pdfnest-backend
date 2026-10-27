@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"image"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -332,13 +334,16 @@ func TestStudioSourceAdmissionActualBoundary(t *testing.T) {
 		})
 	}
 }
-func sourceAdmissionMultipart(t *testing.T, app *fiber.App, url, path string) (int, map[string]any) {
+func sourceAdmissionMultipart(t *testing.T, app *fiber.App, url, path string, assetKind ...string) (int, map[string]any) {
 	t.Helper()
 	file, err := os.Open(path)
 	require.NoError(t, err)
 	defer file.Close()
 	var framing bytes.Buffer
 	writer := multipart.NewWriter(&framing)
+	if len(assetKind) > 0 {
+		require.NoError(t, writer.WriteField("asset_kind", assetKind[0]))
+	}
 	_, err = writer.CreateFormFile("file", "source.pdf")
 	require.NoError(t, err)
 	header := append([]byte(nil), framing.Bytes()...)
@@ -440,4 +445,26 @@ func TestController_StoredSourceAdmission_ActualDatabase(t *testing.T) {
 	require.Equal(t, 404, status, payload)
 	require.NoError(t, db.Model(&models.StudioDocument{}).Count(&after).Error)
 	require.Equal(t, before, after)
+}
+
+func TestStudioSourceAdmissionImageAssetsUnchanged(t *testing.T) {
+	app, repo := sourceAdmissionApp(t)
+	pdf := filepath.Join(t.TempDir(), "source.pdf")
+	require.NoError(t, os.WriteFile(pdf, createDeterministicTestPDF(t), 0600))
+	status, payload := sourceAdmissionMultipart(t, app, "/api/studio/v1/sessions/from-upload", pdf)
+	require.Equal(t, 201, status, payload)
+	path := filepath.Join(t.TempDir(), "image.png")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, png.Encode(file, image.NewRGBA(image.Rect(0, 0, 2, 2))))
+	require.NoError(t, file.Close())
+	for _, kind := range []string{"watermark_image", "signature_image"} {
+		status, payload = sourceAdmissionMultipart(t, app, "/api/studio/v1/sessions/"+repo.session.ID.String()+"/assets", path, kind)
+		require.Equal(t, 201, status, payload)
+		require.Equal(t, kind, repo.asset.AssetType)
+		require.Equal(t, "image/png", repo.asset.MimeType)
+		require.FileExists(t, filepath.Join(storage.GetLocalStorageDir(), repo.asset.R2Key))
+	}
+	require.Equal(t, int64(20<<20), studioWatermarkImageMaxBytes)
+	sourceAdmissionNoTemps(t)
 }
