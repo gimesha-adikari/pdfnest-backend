@@ -270,16 +270,24 @@ func (ctrl *Controller) CreateSession(c *fiber.Ctx) error {
 		}
 	}
 
-	doc, sess, ver, err := ctrl.service.CreateDocument(
-		c.Context(),
-		ident,
-		req.FileName,
-		req.FileSize,
-		req.InitialPageCount,
-		req.SourceAssetID,
-		req.SourceR2Key,
-		req.InitialVDM,
-	)
+	var err error
+	var doc *models.StudioDocument
+	var sess *models.StudioSession
+	var ver *models.StudioVersion
+	if req.SourceR2Key != "" {
+		// Never register browser-supplied size, page geometry, IDs or metadata.
+		// The service snapshots and validates the owned object before registration.
+		doc, sess, ver, err = ctrl.service.CreateDocumentFromStoredSource(c.UserContext(), ident, req.SourceR2Key, req.FileName)
+	} else {
+		if req.InitialVDM.Validate() != nil {
+			return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": "Invalid initial document model.", "code": "STUDIO_DOCUMENT_INVALID"})
+		}
+		doc, sess, ver, err = ctrl.service.CreateDocument(c.UserContext(), ident, req.FileName, 0, req.InitialPageCount, "", "", req.InitialVDM)
+		if err != nil {
+			err = ErrSourceRegistrationFailed
+		}
+	}
+
 	if err != nil {
 		return ctrl.mapError(c, err)
 	}
@@ -701,10 +709,20 @@ func (ctrl *Controller) mapError(c *fiber.Ctx, err error) error {
 		return c.Status(http.StatusGatewayTimeout).JSON(fiber.Map{"error": err.Error(), "code": "RENDER_TIMEOUT"})
 	case errors.Is(err, ErrNoParentVersion), errors.Is(err, ErrNoRedoChild), errors.Is(err, ErrInvalidBranchTarget), errors.Is(err, ErrInvalidOperation), errors.Is(err, ErrUnknownCommand), errors.Is(err, ErrInvalidCommand), errors.Is(err, ErrCommandPageNotFound), errors.Is(err, ErrDuplicatePageID), errors.Is(err, ErrInvalidPageOrder), errors.Is(err, ErrCannotDeleteAll), errors.Is(err, ErrBlankDimensions), errors.Is(err, ErrInvalidCropBox), errors.Is(err, ErrInvalidMetadata), errors.Is(err, ErrInvalidOverlay), errors.Is(err, ErrInvalidTileCoords), errors.Is(err, ErrInvalidTileScale), errors.Is(err, ErrTileTooLarge), errors.Is(err, ErrVersionMismatch), errors.Is(err, ErrInvalidMaterialization), errors.Is(err, ErrMaterializationProcessorUnavailable), errors.Is(err, ErrInvalidJob):
 		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-	case errors.Is(err, ErrInvalidSourcePDF), errors.Is(err, ErrEncryptedSourcePDF), errors.Is(err, ErrSourcePageLimit):
-		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	case errors.Is(err, ErrSourceMissing):
+		return c.Status(http.StatusNotFound).JSON(fiber.Map{"error": ErrSourceMissing.Error(), "code": "STUDIO_SOURCE_NOT_FOUND"})
+	case errors.Is(err, ErrSourceStorageUnavailable), errors.Is(err, ErrSourceRegistrationFailed):
+		return c.Status(http.StatusServiceUnavailable).JSON(fiber.Map{"error": "Studio source admission is temporarily unavailable.", "code": "STUDIO_SOURCE_UNAVAILABLE"})
+	case errors.Is(err, ErrSourceChanged):
+		return c.Status(http.StatusConflict).JSON(fiber.Map{"error": ErrSourceChanged.Error(), "code": "STUDIO_SOURCE_CHANGED"})
+	case errors.Is(err, ErrInvalidSourcePDF):
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": ErrInvalidSourcePDF.Error(), "code": "STUDIO_SOURCE_INVALID"})
+	case errors.Is(err, ErrEncryptedSourcePDF):
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": ErrEncryptedSourcePDF.Error(), "code": "STUDIO_SOURCE_ENCRYPTED"})
+	case errors.Is(err, ErrSourcePageLimit):
+		return c.Status(http.StatusBadRequest).JSON(fiber.Map{"error": ErrSourcePageLimit.Error(), "code": "STUDIO_SOURCE_PAGE_LIMIT"})
 	case errors.Is(err, ErrSourceTooLarge):
-		return c.Status(http.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": err.Error()})
+		return c.Status(http.StatusRequestEntityTooLarge).JSON(fiber.Map{"error": ErrSourceTooLarge.Error(), "code": "STUDIO_SOURCE_TOO_LARGE"})
 	default:
 		return c.Status(http.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}

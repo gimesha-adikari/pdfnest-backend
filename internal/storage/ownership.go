@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"pdfnest-backend/internal/studiosource"
 )
 
 // OwnedPrefix identifies a server-issued upload namespace. The owner comes from
@@ -44,7 +46,11 @@ func prepareOwnedUploads(req PresignRequest, owner string) (PresignRequest, erro
 	req.Files = append([]PresignFile(nil), req.Files...)
 	for i := range req.Files {
 		file := &req.Files[i]
-		if file.Size <= 0 || file.Size > 250*1024*1024 {
+		limit := int64(250 * 1024 * 1024)
+		if req.Purpose == "studio_source" {
+			limit = studiosource.MaxPDFBytes
+		}
+		if file.Size <= 0 || file.Size > limit {
 			return req, fmt.Errorf("invalid upload size")
 		}
 		// A fresh destination prevents a caller from overwriting any existing object,

@@ -301,7 +301,8 @@ func TestController_CreateSecondaryAsset_IsOwnedWithoutCreatingVersion(t *testin
 	oversizedReq.Header.Set("X-Test-Guest-ID", guestID)
 	oversizedResp, err := app.Test(oversizedReq, 10_000)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, oversizedResp.StatusCode)
+	// Legacy environment overrides cannot change the authoritative 50 MiB cap.
+	assert.Equal(t, http.StatusCreated, oversizedResp.StatusCode)
 	oversizedResp.Body.Close()
 	t.Setenv("MAX_STUDIO_UPLOAD_BYTES", "")
 

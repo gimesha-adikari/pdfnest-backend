@@ -40,6 +40,7 @@ type ApplyOperationResult struct {
 // Service defines domain orchestration methods for Studio V2.
 type Service interface {
 	CreateDocument(ctx context.Context, ident identity.Identity, fileName string, fileSize int64, initialPageCount int, sourceAssetID string, sourceR2Key string, initialVDM vdm.DocumentModel) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
+	CreateDocumentFromStoredSource(ctx context.Context, ident identity.Identity, key, name string) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
 	CreateDocumentFromSourceUpload(ctx context.Context, ident identity.Identity, input SourceUploadInput) (*models.StudioDocument, *models.StudioSession, *models.StudioVersion, error)
 	CreateSecondaryAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
 	CreateWatermarkAsset(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, input SourceUploadInput) (*models.StudioAsset, error)
@@ -323,6 +324,9 @@ func (s *studioService) CreateSecondaryAsset(
 	ident identity.Identity,
 	input SourceUploadInput,
 ) (*models.StudioAsset, error) {
+	if ctx.Err() != nil {
+		return nil, ErrSourceStorageUnavailable
+	}
 	_, doc, _, err := s.GetSession(ctx, sessionID, ident)
 	if err != nil {
 		return nil, err
@@ -335,14 +339,22 @@ func (s *studioService) CreateSecondaryAsset(
 
 	assetID := "studio-merge-source-" + uuid.NewString()
 	key := storage.BuildKey("studio/merge-sources", ".pdf")
-	if err := persistStudioSource(ctx, input.Path, key, "application/pdf"); err != nil {
-		return nil, fmt.Errorf("persist Studio secondary asset: %w", err)
+	if err := storage.SaveStudioPDF(ctx, key, input.Path); err != nil {
+		cleanupStudioSource(context.Background(), key)
+		if errors.Is(err, storage.ErrStudioPDFTooLarge) {
+			return nil, ErrSourceTooLarge
+		}
+		return nil, ErrSourceStorageUnavailable
 	}
 
+	if ctx.Err() != nil {
+		cleanupStudioSource(context.Background(), key)
+		return nil, ErrSourceStorageUnavailable
+	}
 	asset, err := s.RegisterAsset(ctx, doc.ID, assetID, "merge_source", key, fileSize, "application/pdf")
 	if err != nil {
-		cleanupStudioSource(ctx, key)
-		return nil, err
+		cleanupStudioSource(context.Background(), key)
+		return nil, ErrSourceRegistrationFailed
 	}
 	return asset, nil
 }
