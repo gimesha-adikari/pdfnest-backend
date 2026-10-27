@@ -89,6 +89,7 @@ func NewTaskProgressAdapter() *TaskProgressAdapter {
 
 // Adapt transforms worker.TaskProgress into public TaskStatusResponse.
 func (a *TaskProgressAdapter) Adapt(p worker.TaskProgress) TaskStatusResponse {
+	p = worker.PublicTaskProgress(p)
 	return TaskStatusResponse{
 		TaskID:          p.TaskID,
 		SessionID:       p.SessionID,

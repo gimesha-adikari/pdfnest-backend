@@ -11,6 +11,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 
 	"pdfnest-backend/internal/analyzer/engine"
+	"pdfnest-backend/internal/analyzer/worker"
 	"pdfnest-backend/internal/identity"
 )
 
@@ -48,12 +49,16 @@ func (ctrl *Controller) CreateSession(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    ErrCodeInvalidRequest,
-			Message: "Failed to parse JSON body: " + err.Error(),
+			Message: "Failed to parse JSON body",
 		})
 	}
 
 	resp, err := ctrl.service.CreateSession(c.Context(), ownerIdentity, req)
 	if err != nil {
+		message := "Could not create analyzer session."
+		if req.SourceType == engine.SourceTypeGit {
+			message = worker.PublicFailureMessage(err)
+		}
 		errStr := strings.ToLower(err.Error())
 		if strings.Contains(errStr, "ssrf") ||
 			strings.Contains(errStr, "protocol") ||
@@ -66,24 +71,24 @@ func (ctrl *Controller) CreateSession(c *fiber.Ctx) error {
 			strings.Contains(errStr, "prohibited") {
 			return c.Status(fiber.StatusForbidden).JSON(APIError{
 				Code:    ErrCodeForbidden,
-				Message: err.Error(),
+				Message: message,
 			})
 		}
 		if errors.Is(err, ErrInvalidStorageKey) {
 			return c.Status(fiber.StatusBadRequest).JSON(APIError{
 				Code:    ErrCodeInvalidRequest,
-				Message: err.Error(),
+				Message: "Invalid repository archive reference.",
 			})
 		}
 		if errors.Is(err, ErrStorageObjectNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(APIError{
 				Code:    "STORAGE_OBJECT_NOT_FOUND",
-				Message: err.Error(),
+				Message: "Repository archive was not found.",
 			})
 		}
 		return c.Status(fiber.StatusBadRequest).JSON(APIError{
 			Code:    ErrCodeInvalidRequest,
-			Message: err.Error(),
+			Message: message,
 		})
 	}
 
@@ -240,12 +245,12 @@ func (ctrl *Controller) GetResult(c *fiber.Ctx) error {
 		if errors.Is(err, ErrAnalysisFailed) {
 			return c.Status(fiber.StatusUnprocessableEntity).JSON(APIError{
 				Code:    ErrCodeUnprocessable,
-				Message: err.Error(),
+				Message: publicAnalysisFailure(err),
 			})
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    ErrCodeInternalError,
-			Message: err.Error(),
+			Message: "Could not retrieve analysis result.",
 		})
 	}
 
@@ -267,7 +272,7 @@ func (ctrl *Controller) GetTaskStatus(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(APIError{
 			Code:    ErrCodeInternalError,
-			Message: err.Error(),
+			Message: "Could not retrieve task status.",
 		})
 	}
 

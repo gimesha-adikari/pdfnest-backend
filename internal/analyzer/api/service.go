@@ -379,7 +379,7 @@ func (s *Service) GetResult(ctx context.Context, ownerIdentity, sessionID string
 				var p worker.TaskProgress
 				if json.Unmarshal([]byte(progJSON), &p) == nil {
 					if p.Status == worker.StatusFailed {
-						return nil, fmt.Errorf("%w: %s", ErrAnalysisFailed, p.ErrorMessage)
+						return nil, &analysisFailure{message: worker.SafeStoredFailureMessage(p.ErrorMessage)}
 					}
 					return nil, ErrAnalysisRunning
 				}
@@ -671,7 +671,7 @@ func (s *Service) markTaskFailed(ctx context.Context, sessionID, taskID, errorMs
 		FailedAt:        &failedAt,
 		UpdatedAt:       failedAt,
 	}
-	progJSON, _ := json.Marshal(failedProgress)
+	progJSON, _ := json.Marshal(worker.PublicTaskProgress(failedProgress))
 	_ = s.redis.Set(ctx, taskKey, progJSON, 24*time.Hour).Err()
 
 	// 3. Broadcast WebSocket notification if subscribers exist

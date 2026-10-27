@@ -24,7 +24,7 @@ func TestFailure_AnalysisFailedHandling(t *testing.T) {
 	// 1. Create Session
 	session, err := svc.CreateSession(ctx, user, CreateSessionRequest{
 		SourceType: engine.SourceTypeGit,
-		GitURL:     "https://github.com/facebook/react.git",
+		GitURL:     "https://8.8.8.8/fixture.git",
 	})
 	require.NoError(t, err)
 
@@ -49,7 +49,7 @@ func TestFailure_AnalysisFailedHandling(t *testing.T) {
 	_, err = svc.GetResult(ctx, user, session.SessionID)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrAnalysisFailed)
-	assert.Contains(t, err.Error(), "disk space exceeded")
+	assert.Equal(t, "analyzer: analysis task failed: Repository analysis failed.", err.Error())
 }
 
 func TestFailure_NonExistentSession(t *testing.T) {

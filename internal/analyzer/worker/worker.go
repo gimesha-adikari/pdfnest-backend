@@ -176,15 +176,15 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 	defer func() {
 		if r := recover(); r != nil {
 			failedAt := time.Now().UTC()
-			log.Printf("[Analyzer Worker] PANIC recovered in task %s: %v\nStack: %s",
+			log.Printf("[Analyzer Worker] PANIC recovered in task %s (type=%T)\nStack: %s",
 				job.TaskID, r, string(debug.Stack()))
 			_ = w.queue.PublishProgress(context.Background(), job.TaskID, TaskProgress{
 				TaskID:          job.TaskID,
 				SessionID:       job.SessionID,
 				Status:          StatusFailed,
 				ProgressPercent: 100,
-				StageMessage:    "Internal execution panic",
-				ErrorMessage:    fmt.Sprintf("internal worker panic: %v", r),
+				StageMessage:    "Analysis failed",
+				ErrorMessage:    PublicFailureMessage(nil),
 				WorkerID:        w.workerID,
 				ClaimedAt:       &claimedAt,
 				StartedAt:       &startedAt,
@@ -201,7 +201,9 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 	jobCtx, cancel := context.WithTimeout(parentCtx, w.cfg.JobTimeout)
 	defer cancel()
 
+	lastStage := StatusQueued
 	progressHandler := func(status TaskStatus, percent int, msg string) {
+		lastStage = status
 		progress := TaskProgress{
 			TaskID:          job.TaskID,
 			SessionID:       job.SessionID,
@@ -219,14 +221,14 @@ func (w *AnalyzerWorker) processJob(parentCtx context.Context, job *AnalyzerJob,
 	res, err := ExecutePipeline(jobCtx, job, w.cfg.SandboxBaseDir, progressHandler)
 	if err != nil {
 		failedAt := time.Now().UTC()
-		log.Printf("[Analyzer Worker] Task %s failed: %v", job.TaskID, err)
+		log.Printf("[Analyzer Worker] Task %s failed (stage=%s cause_type=%T): %s", job.TaskID, lastStage, err, PublicFailureMessage(err))
 		_ = w.queue.PublishProgress(context.Background(), job.TaskID, TaskProgress{
 			TaskID:          job.TaskID,
 			SessionID:       job.SessionID,
 			Status:          StatusFailed,
 			ProgressPercent: 100,
 			StageMessage:    "Analysis failed",
-			ErrorMessage:    err.Error(),
+			ErrorMessage:    PublicFailureMessage(err),
 			WorkerID:        w.workerID,
 			ClaimedAt:       &claimedAt,
 			StartedAt:       &startedAt,
