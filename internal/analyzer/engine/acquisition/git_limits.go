@@ -13,10 +13,27 @@ import (
 	"pdfnest-backend/internal/process"
 )
 
-func isolatedGitEnv(home string) []string {
+func isolatedGitEnv(home, temp string) []string {
 	return []string{"PATH=/usr/bin:/bin", "HOME=" + home, "XDG_CONFIG_HOME=" + home,
+		"XDG_CACHE_HOME=" + home, "XDG_DATA_HOME=" + home, "XDG_STATE_HOME=" + home,
+		"TMPDIR=" + temp, "TMP=" + temp, "TEMP=" + temp,
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C"}
+}
+
+// A provider volume size or a filesystem scan cannot attest independent hard
+// block/inode quotas, write confinement, or finite exclusive leases. Until a
+// separately provisioned controller is integrated and qualified, required mode
+// must refuse admission. Unknown configuration also fails closed.
+func checkGitStoragePolicy() error {
+	switch os.Getenv("ANALYZER_GIT_STORAGE_POLICY") {
+	case "", "monitored":
+		return nil
+	case "required":
+		return fmt.Errorf("%w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable)
+	default:
+		return fmt.Errorf("%w: invalid Git storage policy", ErrGitAcquisitionFailed)
+	}
 }
 
 func effectiveGitLimits(limits AcquisitionLimits) AcquisitionLimits {

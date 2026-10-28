@@ -118,6 +118,7 @@ func TestExecutePipelineEndToEnd(t *testing.T) {
 	assert.NotEmpty(t, result.Provenance.ComplexityTier)
 
 	// 6. Verify Sandbox Cleaned Up
-	sandboxDir := filepath.Join(tempBaseDir, "platen_repo_session-fullstack-1")
-	assert.NoDirExists(t, sandboxDir, "Sandbox directory must be cleaned up on completion")
+	remaining, err := os.ReadDir(tempBaseDir)
+	require.NoError(t, err)
+	assert.Empty(t, remaining, "All generated repository and auxiliary scratch directories must be cleaned up on completion")
 }

@@ -1,6 +1,7 @@
 package acquisition
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -50,6 +51,27 @@ func TestSandboxLifecycle(t *testing.T) {
 
 	// Idempotent cleanup
 	assert.NoError(t, sandbox.Cleanup())
+}
+
+func TestSandboxRepeatedSessionKeepsIndependentExecutions(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "new-base")
+	first, err := NewSandbox(base, "same-session")
+	require.NoError(t, err)
+	defer first.Cleanup()
+	canary := filepath.Join(first.RootPath, "source")
+	require.NoError(t, os.WriteFile(canary, []byte("preserve"), 0600))
+	second, err := NewSandbox(base, "same-session")
+	require.NoError(t, err)
+	require.NotEqual(t, first.scratchPath, second.scratchPath)
+	_, home, temp, err := second.gitScratch()
+	require.NoError(t, err)
+	require.Equal(t, second.scratchPath, filepath.Dir(home))
+	require.Equal(t, second.scratchPath, filepath.Dir(temp))
+	require.NoError(t, second.Cleanup())
+	require.NoDirExists(t, second.scratchPath)
+	content, err := os.ReadFile(canary)
+	require.NoError(t, err)
+	require.Equal(t, "preserve", string(content))
 }
 
 func TestInvalidSandboxIDs(t *testing.T) {
