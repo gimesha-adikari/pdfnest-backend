@@ -51,6 +51,7 @@ func TestPublicFailureClassification(t *testing.T) {
 		{acquisition.ErrSSRFBlocked, "Repository host is not permitted."},
 		{acquisition.ErrUnsupportedGitProtocol, "Repository URL must use HTTPS."},
 		{acquisition.ErrGitAcquisitionFailed, "Repository acquisition failed."},
+		{fmt.Errorf("%w: %w", acquisition.ErrGitAcquisitionFailed, acquisition.ErrGitStorageUnavailable), "Repository acquisition failed."},
 		{acquisition.ErrGitCloneFailed, "Repository acquisition failed."},
 		{context.DeadlineExceeded, "Repository analysis timed out."},
 		{context.Canceled, "Repository analysis was canceled."},
