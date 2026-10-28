@@ -46,6 +46,7 @@ type Repository interface {
 	GetEditorStateByExtractJob(ctx context.Context, jobID uuid.UUID) (*models.StudioEditorState, error)
 	GetLatestEditorStateForVersion(ctx context.Context, sessionID, baseVersionID uuid.UUID) (*models.StudioEditorState, error)
 	DeleteSessionWorkspace(ctx context.Context, sessionID uuid.UUID, documentID uuid.UUID) ([]models.StudioStorageCleanupTask, error)
+	EnqueueExpiredStorageCleanup(ctx context.Context, now time.Time, limit int) error
 	CreateStorageCleanupTasks(ctx context.Context, keys []string) ([]models.StudioStorageCleanupTask, error)
 	ClaimStorageCleanupTasks(ctx context.Context, now time.Time, limit int, lease time.Duration) ([]models.StudioStorageCleanupTask, error)
 	DeleteStorageCleanupTask(ctx context.Context, taskID uuid.UUID) error
@@ -487,6 +488,36 @@ func (r *gormRepository) DeleteSessionWorkspace(ctx context.Context, sessionID u
 		return nil
 	})
 	return cleanupTasks, err
+}
+
+// EnqueueExpiredStorageCleanup retires expired exports with durable deletion
+// intent. Session expiry remains access revocation: worker submission currently
+// precedes durable job registration, so automatic workspace deletion could race
+// an admitted submission and lose its storage references.
+func (r *gormRepository) EnqueueExpiredStorageCleanup(ctx context.Context, now time.Time, limit int) error {
+	if limit <= 0 || limit > storageCleanupBatchSize {
+		limit = storageCleanupBatchSize
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		repo := &gormRepository{db: tx}
+
+		// Exports can expire before their editing session does. Record their
+		// opaque keys before removing the last catalogue reference.
+		var exports []models.StudioExport
+		if err := tx.Where("expires_at < ?", now).Order("expires_at ASC").Limit(limit).
+			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Find(&exports).Error; err != nil {
+			return err
+		}
+		for _, export := range exports {
+			if _, err := repo.CreateStorageCleanupTasks(ctx, []string{export.R2Key}); err != nil {
+				return err
+			}
+			if err := tx.Delete(&export).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (r *gormRepository) CreateStorageCleanupTasks(ctx context.Context, keys []string) ([]models.StudioStorageCleanupTask, error) {

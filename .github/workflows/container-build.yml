@@ -60,7 +60,7 @@ jobs:
           command -v google-chrome || command -v chromium || command -v chromium-browser || command -v google-chrome-stable
           go test ./internal/conversion -run '^(TestMarkdown|TestCode)' -count=1 -p 1 -parallel 1 -timeout 5m
 
-      - name: Verify account security with isolated native PostgreSQL
+      - name: Verify account security and Studio retention with isolated native PostgreSQL
         run: scripts/test-account-security.sh
 
       - name: Verify Analyzer public failure boundaries

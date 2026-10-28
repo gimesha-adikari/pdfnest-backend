@@ -365,7 +365,7 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 	}
 	payloadKey, err := c.stagePayload(ctx, req.Operation, canonical, current.Document.ID)
 	if err != nil {
-		cleanupStudioObject(ctx, sourceKey)
+		c.cleanupUnregisteredObjects(ctx, sourceKey)
 		return nil, fmt.Errorf("%w: stage payload: %v", ErrJobReconciliationFailed, err)
 	}
 	var submitted workerJobStatus
@@ -381,8 +381,7 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 		submitted, err = c.gateway.SubmitEdit(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
 	}
 	if err != nil {
-		cleanupStudioObject(ctx, sourceKey)
-		cleanupStudioObject(ctx, payloadKey)
+		c.cleanupUnregisteredObjects(ctx, sourceKey, payloadKey)
 		return nil, fmt.Errorf("%w: submit worker: %v", ErrJobReconciliationFailed, err)
 	}
 	now := time.Now().UTC()
@@ -391,8 +390,7 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 		job.EditorStateID = &compileState.ID
 	}
 	if err := c.repo.CreateJob(ctx, job); err != nil {
-		cleanupStudioObject(ctx, sourceKey)
-		cleanupStudioObject(ctx, payloadKey)
+		c.cleanupUnregisteredObjects(ctx, sourceKey, payloadKey)
 		return nil, err
 	}
 	return &StudioJobResult{Job: job}, nil
@@ -948,9 +946,31 @@ func (c *studioJobCoordinator) cleanupPreparedStudioObject(ctx context.Context, 
 	if key == "" {
 		return
 	}
+	c.cleanupUnregisteredObjects(ctx, key)
+}
+
+// cleanupUnregisteredObjects preserves rollback keys even when no job row was
+// registered. Provider deletion failures stay in the same durable retry ledger
+// used for discarded workspaces and terminal job staging.
+func (c *studioJobCoordinator) cleanupUnregisteredObjects(ctx context.Context, keys ...string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	cleanupStudioObject(cleanupCtx, key)
+	tasks, err := c.repo.CreateStorageCleanupTasks(cleanupCtx, keys)
+	if err != nil {
+		log.Printf("[STUDIO STORAGE CLEANUP] rollback enqueue failed: %v", err)
+		// Preserve best-effort removal during a database outage. If both
+		// stores fail, no durable cleanup guarantee can be made.
+		for _, key := range keys {
+			if deleteErr := storage.DeleteObject(cleanupCtx, key); deleteErr != nil {
+				log.Printf("[STUDIO STORAGE CLEANUP] rollback delete failed without durable intent: %v", deleteErr)
+			}
+		}
+		return
+	}
+	worker := NewStorageCleanupWorker(c.repo, nil)
+	for _, task := range tasks {
+		worker.RunTask(cleanupCtx, task)
+	}
 }
 
 func (c *studioJobCoordinator) logReconciliationStage(job *models.StudioJob, stage string, elapsed time.Duration, outcome string) {
@@ -993,11 +1013,37 @@ func (c *studioJobCoordinator) reconcileEditorExtractLocked(ctx context.Context,
 	return tx.SaveJob(ctx, job)
 }
 func (c *studioJobCoordinator) cleanupStaging(ctx context.Context, job *models.StudioJob) {
-	cleanupStudioObject(ctx, job.SourceKey)
-	cleanupStudioObject(ctx, job.PayloadKey)
-	job.SourceKey = ""
-	job.PayloadKey = ""
-	_ = c.repo.SaveJob(ctx, job)
+	var tasks []models.StudioStorageCleanupTask
+	var cleaned models.StudioJob
+	err := c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
+		locked, err := tx.LockJob(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		if !terminalStudioJob(locked.Status) {
+			return ErrConflict
+		}
+		tasks, err = tx.CreateStorageCleanupTasks(ctx, []string{locked.SourceKey, locked.PayloadKey})
+		if err != nil {
+			return err
+		}
+		locked.SourceKey = ""
+		locked.PayloadKey = ""
+		if err := tx.SaveJob(ctx, locked); err != nil {
+			return err
+		}
+		cleaned = *locked
+		return nil
+	})
+	if err != nil {
+		log.Printf("[STUDIO STORAGE CLEANUP] staging enqueue failed: %v", err)
+		return
+	}
+	*job = cleaned
+	worker := NewStorageCleanupWorker(c.repo, nil)
+	for _, task := range tasks {
+		worker.RunTask(ctx, task)
+	}
 }
 
 func mapFromJSON(raw models.JSON) map[string]any {
