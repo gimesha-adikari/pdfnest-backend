@@ -97,6 +97,13 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 	}
 	snapshot, fingerprint, size, cleanup, err := storage.StageArtifactSource(ctx, source)
 	if err != nil {
+		// A previous publisher may have stored the exact chosen bytes and lost
+		// its acknowledgement or local source before settlement. Reconcile that
+		// durable identity without requiring the vanished process-local file.
+		// A different key must never finalize a previous publication by accident.
+		if existing != nil && existing.State == "publishing" && existing.ResultKey == key {
+			return r.ReconcileCompletion(ctx, id)
+		}
 		return fmt.Errorf("%w: artifact source: %v", ErrSettlementPending, err)
 	}
 	defer cleanup()

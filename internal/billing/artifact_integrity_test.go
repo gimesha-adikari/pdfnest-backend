@@ -121,6 +121,47 @@ func TestDurableCompletionSourceMutationAfterIdentityUsesCapturedBytes(t *testin
 	assertReserved(t, db, row.ReservationID, "committed")
 }
 
+func TestDurablePublicationRetryAfterSourceLoss(t *testing.T) {
+	for _, scenario := range []string{"matching", "corrupt", "missing", "different_key"} {
+		t.Run(scenario, func(t *testing.T) {
+			db, client, _, row, source := completionFixture(t, false)
+			key := "outputs/tasks/" + row.ID + "/result.txt"
+			data := publishingIdentity(t, db, row, source, key)
+			if scenario == "corrupt" {
+				data[0] ^= 1
+			}
+			if scenario != "missing" {
+				if err := storage.SaveObjectBytes(t.Context(), key, data, "text/plain"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(source); err != nil {
+				t.Fatal(err)
+			}
+			client.Del(t.Context(), tasks.TaskKeyPrefix+row.ID)
+			requestedKey := key
+			if scenario == "different_key" {
+				requestedKey = "outputs/tasks/" + row.ID + "/other.txt"
+			}
+			for range 2 {
+				err := tasks.Registry.PublishArtifact(t.Context(), row.ID, requestedKey, source, "text/plain")
+				current := completionRow(t, db, row.ID)
+				if scenario == "matching" {
+					if err != nil || current.State != "completed" {
+						t.Fatalf("lost-source retry did not recover: %v state=%s", err, current.State)
+					}
+					assertReserved(t, db, row.ReservationID, "committed")
+				} else {
+					if err == nil || current.State != "publishing" || current.ResultKey != key {
+						t.Fatalf("unsafe source-loss retry: %v state=%s key=%s", err, current.State, current.ResultKey)
+					}
+					assertReserved(t, db, row.ReservationID, "reserved")
+				}
+			}
+		})
+	}
+}
+
 func TestDurableCompletionMissingArtifactRecoversOnlyMatchingDurableWorker(t *testing.T) {
 	for _, scenario := range []string{"valid", "content", "owner", "worker_id", "state", "status", "namespace", "submit_path", "native_source_lost"} {
 		t.Run(scenario, func(t *testing.T) {
