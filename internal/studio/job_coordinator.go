@@ -335,13 +335,84 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 					CreatedAt:      now,
 					UpdatedAt:      now,
 				}
-				if err := c.repo.CreateJob(ctx, job); err != nil {
+				candidateID := job.ID
+				if err := c.admitJob(ctx, sess, ident, req, canonical, job); err != nil {
 					return nil, err
 				}
-				return &StudioJobResult{Job: job}, nil
+				return &StudioJobResult{Job: job, IsIdempotentReplay: job.ID != candidateID}, nil
 			}
 		}
 	}
+	// Admission and expiry serialize on the session row. Persist planned keys
+	// before materialization or storage writes; a process crash cannot orphan
+	// a source that an external Worker may still consume.
+	now := time.Now().UTC()
+	jobID := uuid.New()
+	job := &models.StudioJob{ID: jobID, DocumentID: sess.DocumentID, SessionID: sessionID, BaseVersionID: req.BaseVersionID,
+		WorkerJobID: "pending-" + jobID.String(), JobType: string(req.Operation), Status: "preparing", IdempotencyKey: req.IdempotencyKey,
+		Parameters: models.JSON(canonical), SourceKey: storage.BuildKey("studio/jobs/staging/"+sess.DocumentID.String()+"/source", ".pdf"), CreatedAt: now, UpdatedAt: now}
+	if req.Operation != StudioJobEditExtract {
+		job.PayloadKey = storage.BuildKey("studio/jobs/staging/"+sess.DocumentID.String()+"/payload", ".json")
+	}
+	if compileState != nil {
+		job.EditorStateID = &compileState.ID
+	}
+	if err := c.admitJob(ctx, sess, ident, req, canonical, job); err != nil {
+		return nil, err
+	}
+	if job.ID != jobID {
+		return &StudioJobResult{Job: job, IsIdempotentReplay: true}, nil
+	}
+	dispatching := false
+	finished := false
+	defer func() {
+		if finished || dispatching {
+			return
+		}
+		// There has been no external dispatch. A failed staging attempt may
+		// still have written bytes, so transfer its planned keys durably.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		job.Status = "failed"
+		job.ErrorCode = "submission_preparation_failed"
+		if c.repo.SaveJob(cleanupCtx, job) == nil {
+			c.cleanupStaging(cleanupCtx, job)
+		}
+	}()
+	// Nested materialization can persist a snapshot before the dispatch source
+	// is staged. Carry the same durable ownership into those storage writes.
+	ctx = context.WithValue(ctx, studioStorageIntentContextKey{}, func(intentCtx context.Context, key string) error {
+		return c.repo.WithTransaction(intentCtx, func(tx Repository, _ *gorm.DB) error {
+			locked, err := tx.LockJob(intentCtx, job.ID)
+			if err != nil {
+				return err
+			}
+			if terminalStudioJob(locked.Status) {
+				return ErrConflict
+			}
+			var keys []string
+			if len(locked.PendingObjectKeys) > 0 {
+				if err := json.Unmarshal(locked.PendingObjectKeys, &keys); err != nil {
+					return err
+				}
+			}
+			for _, existing := range keys {
+				if existing == key {
+					return nil
+				}
+			}
+			keys = append(keys, key)
+			locked.PendingObjectKeys, err = json.Marshal(keys)
+			if err != nil {
+				return err
+			}
+			if err := tx.SaveJob(intentCtx, locked); err != nil {
+				return err
+			}
+			*job = *locked
+			return nil
+		})
+	})
 	var current *MaterializedVersion
 	if req.Operation == StudioJobEditCompile {
 		if byID, ok := c.materializer.(StudioVersionMaterializerByID); ok {
@@ -359,15 +430,22 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 	if current.Version.ID != req.BaseVersionID {
 		return nil, ErrInvalidBaseVersion
 	}
-	sourceKey, err := stageStudioJobSource(ctx, current.Path, current.Document.ID)
+	sourceKey := job.SourceKey
+	err = persistStudioPDF(ctx, current.Path, sourceKey)
 	if err != nil {
 		return nil, fmt.Errorf("%w: stage source: %v", ErrJobReconciliationFailed, err)
 	}
-	payloadKey, err := c.stagePayload(ctx, req.Operation, canonical, current.Document.ID)
+	payloadKey, err := c.stagePayloadAtKey(ctx, req.Operation, canonical, job.PayloadKey)
 	if err != nil {
-		c.cleanupUnregisteredObjects(ctx, sourceKey)
 		return nil, fmt.Errorf("%w: stage payload: %v", ErrJobReconciliationFailed, err)
 	}
+	// Once this commits, even an error or lost response is an uncertain
+	// external submission. Never retry it under a new Worker-generated ID.
+	job.Status = "submitting"
+	if err := c.repo.SaveJob(ctx, job); err != nil {
+		return nil, err
+	}
+	dispatching = true
 	var submitted workerJobStatus
 	if strings.HasPrefix(string(req.Operation), "markup_") {
 		submitted, err = c.gateway.SubmitMarkup(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
@@ -380,19 +458,22 @@ func (c *studioJobCoordinator) Submit(ctx context.Context, sessionID uuid.UUID, 
 	} else {
 		submitted, err = c.gateway.SubmitEdit(ctx, req.Operation, sourceKey, payloadKey, current.Document.OriginalFileName)
 	}
-	if err != nil {
-		c.cleanupUnregisteredObjects(ctx, sourceKey, payloadKey)
-		return nil, fmt.Errorf("%w: submit worker: %v", ErrJobReconciliationFailed, err)
+	ackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err != nil || strings.TrimSpace(submitted.ID) == "" {
+		job.Status = "submission_uncertain"
+		job.ErrorCode = "worker_submission_uncertain"
+		// Failed persistence leaves the already durable submitting row and its
+		// ownership intact. Neither state is eligible for reclamation.
+		_ = c.repo.SaveJob(ackCtx, job)
+		return nil, fmt.Errorf("%w: worker submission acknowledgement unavailable", ErrJobReconciliationFailed)
 	}
-	now := time.Now().UTC()
-	job := &models.StudioJob{ID: uuid.New(), DocumentID: current.Document.ID, SessionID: sessionID, BaseVersionID: req.BaseVersionID, WorkerJobID: submitted.ID, JobType: string(req.Operation), Status: submitted.Status, Progress: submitted.Progress, Message: submitted.Message, IdempotencyKey: req.IdempotencyKey, Parameters: models.JSON(canonical), SourceKey: sourceKey, PayloadKey: payloadKey, CreatedAt: now, UpdatedAt: now}
-	if compileState != nil {
-		job.EditorStateID = &compileState.ID
-	}
-	if err := c.repo.CreateJob(ctx, job); err != nil {
-		c.cleanupUnregisteredObjects(ctx, sourceKey, payloadKey)
+	job.WorkerJobID = submitted.ID
+	applyWorkerStatus(job, submitted)
+	if err := c.repo.SaveJob(ackCtx, job); err != nil {
 		return nil, err
 	}
+	finished = true
 	return &StudioJobResult{Job: job}, nil
 }
 
@@ -490,6 +571,11 @@ func compileOriginLanguageMatches(repo Repository, ctx context.Context, compileJ
 }
 
 func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobName, canonical []byte, documentID uuid.UUID) (string, error) {
+	key := storage.BuildKey("studio/jobs/staging/"+documentID.String()+"/payload", ".json")
+	return c.stagePayloadAtKey(ctx, op, canonical, key)
+}
+
+func (c *studioJobCoordinator) stagePayloadAtKey(ctx context.Context, op StudioJobName, canonical []byte, key string) (string, error) {
 	var payload []byte
 	var err error
 	switch op {
@@ -526,7 +612,7 @@ func (c *studioJobCoordinator) stagePayload(ctx context.Context, op StudioJobNam
 	if err != nil {
 		return "", err
 	}
-	return stageStudioJobBytes(ctx, payload, documentID, "payload")
+	return key, storage.SaveObjectBytes(ctx, key, payload, "application/json")
 }
 
 func (c *studioJobCoordinator) GetEditorState(ctx context.Context, sessionID, stateID uuid.UUID, ident identity.Identity) (*models.StudioEditorState, error) {
@@ -635,7 +721,7 @@ func (c *studioJobCoordinator) Cancel(ctx context.Context, sessionID, jobID uuid
 	if err != nil {
 		return nil, err
 	}
-	if terminalStudioJob(job.Status) {
+	if terminalStudioJob(job.Status) || undispatchedStudioJob(job) {
 		return job, nil
 	}
 	status, err := c.gateway.Cancel(ctx, StudioJobName(job.JobType), job.WorkerJobID)
@@ -645,7 +731,7 @@ func (c *studioJobCoordinator) Cancel(ctx context.Context, sessionID, jobID uuid
 	if err = c.persistWorkerStatus(ctx, job, status); err != nil {
 		return nil, err
 	}
-	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "") {
+	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "" || len(job.PendingObjectKeys) > 0) {
 		c.cleanupStaging(ctx, job)
 	}
 	return job, nil
@@ -655,7 +741,7 @@ func (c *studioJobCoordinator) reconcile(ctx context.Context, job *models.Studio
 	defer func() {
 		c.logReconciliationStage(job, "reconcile_total", time.Since(reconcileStarted), reconciliationOutcome(reconcileErr))
 	}()
-	if terminalStudioJob(job.Status) {
+	if job.Status == "failed" || job.Status == "cancelled" || (job.Status == "succeeded" && job.ReconciledAt != nil) || undispatchedStudioJob(job) {
 		return job, nil
 	}
 	workerStatusStarted := time.Now()
@@ -674,7 +760,7 @@ func (c *studioJobCoordinator) reconcile(ctx context.Context, job *models.Studio
 			return nil, err
 		}
 	}
-	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "") {
+	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "" || len(job.PendingObjectKeys) > 0) {
 		c.cleanupStaging(ctx, job)
 	}
 	return job, nil
@@ -712,6 +798,41 @@ func applyWorkerStatus(job *models.StudioJob, s workerJobStatus) {
 	}
 	job.UpdatedAt = time.Now().UTC()
 }
+
+// Undispatched rows require explicit reconciliation against external evidence;
+// polling or cancellation with the placeholder ID cannot establish termination.
+func undispatchedStudioJob(job *models.StudioJob) bool {
+	return job.Status == "preparing" || job.Status == "submitting" || job.Status == "submission_uncertain" || strings.HasPrefix(job.WorkerJobID, "pending-")
+}
+
+func (c *studioJobCoordinator) admitJob(ctx context.Context, sess *models.StudioSession, ident identity.Identity, req StudioJobRequest, canonical []byte, job *models.StudioJob) error {
+	return c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
+		locked, err := tx.LockSession(ctx, sess.ID)
+		if err != nil {
+			return err
+		}
+		if err := validateSessionAccess(locked, ident); err != nil {
+			return err
+		}
+		old, err := tx.FindJobByIdempotencyKey(ctx, sess.DocumentID, req.IdempotencyKey)
+		if err != nil {
+			return err
+		}
+		if old != nil {
+			persisted, err := canonicalJSON(json.RawMessage(old.Parameters))
+			if err != nil || old.BaseVersionID != req.BaseVersionID || old.JobType != string(req.Operation) || !bytes.Equal(persisted, canonical) {
+				return ErrIdempotencyConflict
+			}
+			*job = *old
+			return nil
+		}
+		if req.Operation != StudioJobEditCompile && locked.ActiveVersionID != req.BaseVersionID {
+			return ErrInvalidBaseVersion
+		}
+		return tx.CreateJob(ctx, job)
+	})
+}
+
 func terminalStudioJob(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }
 func validStudioJob(op StudioJobName) bool {
 	switch op {
@@ -732,6 +853,9 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 	if err != nil {
 		return err
 	}
+	if prepared == nil {
+		return nil
+	}
 	registered, err := c.finalizePreparedStudioJobResult(ctx, job, prepared)
 	if !registered {
 		c.cleanupPreparedStudioObject(ctx, prepared.materializedKey)
@@ -739,7 +863,7 @@ func (c *studioJobCoordinator) reconcileSuccess(ctx context.Context, job *models
 	if err != nil {
 		return err
 	}
-	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "") {
+	if terminalStudioJob(job.Status) && (job.SourceKey != "" || job.PayloadKey != "" || len(job.PendingObjectKeys) > 0) {
 		c.cleanupStaging(ctx, job)
 	}
 	return nil
@@ -846,6 +970,37 @@ func (c *studioJobCoordinator) prepareStudioJobResult(ctx context.Context, job *
 	}
 	storeStarted := time.Now()
 	prepared.materializedKey = storage.BuildKey(filepath.ToSlash(filepath.Join("studio", "materialized", job.DocumentID.String())), ".pdf")
+	finishedElsewhere := false
+	// Own the planned key before storage starts. Duplicate reconciliation may
+	// prepare distinct objects, and every key remains recoverable after a crash.
+	if err := c.repo.WithTransaction(ctx, func(tx Repository, _ *gorm.DB) error {
+		locked, err := tx.LockJob(ctx, job.ID)
+		if err != nil {
+			return err
+		}
+		if locked.ReconciledAt != nil || locked.Status == "failed" || locked.Status == "cancelled" {
+			*job = *locked
+			finishedElsewhere = true
+			return nil
+		}
+		var keys []string
+		if len(locked.PendingObjectKeys) > 0 {
+			if err := json.Unmarshal(locked.PendingObjectKeys, &keys); err != nil {
+				return err
+			}
+		}
+		keys = append(keys, prepared.materializedKey)
+		locked.PendingObjectKeys, err = json.Marshal(keys)
+		if err != nil {
+			return err
+		}
+		return tx.SaveJob(ctx, locked)
+	}); err != nil {
+		return nil, err
+	}
+	if finishedElsewhere {
+		return nil, nil
+	}
 	storeErr := persistStudioPDF(ctx, path, prepared.materializedKey)
 	c.logReconciliationStage(job, "artifact_store", time.Since(storeStarted), reconciliationOutcome(storeErr))
 	if storeErr != nil {
@@ -946,7 +1101,17 @@ func (c *studioJobCoordinator) cleanupPreparedStudioObject(ctx context.Context, 
 	if key == "" {
 		return
 	}
-	c.cleanupUnregisteredObjects(ctx, key)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if releaser, ok := c.repo.(interface {
+		ReleasePreparedObject(context.Context, string) error
+	}); ok {
+		if err := releaser.ReleasePreparedObject(cleanupCtx, key); err != nil {
+			log.Printf("[STUDIO STORAGE CLEANUP] prepared object release failed: %v", err)
+			return
+		}
+	}
+	c.cleanupUnregisteredObjects(cleanupCtx, key)
 }
 
 // cleanupUnregisteredObjects preserves rollback keys even when no job row was
@@ -958,13 +1123,8 @@ func (c *studioJobCoordinator) cleanupUnregisteredObjects(ctx context.Context, k
 	tasks, err := c.repo.CreateStorageCleanupTasks(cleanupCtx, keys)
 	if err != nil {
 		log.Printf("[STUDIO STORAGE CLEANUP] rollback enqueue failed: %v", err)
-		// Preserve best-effort removal during a database outage. If both
-		// stores fail, no durable cleanup guarantee can be made.
-		for _, key := range keys {
-			if deleteErr := storage.DeleteObject(cleanupCtx, key); deleteErr != nil {
-				log.Printf("[STUDIO STORAGE CLEANUP] rollback delete failed without durable intent: %v", deleteErr)
-			}
-		}
+		// Never erase through an ownership outage. Prepared keys retain their
+		// pre-write job reference until transactional release succeeds.
 		return
 	}
 	worker := NewStorageCleanupWorker(c.repo, nil)
@@ -1020,13 +1180,22 @@ func (c *studioJobCoordinator) cleanupStaging(ctx context.Context, job *models.S
 		if err != nil {
 			return err
 		}
-		if !terminalStudioJob(locked.Status) {
+		if !terminalStudioJob(locked.Status) || (locked.Status == "succeeded" && locked.ReconciledAt == nil) {
 			return ErrConflict
 		}
-		tasks, err = tx.CreateStorageCleanupTasks(ctx, []string{locked.SourceKey, locked.PayloadKey})
+		keys := []string{locked.SourceKey, locked.PayloadKey}
+		if len(locked.PendingObjectKeys) > 0 {
+			var pending []string
+			if err := json.Unmarshal(locked.PendingObjectKeys, &pending); err != nil {
+				return err
+			}
+			keys = append(keys, pending...)
+		}
+		tasks, err = tx.CreateStorageCleanupTasks(ctx, keys)
 		if err != nil {
 			return err
 		}
+		locked.PendingObjectKeys = nil
 		locked.SourceKey = ""
 		locked.PayloadKey = ""
 		if err := tx.SaveJob(ctx, locked); err != nil {

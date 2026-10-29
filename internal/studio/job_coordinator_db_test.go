@@ -207,6 +207,16 @@ func newDurableEditorFixture(t *testing.T) durableEditorFixture {
 	)
 	require.NoError(t, err)
 
+	t.Cleanup(func() {
+		db := repository.(*gormRepository).db
+		// Fixtures own their documents and no external Worker is started.
+		// Release outstanding synthetic states before removing the test graph.
+		require.NoError(t, db.Model(&models.StudioJob{}).Where("document_id = ?", document.ID).Update("status", "failed").Error)
+		_, err := repository.DeleteSessionWorkspace(context.Background(), session.ID, document.ID)
+		if !errors.Is(err, ErrSessionNotFound) {
+			require.NoError(t, err)
+		}
+	})
 	gateway := newDurableEditorGateway(fixtureBytes)
 	materializer := &durableEditorMaterializer{
 		session: session, document: document, version: version, model: &baseModel, path: fixturePath,
@@ -357,8 +367,13 @@ func TestStudioEditorDurability_PostgreSQL(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, compile.Job.EditorStateID)
 	assert.Equal(t, baseState.ID, *compile.Job.EditorStateID)
-	assert.Contains(t, string(compile.Job.Parameters), `"fontFamily":"cour"`)
-	assert.Contains(t, string(compile.Job.Parameters), `"background":"#fef08a"`)
+	var persistedCompile EditCompileJobParameters
+	require.NoError(t, json.Unmarshal(compile.Job.Parameters, &persistedCompile))
+	persistedLayout, _, err := decodeEditorLayout(persistedCompile.Layout)
+	require.NoError(t, err)
+	require.NotNil(t, persistedLayout.Pages[0].Elements[0].Style)
+	assert.Equal(t, "cour", persistedLayout.Pages[0].Elements[0].Style.FontFamily)
+	assert.Equal(t, "#fef08a", persistedLayout.Pages[0].Elements[0].Style.Background)
 
 	fixture.gateway.statuses[compile.Job.WorkerJobID] = workerJobStatus{ID: compile.Job.WorkerJobID, Status: "succeeded", Progress: 100}
 	reconciledCompile, err := fixture.coordinator.Get(ctx, fixture.session.ID, compile.Job.ID, fixture.identity)

@@ -19,18 +19,20 @@ import (
 
 func retentionWorkspace(t *testing.T) (Repository, *models.StudioSession, string) {
 	t.Helper()
+	t.Setenv("STUDIO_EXPIRED_SESSION_RECLAMATION_ENABLED", "true")
 	svc, repo := getTestServiceAndRepository(t)
-	sqlDB, err := repo.(*gormRepository).db.DB()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	assetID := "retention-" + uuid.NewString()
 	key := "studio/test/" + assetID + ".pdf"
 	_, session, _, err := svc.CreateDocument(context.Background(), identity.Identity{ID: uuid.NewString(), Type: identity.TypeUser}, "retention.pdf", 1, 1, assetID, key,
 		vdm.DocumentModel{DocumentID: uuid.NewString(), PageCount: 1, Pages: []vdm.PageDescriptor{{PageID: uuid.NewString(), SourceAssetID: &assetID, SourcePageNumber: 1}}})
 	require.NoError(t, err)
 	t.Cleanup(func() {
+		db := repo.(*gormRepository).db
+		_ = db.Model(&models.StudioJob{}).Where("session_id = ?", session.ID).Updates(map[string]interface{}{"status": "failed"}).Error
 		_, err := repo.DeleteSessionWorkspace(context.Background(), session.ID, session.DocumentID)
-		require.NoError(t, err)
+		if !errors.Is(err, ErrSessionNotFound) {
+			require.NoError(t, err)
+		}
 	})
 	return repo, session, key
 }
@@ -44,19 +46,16 @@ func retentionJob(t *testing.T, repo Repository, session *models.StudioSession, 
 	return job
 }
 
-func TestRetentionExpiryPreservesWorkspaceWithoutDurableSubmissionGuard(t *testing.T) {
+func TestRetentionExpiryReclaimsWorkspaceWithoutActiveSubmission(t *testing.T) {
 	repo, session, sourceKey := retentionWorkspace(t)
 	now := time.Now().UTC()
 	require.NoError(t, repo.(*gormRepository).db.Model(session).Update("expires_at", now.Add(-time.Hour)).Error)
-	// Absence of a registered job does not prove that no gateway submission is
-	// in flight. Session reclamation must stay disabled until admission is
-	// serialized with deletion using a durable pre-submission guard.
 	require.NoError(t, repo.EnqueueExpiredStorageCleanup(context.Background(), now, 50))
 	_, err := repo.GetSession(context.Background(), session.ID)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrSessionNotFound)
 	_, err = repo.GetDocument(context.Background(), session.DocumentID)
-	require.NoError(t, err)
-	require.Zero(t, cleanupTaskCountForKeys(t, repo, sourceKey))
+	require.ErrorIs(t, err, ErrDocumentNotFound)
+	require.Equal(t, int64(1), cleanupTaskCountForKeys(t, repo, sourceKey))
 }
 
 func TestRetentionExpiredExportPreservesLiveWorkspaceAndExport(t *testing.T) {
@@ -182,7 +181,7 @@ func TestRetentionStagingTransferRollsBackOnJobSaveFailure(t *testing.T) {
 	require.Zero(t, cleanupTaskCountForKeys(t, repo, source, payload))
 }
 
-func TestRetentionUnregisteredCleanupStillDeletesWhenLedgerFails(t *testing.T) {
+func TestRetentionUnregisteredCleanupPreservesObjectWhenOwnershipLedgerFails(t *testing.T) {
 	t.Setenv("APP_ENV", "test")
 	t.Setenv("STORAGE_MODE", "local")
 	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
@@ -197,7 +196,7 @@ func TestRetentionUnregisteredCleanupStillDeletesWhenLedgerFails(t *testing.T) {
 	(&studioJobCoordinator{repo: repo}).cleanupUnregisteredObjects(context.Background(), key)
 	require.Zero(t, cleanupTaskCountForKeys(t, repo, key), "failed ledger insert must not be reported as durable intent")
 	_, err := os.Stat(filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(key)))
-	require.True(t, errors.Is(err, os.ErrNotExist), "best-effort deletion must still run when the ledger is unavailable")
+	require.NoError(t, err, "ownership outage must never bypass shared-reference and retirement guards")
 }
 
 func TestRetentionExpiryRollsBackWhenIntentCannotPersist(t *testing.T) {

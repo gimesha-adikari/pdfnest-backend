@@ -11,10 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 
 	"pdfnest-backend/internal/identity"
+	backendmodels "pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
 )
@@ -30,14 +29,8 @@ func getTestServiceAndRepository(t *testing.T) (Service, Repository) {
 		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
 	}
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	require.NoError(t, err, "Failed to connect to PostgreSQL")
-
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	require.NoError(t, sqlDB.Ping())
-
-	err = db.AutoMigrate(
+	db := openStudioTestDatabase(t, dsn)
+	err := db.AutoMigrate(
 		&models.StudioDocument{},
 		&models.StudioAsset{},
 		&models.StudioSnapshot{},
@@ -46,6 +39,8 @@ func getTestServiceAndRepository(t *testing.T) (Service, Repository) {
 		&models.StudioSession{},
 		&models.StudioExport{},
 		&models.StudioStorageCleanupTask{},
+		&models.StudioStorageObjectRetirement{},
+		&backendmodels.WorkerResultOwnership{},
 		&models.StudioEditorState{},
 		&models.StudioJob{},
 	)

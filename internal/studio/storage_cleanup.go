@@ -95,6 +95,15 @@ func (w *storageCleanupWorker) RunTask(ctx context.Context, task models.StudioSt
 }
 
 func (w *storageCleanupWorker) RunTaskAt(ctx context.Context, task models.StudioStorageCleanupTask, now time.Time) bool {
+	if retirer, ok := w.repo.(interface {
+		RetireStorageObject(context.Context, string) (bool, error)
+	}); ok {
+		retired, err := retirer.RetireStorageObject(ctx, task.ObjectKey)
+		if err != nil || !retired {
+			_ = w.repo.RescheduleStorageCleanupTask(ctx, task.ID, task.AttemptCount+1, now.Add(storageCleanupMaxBackoff), "storage object still referenced or retirement check unavailable")
+			return false
+		}
+	}
 	if err := w.deleter.DeleteObject(ctx, task.ObjectKey); err == nil {
 		if deleteErr := w.repo.DeleteStorageCleanupTask(ctx, task.ID); deleteErr != nil {
 			log.Printf("[STUDIO STORAGE CLEANUP] task completion failed: %v", deleteErr)

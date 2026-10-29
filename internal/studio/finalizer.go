@@ -874,7 +874,14 @@ func validateFinalOutput(path string, expectedPageCount int) (os.FileInfo, error
 	return info, nil
 }
 
+type studioStorageIntentContextKey struct{}
+
 func persistStudioPDF(ctx context.Context, outputPath, key string) error {
+	if own, ok := ctx.Value(studioStorageIntentContextKey{}).(func(context.Context, string) error); ok {
+		if err := own(ctx, key); err != nil {
+			return err
+		}
+	}
 	return storage.SaveObjectFile(ctx, key, outputPath, "application/pdf")
 }
 
