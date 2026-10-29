@@ -248,6 +248,64 @@ func TestDurabilityCleanupRetryRestartAndDuplicate(t *testing.T) {
 		t.Fatalf("duplicate cleanup: %+v deletes=%d", row, deletes.Load())
 	}
 }
+
+func TestDurabilityCancelledTaskForwardsAfterRestartAndLostAcknowledgement(t *testing.T) {
+	for _, scenario := range []string{"cancelled", "completed", "different_owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			db := durabilityDB(t)
+			t.Setenv("APP_ENV", "test")
+			now := time.Now().UTC()
+			id := uuid.NewString()
+			owned := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", WorkerJobID: id, OwnerIdentity: "user:owner", SubmitPath: "/api/v1/jobs/submit", SourceKeys: `[]`, State: "active", NextAttemptAt: now.Add(-time.Second)}
+			if err := db.Create(&owned).Error; err != nil {
+				t.Fatal(err)
+			}
+			task := models.TaskCompletion{ID: id, OwnerIdentity: owned.OwnerIdentity, State: "cancelled", ExpiresAt: now.Add(time.Hour)}
+			if scenario == "completed" {
+				task.State = "completed"
+			}
+			if scenario == "different_owner" {
+				task.OwnerIdentity = "user:other"
+			}
+			if err := db.Create(&task).Error; err != nil {
+				t.Fatal(err)
+			}
+			var cancellations atomic.Int32
+			store := &DurabilityStore{DB: db}
+			client := testDurableClient(t, store, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					if r.URL.Path != "/api/v1/jobs/"+id+"/cancel" || r.Header.Get("X-Owner-Identity") != owned.OwnerIdentity || r.Header.Get("X-Worker-Body-Hash") == "" {
+						t.Error("cancellation lost exact ownership or signing")
+					}
+					if cancellations.Add(1) == 1 {
+						w.WriteHeader(503)
+						return
+					}
+					_, _ = io.WriteString(w, `{"id":"`+id+`","status":"cancel_requested"}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"id":"`+id+`","status":"queued"}`)
+			})
+			store.HTTP = client
+			first := store.runOnce(t.Context(), now)
+			restarted := &DurabilityStore{DB: db, HTTP: client, BaseURL: store.BaseURL}
+			second := restarted.runOnce(t.Context(), now.Add(2*time.Minute))
+			if scenario == "cancelled" {
+				if first == nil || second != nil || cancellations.Load() != 2 {
+					t.Fatalf("durable cancel not retried: first=%v second=%v sends=%d", first, second, cancellations.Load())
+				}
+			} else if first != nil || second != nil || cancellations.Load() != 0 {
+				t.Fatalf("unowned or terminal task cancelled: %v %v sends=%d", first, second, cancellations.Load())
+			}
+			if err := db.First(&owned, "id = ?", owned.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if owned.State != "active" || owned.ResultKey != "" {
+				t.Fatal("cancellation prematurely released result ownership")
+			}
+		})
+	}
+}
 func TestDurabilityCleanupPinsUnsettledAndSharedArtifacts(t *testing.T) {
 	db := durabilityDB(t)
 	now := time.Now()

@@ -584,13 +584,33 @@ func (s *DurabilityStore) runOnce(ctx context.Context, now time.Time) error {
 		if row.SubmitPath == "/internal/ocr/v2/jobs" {
 			endpoint = "/internal/ocr/v2/jobs/" + row.WorkerJobID
 		}
+		// The task row is the durable cancellation intent for known-ID legacy
+		// actors. Re-deliver it after restart or an ambiguous HTTP acknowledgement;
+		// cancellation never proves drainage or permits source/result deletion.
+		method := http.MethodGet
+		var intentErr error
+		if row.SubmitPath == "/api/v1/jobs/submit" && s.DB.Migrator().HasTable(&models.TaskCompletion{}) {
+			var task models.TaskCompletion
+			intentErr = s.DB.WithContext(ctx).Where("id = ? AND owner_identity = ? AND state = ?", row.WorkerJobID, row.OwnerIdentity, "cancelled").Limit(1).Find(&task).Error
+			if task.ID != "" && intentErr == nil {
+				method = http.MethodPost
+				endpoint += "/cancel"
+			}
+		}
 		base := s.BaseURL
 		if base == "" {
 			base = GetWorkerURL()
 		}
 		pollctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		req, err := http.NewRequestWithContext(context.WithValue(pollctx, reconciliationContextKey{}, true), http.MethodGet, strings.TrimRight(base, "/")+endpoint, nil)
+		var req *http.Request
+		err := intentErr
 		if err == nil {
+			req, err = http.NewRequestWithContext(context.WithValue(pollctx, reconciliationContextKey{}, true), method, strings.TrimRight(base, "/")+endpoint, nil)
+		}
+		if err == nil {
+			if method == http.MethodPost {
+				req.Header.Set("X-Owner-Identity", row.OwnerIdentity)
+			}
 			client := s.HTTP
 			if client == nil {
 				client = Client
