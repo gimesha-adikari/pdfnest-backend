@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"pdfnest-backend/internal/analyzer/engine/acquisition/gitquota"
 	"pdfnest-backend/internal/process"
 )
 
@@ -21,16 +22,22 @@ func isolatedGitEnv(home, temp string) []string {
 		"GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C"}
 }
 
-// A provider volume size or a filesystem scan cannot attest independent hard
-// block/inode quotas, write confinement, or finite exclusive leases. Until a
-// separately provisioned controller is integrated and qualified, required mode
-// must refuse admission. Unknown configuration also fails closed.
+// Required mode consumes independent administrator-owned configuration and
+// verifies kernel quota state through the fixed read-only broker before DNS.
+// Monitoring remains a separate defense and is never promoted to a hard quota.
 func checkGitStoragePolicy() error {
 	switch os.Getenv("ANALYZER_GIT_STORAGE_POLICY") {
 	case "", "monitored":
 		return nil
 	case "required":
-		return fmt.Errorf("%w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable)
+		manager, err := gitquota.Load(os.Getenv("ANALYZER_GIT_QUOTA_CONFIG"))
+		if err == nil {
+			err = manager.Probe()
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("%w: invalid Git storage policy", ErrGitAcquisitionFailed)
 	}
@@ -125,6 +132,11 @@ func runBoundedGit(ctx context.Context, cmd *exec.Cmd, root string, limits Acqui
 		}
 	}()
 	output, runErr := (process.Runner{}).RunCommand(runCtx, 0, cmd)
+	// A normally exiting Git parent must not leave descendants that can write
+	// after the sandbox is released. Confinement denies setsid/setpgid escape.
+	if cmd.Process != nil {
+		_ = process.KillProcessGroup(cmd.Process.Pid, 50*time.Millisecond)
+	}
 	close(stopped)
 	if err := <-monitored; err != nil {
 		return output, err

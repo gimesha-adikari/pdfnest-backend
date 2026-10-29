@@ -214,6 +214,9 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	if err := checkGitStoragePolicy(); err != nil {
 		return nil, err
 	}
+	if err := sandbox.admitGitQuota(); err != nil {
+		return nil, err
+	}
 	gitURL = strings.TrimSpace(gitURL)
 	if err := ValidateGitURL(gitURL); err != nil {
 		return nil, err
@@ -253,6 +256,9 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	cmd := exec.Command(gitBinary, args...)
 	cmd.Dir = home
 	cmd.Env = isolatedGitEnv(home, temp)
+	if err := sandbox.confineGit(cmd); err != nil {
+		return nil, err
+	}
 	output, err := runBoundedGit(cloneCtx, cmd, scratchRoot, limits)
 	if errors.Is(err, ErrGitResourceLimit) {
 		return nil, err
@@ -283,6 +289,12 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 
 		// 4. Stderr pattern classification
 		lowerOut := strings.ToLower(outStr)
+		if strings.Contains(lowerOut, "git_storage_unavailable:") {
+			return nil, fmt.Errorf("%w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable)
+		}
+		if strings.Contains(lowerOut, "disk quota exceeded") {
+			return nil, fmt.Errorf("%w: kernel quota refused allocation", ErrGitResourceLimit)
+		}
 		if strings.Contains(lowerOut, "authentication failed") ||
 			strings.Contains(lowerOut, "could not read username") ||
 			strings.Contains(lowerOut, "terminal prompts disabled") {
@@ -310,6 +322,9 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	revCmd := exec.Command(gitBinary, "-C", sandbox.RootPath, "rev-parse", "HEAD")
 	revCmd.Env = isolatedGitEnv(home, temp)
 	revCmd.Dir = home
+	if err := sandbox.confineGit(revCmd); err != nil {
+		return nil, err
+	}
 	if revOut, revErr := runBoundedGit(cloneCtx, revCmd, scratchRoot, limits); revErr == nil {
 		commitHash = strings.TrimSpace(string(revOut))
 	} else if errors.Is(revErr, ErrGitResourceLimit) {

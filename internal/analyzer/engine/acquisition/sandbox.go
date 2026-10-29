@@ -3,7 +3,9 @@ package acquisition
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"pdfnest-backend/internal/analyzer/engine/acquisition/gitquota"
 	"regexp"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ type Sandbox struct {
 	// scratchPath owns the repository and auxiliary writes for one execution.
 	// It is not a quota-backed slot or an execution confinement boundary.
 	scratchPath string
+	quotaLease  *gitquota.Lease
 	mu          sync.Mutex
 }
 
@@ -110,12 +113,65 @@ func (s *Sandbox) Cleanup() error {
 	}
 
 	s.closed = true
+	if s.quotaLease != nil {
+		return s.quotaLease.Release()
+	}
 	if s.scratchPath != "" {
 		return os.RemoveAll(s.scratchPath)
 	}
 	if s.RootPath != "" && s.RootPath != "/" {
 		return os.RemoveAll(s.RootPath)
 	}
+	return nil
+}
+
+// admitGitQuota replaces the as-yet-empty ordinary sandbox with one exclusive
+// preprovisioned project. Ownership survives clone success until final Cleanup.
+func (s *Sandbox) admitGitQuota() error {
+	if os.Getenv("ANALYZER_GIT_STORAGE_POLICY") != "required" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSandboxClosed
+	}
+	if s.quotaLease != nil {
+		return nil
+	}
+	manager, err := gitquota.Load(os.Getenv("ANALYZER_GIT_QUOTA_CONFIG"))
+	if err != nil {
+		return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+	}
+	lease, err := manager.Acquire()
+	if err != nil {
+		return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+	}
+	if err := os.RemoveAll(s.scratchPath); err != nil {
+		_ = lease.Release()
+		return err
+	}
+	s.scratchPath, s.RootPath, s.quotaLease = lease.Path(), filepath.Join(lease.Path(), "repository"), lease
+	if err := os.Mkdir(s.RootPath, 0700); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Sandbox) confineGit(cmd *exec.Cmd) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrSandboxClosed
+	}
+	if s.quotaLease == nil {
+		return nil
+	}
+	if cmd.Path != "/usr/bin/git" {
+		return fmt.Errorf("%w: required mode uses fixed system Git", ErrGitStorageUnavailable)
+	}
+	cmd.Args = append([]string{s.quotaLease.Helper(), "run", s.quotaLease.ConfigPath(), s.quotaLease.Path(), "--"}, cmd.Args[1:]...)
+	cmd.Path = s.quotaLease.Helper()
 	return nil
 }
 
