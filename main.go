@@ -30,6 +30,7 @@ import (
 	"pdfnest-backend/internal/studio"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/user"
+	workerClient "pdfnest-backend/internal/worker"
 	"strings"
 	"time"
 
@@ -75,6 +76,14 @@ func main() {
 	}
 
 	config.ConnectDB()
+	if config.IsManagedEnvironment() {
+		if err := config.ValidateBackendDurabilitySchema(config.DB); err != nil {
+			log.Fatalf("Backend durability schema requires an approved migration: %v", err)
+		}
+	}
+	if err := workerClient.ConfigureDurability(config.DB); err != nil {
+		log.Fatalf("Worker result durability unavailable: %v", err)
+	}
 	content.SeedSiteContent()
 
 	config.ConnectRedis()
@@ -220,6 +229,8 @@ func main() {
 
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	tasks.StartDurableCompletionWorker(watchdogCtx, time.Minute)
+	workerClient.StartDurability(watchdogCtx)
 	analyzerService.StartWatchdog(watchdogCtx)
 	studio.StartJobReconciliationWorker(watchdogCtx, studioJobs, 10*time.Second)
 

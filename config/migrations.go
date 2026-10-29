@@ -26,7 +26,8 @@ func schemaModels() []interface{} {
 		&ContactCategory{}, &ContactTicket{}, &models.HomePageContent{}, &models.SubscribePageContent{}, &models.DynamicToolItem{},
 		models.AboutPageContent{}, &analyzerModels.AnalyzerSession{}, &studioModels.StudioDocument{}, &studioModels.StudioAsset{},
 		&studioModels.StudioSnapshot{}, &studioModels.StudioVersion{}, &studioModels.StudioOperation{}, &studioModels.StudioJob{},
-		&studioModels.StudioEditorState{}, &studioModels.StudioSession{}, &studioModels.StudioExport{}, &studioModels.StudioStorageCleanupTask{},
+		&studioModels.StudioEditorState{}, &studioModels.StudioSession{}, &studioModels.StudioExport{}, &studioModels.StudioStorageCleanupTask{}, &studioModels.StudioStorageObjectRetirement{},
+		&models.TaskCompletion{}, &models.WorkerResultOwnership{},
 	}
 }
 
