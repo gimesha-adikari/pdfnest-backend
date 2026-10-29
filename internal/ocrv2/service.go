@@ -13,6 +13,7 @@ import (
 
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/uploads"
+	"pdfnest-backend/internal/worker"
 
 	"github.com/google/uuid"
 )
@@ -308,6 +309,13 @@ func (objectArtifactStore) UploadFile(path, key, contentType string) error {
 }
 
 func (objectArtifactStore) DeleteObject(ctx context.Context, key string) error {
+	pinned, err := worker.InputMayBeReferenced(ctx, key)
+	if err != nil {
+		return err
+	}
+	if pinned {
+		return nil
+	}
 	return storage.DeleteObject(ctx, key)
 }
 

@@ -523,3 +523,93 @@ func TestDurabilityRetirementSurvivesInterruptedDeleteAndBlocksSourceReuse(t *te
 		t.Fatal("retired key reached Worker")
 	}
 }
+
+func TestDurabilityInputRollbackRetainsAmbiguousDispatchAcrossRestart(t *testing.T) {
+	db := durabilityDB(t)
+	key := "jobs/ocr_v2/input/owned.pdf"
+	row := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: "ambiguous-input", RequestHash: "hash", SubmitPath: "/internal/ocr/v2/jobs", SourceKeys: mustJSONStringArray(key), State: "submitting"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	SetDurabilityStore(&DurabilityStore{DB: db})
+	pinned, err := InputMayBeReferenced(context.Background(), key)
+	if err != nil || !pinned {
+		t.Fatalf("ambiguous input rollback allowed: pinned=%v err=%v", pinned, err)
+	}
+	pinned, err = InputMayBeReferenced(context.Background(), "jobs/ocr_v2/input/unsubmitted.pdf")
+	if err != nil || pinned {
+		t.Fatalf("unsubmitted isolated input cannot roll back: pinned=%v err=%v", pinned, err)
+	}
+	if err := db.Model(&row).Update("state", "deleted").Error; err != nil {
+		t.Fatal(err)
+	}
+	pinned, err = InputMayBeReferenced(context.Background(), key)
+	if err != nil || pinned {
+		t.Fatalf("released input remains pinned: pinned=%v err=%v", pinned, err)
+	}
+}
+
+func TestDurabilityLegacyActorKnownIdentityRecoversLostACK(t *testing.T) {
+	db := durabilityDB(t)
+	jobID := uuid.NewString()
+	key := "jobs/markdown/output/generated.md"
+	var submitted atomic.Int32
+	var lost atomic.Bool
+	lost.Store(true)
+	s := &DurabilityStore{DB: db}
+	c := testDurableClient(t, s, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			submitted.Add(1)
+			var count int64
+			_ = db.Model(&models.WorkerResultOwnership{}).Where("worker_job_id = ? AND state = ?", jobID, "submitting").Count(&count).Error
+			if count != 1 {
+				t.Error("known actor identity absent before network")
+			}
+			if lost.Load() {
+				conn, _, _ := w.(http.Hijacker).Hijack()
+				_ = conn.Close()
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"`+jobID+`","status":"succeeded","result":{"artifact_key":"`+key+`"}}`)
+	})
+	payload, _ := json.Marshal(map[string]any{"actor_name": "pdf_to_markdown_job", "owner_identity": "user:owned", "args": []any{jobID, "jobs/markdown/source/" + jobID + ".pdf", "password", "eng", false, false, "document.pdf"}, "kwargs": map[string]any{}})
+	submit := func() error {
+		req, _ := http.NewRequest(http.MethodPost, s.BaseURL+"/api/v1/jobs/submit", bytes.NewReader(payload))
+		resp, err := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}
+	if err := submit(); err == nil {
+		t.Fatal("lost actor ACK accepted")
+	}
+	if err := submit(); err == nil {
+		t.Fatal("uncertain actor resubmitted")
+	}
+	if submitted.Load() != 1 {
+		t.Fatal("actor dispatched twice")
+	}
+	// A new process can poll the durable known identity without resubmitting.
+	restarted := &DurabilityStore{DB: db, HTTP: c, BaseURL: s.BaseURL}
+	SetDurabilityStore(restarted)
+	if err := restarted.runOnce(context.Background(), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var row models.WorkerResultOwnership
+	if err := db.First(&row, "worker_job_id = ?", jobID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.State != "terminal" || row.ResultKey != key {
+		t.Fatalf("lost ACK not reconciled: %+v", row)
+	}
+	if err := submit(); err != nil {
+		t.Fatal(err)
+	}
+	if submitted.Load() != 1 {
+		t.Fatal("recovered actor dispatched twice")
+	}
+}

@@ -74,7 +74,7 @@ func durableContext(ctx context.Context) (context.Context, context.CancelFunc) {
 
 func queuedSubmission(p string) bool {
 	switch p {
-	case "/internal/ocr/v2/jobs", "/api/v1/editor/extract", "/api/v1/editor/compile", "/api/v1/markup/highlight", "/api/v1/markup/underline", "/api/v1/markup/strikeout", "/api/v1/markdown/convert":
+	case "/internal/ocr/v2/jobs", "/api/v1/editor/extract", "/api/v1/editor/compile", "/api/v1/markup/highlight", "/api/v1/markup/underline", "/api/v1/markup/strikeout", "/api/v1/markdown/convert", "/api/v1/jobs/submit":
 		return true
 	}
 	return false
@@ -109,6 +109,21 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 		}
 		digest := sha256.Sum256(body)
 		hash := hex.EncodeToString(digest[:])
+		knownJobID := ""
+		if req.URL.Path == "/api/v1/jobs/submit" {
+			actor, _ := payload["actor_name"].(string)
+			args, ok := payload["args"].([]any)
+			if actor != "pdf_to_markdown_job" || !ok || len(args) < 2 {
+				return nil, errors.New("unsupported durable actor dispatch")
+			}
+			knownJobID, _ = args[0].(string)
+			source, _ := args[1].(string)
+			if !validJobID(knownJobID) || source != "jobs/markdown/source/"+knownJobID+".pdf" {
+				return nil, errors.New("invalid durable actor dispatch")
+			}
+			payload["source_key"] = source
+			payload["request_id"] = knownJobID
+		}
 		requestID, _ := payload["request_id"].(string)
 		if requestID == "" {
 			requestID = req.Header.Get("X-Backend-Dispatch-ID")
@@ -120,7 +135,7 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 		profile, _ := payload["profile"].(string)
 		sources := collectSourceKeys(payload)
 		encoded, _ := json.Marshal(sources)
-		row := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: requestID, RequestHash: hash, OwnerIdentity: owner, SubmitPath: req.URL.Path, Profile: profile, SourceKeys: string(encoded), State: "submitting", NextAttemptAt: time.Now()}
+		row := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: requestID, RequestHash: hash, OwnerIdentity: owner, SubmitPath: req.URL.Path, Profile: profile, SourceKeys: string(encoded), State: "submitting", WorkerJobID: knownJobID, NextAttemptAt: time.Now()}
 		dbctx, cancel := durableContext(req.Context())
 		defer cancel()
 		var created *gorm.DB
@@ -160,10 +175,10 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 			if row.RequestHash != hash || row.SubmitPath != req.URL.Path || row.OwnerIdentity != owner {
 				return nil, errors.New("worker dispatch idempotency conflict")
 			}
-			if row.WorkerJobID == "" {
+			if row.WorkerJobID == "" || row.State == "submitting" || row.State == "uncertain" {
 				return nil, ErrDispatchUncertain
 			}
-			ack, _ := json.Marshal(map[string]any{"job_id": row.WorkerJobID, "status": "queued", "owner_identity": row.OwnerIdentity, "profile": row.Profile})
+			ack, _ := json.Marshal(map[string]any{"success": true, "job_id": row.WorkerJobID, "status": "queued", "owner_identity": row.OwnerIdentity, "profile": row.Profile})
 			return responseJSON(req, ack), nil
 		}
 		resp, err := base.RoundTrip(req)
@@ -186,7 +201,16 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 		var ack struct {
 			JobID string `json:"job_id"`
 		}
-		if json.Unmarshal(data, &ack) != nil || !validJobID(ack.JobID) {
+		decodeErr := json.Unmarshal(data, &ack)
+		if ack.JobID == "" && knownJobID != "" {
+			var success struct {
+				Success bool `json:"success"`
+			}
+			if json.Unmarshal(data, &success) == nil && success.Success {
+				ack.JobID = knownJobID
+			}
+		}
+		if decodeErr != nil || !validJobID(ack.JobID) || (knownJobID != "" && ack.JobID != knownJobID) {
 			return nil, ErrDispatchUncertain
 		}
 		if err = s.DB.WithContext(dbctx).Model(&row).Updates(map[string]any{"worker_job_id": ack.JobID, "state": "active", "status_json": string(data)}).Error; err != nil {
@@ -312,7 +336,7 @@ func validResultKey(row *models.WorkerResultOwnership, key string) bool {
 	case "/api/v1/markup/highlight", "/api/v1/markup/underline", "/api/v1/markup/strikeout":
 		prefix := "jobs/markup/" + path.Base(row.SubmitPath) + "/output/"
 		return strings.HasPrefix(key, prefix) && path.Ext(key) == ".pdf" && !strings.Contains(strings.TrimPrefix(key, prefix), "/")
-	case "/api/v1/markdown/convert":
+	case "/api/v1/markdown/convert", "/api/v1/jobs/submit":
 		return strings.HasPrefix(key, "jobs/markdown/output/") && path.Ext(key) == ".md" && !strings.Contains(strings.TrimPrefix(key, "jobs/markdown/output/"), "/")
 	}
 	return false
@@ -348,7 +372,7 @@ func (s *DurabilityStore) recordStatus(ctx context.Context, id string, data []by
 		if row.State == "deleted" || row.State == "deleting" {
 			return nil
 		}
-		if row.OwnerIdentity != "" && status.Owner != row.OwnerIdentity {
+		if row.SubmitPath == "/internal/ocr/v2/jobs" && row.OwnerIdentity != "" && status.Owner != row.OwnerIdentity {
 			return errors.New("worker status owner mismatch")
 		}
 		key := status.ResultKey
@@ -366,7 +390,7 @@ func (s *DurabilityStore) recordStatus(ctx context.Context, id string, data []by
 		if row.State == "terminal" {
 			return nil
 		}
-		updates := map[string]any{"status_json": string(data), "next_attempt_at": now.Add(time.Minute), "last_error": ""}
+		updates := map[string]any{"state": "active", "status_json": string(data), "next_attempt_at": now.Add(time.Minute), "last_error": ""}
 		if terminalStatus(status.Status) {
 			if row.ResultKey != "" && key != "" && row.ResultKey != key {
 				return errors.New("worker retry changed owned artifact; reconciliation required")
@@ -490,6 +514,12 @@ func workerPins(tx *gorm.DB, row *models.WorkerResultOwnership, now time.Time) (
 		}
 	}
 	if tx.Migrator().HasTable(&models.TaskCompletion{}) {
+		if err := tx.Model(&models.TaskCompletion{}).Where("id = ? AND state IN ?", row.WorkerJobID, []string{"active", "publishing"}).Count(&count).Error; err != nil {
+			return true, err
+		}
+		if count > 0 {
+			return true, nil
+		}
 		// Pending publication may still be consuming an owned Worker artifact. Pin
 		// by owner as well as exact key until its durable settlement resolves.
 		condition := "(result_key = ? OR result_key = ?) AND (state IN ? OR expires_at > ?)"
@@ -532,7 +562,7 @@ func RunDurabilityOnce(ctx context.Context, now time.Time) error {
 }
 func (s *DurabilityStore) runOnce(ctx context.Context, now time.Time) error {
 	var rows []models.WorkerResultOwnership
-	if err := s.DB.WithContext(ctx).Where("state IN ? AND next_attempt_at <= ?", []string{"active", "uncertain_result"}, now).Order("next_attempt_at, id").Limit(50).Find(&rows).Error; err != nil {
+	if err := s.DB.WithContext(ctx).Where("state IN ? AND worker_job_id <> '' AND next_attempt_at <= ?", []string{"active", "uncertain_result", "submitting", "uncertain"}, now).Order("next_attempt_at, id").Limit(50).Find(&rows).Error; err != nil {
 		return err
 	}
 	var firstErr error
@@ -571,7 +601,7 @@ func (s *DurabilityStore) runOnce(ctx context.Context, now time.Time) error {
 		cancel()
 		if err != nil {
 			// Keep the dispatch alive; never infer actor termination from a Redis 404.
-			updateErr := s.DB.WithContext(ctx).Model(&models.WorkerResultOwnership{}).Where("id = ? AND state IN ?", row.ID, []string{"active", "uncertain_result"}).Updates(map[string]any{"next_attempt_at": now.Add(time.Minute), "last_error": "worker status requires reconciliation"}).Error
+			updateErr := s.DB.WithContext(ctx).Model(&models.WorkerResultOwnership{}).Where("id = ? AND state IN ?", row.ID, []string{"active", "uncertain_result", "submitting", "uncertain"}).Updates(map[string]any{"next_attempt_at": now.Add(time.Minute), "last_error": "worker status requires reconciliation"}).Error
 			if firstErr == nil {
 				if updateErr != nil {
 					firstErr = updateErr
@@ -727,3 +757,24 @@ func lockStorageKeys(tx *gorm.DB, keys []string) error {
 }
 
 type reconciliationContextKey struct{}
+
+// InputMayBeReferenced is the rollback guard for callers that staged an input
+// before dispatch. An HTTP error does not prove that a Worker failed admission.
+// Missing managed authority and database errors conservatively retain inputs.
+func InputMayBeReferenced(ctx context.Context, key string) (bool, error) {
+	s := currentDurabilityStore()
+	if s == nil || s.DB == nil {
+		if durabilityRequired() {
+			return true, ErrDurabilityUnavailable
+		}
+		return false, nil
+	}
+	dbctx, cancel := durableContext(ctx)
+	defer cancel()
+	var count int64
+	err := s.DB.WithContext(dbctx).Model(&models.WorkerResultOwnership{}).Where("state <> ? AND source_keys::jsonb @> ?::jsonb", "deleted", mustJSONStringArray(key)).Count(&count).Error
+	if err != nil {
+		return true, ErrDurabilityUnavailable
+	}
+	return count > 0, nil
+}
