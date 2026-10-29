@@ -35,7 +35,7 @@ for package in config studio billing tasks ocr worker conversion; do
     worker)
       WORKER_DURABILITY_TEST_DSN="$DATABASE_URL" go test -race ./internal/worker -count=1 -timeout=3m ;;
     conversion)
-      go test -race ./internal/conversion -run 'Durab|Async|Billing|Reservation' -count=1 -timeout=3m ;;
+      go test -race ./internal/conversion -run 'Durab|Async|Billing|Reservation|PDFToMarkdown' -count=1 -timeout=3m ;;
     *) go test -race "./internal/$package" -count=1 -timeout=5m ;;
   esac
 done

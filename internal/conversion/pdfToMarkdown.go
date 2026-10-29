@@ -171,8 +171,20 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 		})
 	}
 
+	if err := tasks.Registry.AdmitDurable(c.UserContext(), taskId, ownerIdentity, reservationID, string(reservationKind)); err != nil {
+		_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
+		_ = tasks.Registry.Set(taskId, "FAILED", 0, "", "Durable task admission unavailable.")
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"code": "TASK_DURABILITY_UNAVAILABLE", "message": "Unable to durably admit this task."})
+	}
+	// Commit the idempotency reference before any ambiguous external effect.
+	if err := idempotency.SetTaskID(c, taskId, nil); err != nil {
+		log.Printf("[PDF TO MARKDOWN IDEMPOTENCY] task reference requires reconciliation: %s", taskId)
+	}
+
 	payload := map[string]interface{}{
-		"actor_name": "pdf_to_markdown_job",
+		"actor_name":     "pdf_to_markdown_job",
+		"owner_identity": ownerIdentity,
 		"args": []interface{}{
 			taskId,
 			sourceKey,
@@ -214,22 +226,16 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := worker.Do(req)
-	if err != nil || resp.StatusCode >= 400 {
-		releaseReservation()
-		tasks.Registry.Set(taskId, "FAILED", 0, "", "Failed to submit job to worker")
-		idempotency.Release(c, nil)
-		errMsg := "Failed to submit job to worker"
-		if err != nil {
-			errMsg += ": " + err.Error()
-		} else if resp != nil {
-			errMsg += fmt.Sprintf(" (HTTP %d)", resp.StatusCode)
-		}
-		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
-			"code":    "WORKER_DISPATCH_ERR",
-			"message": errMsg,
-		})
+	if resp != nil {
+		defer resp.Body.Close()
 	}
-	defer resp.Body.Close()
+	if err != nil || resp.StatusCode >= 400 {
+		// Admission may have happened before an HTTP/network failure. Keep both
+		// reservation and source pinned; the known Worker ID can be reconciled.
+		log.Printf("[PDF TO MARKDOWN] submission acknowledgement requires reconciliation: %s", taskId)
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "job_id": taskId, "task_id": taskId, "status": "PROCESSING", "downloadToken": downloadToken})
+	}
+
 	if err := idempotency.SetTaskID(c, taskId, nil); err != nil {
 		log.Printf("[PDF TO MARKDOWN IDEMPOTENCY] failed to save task ID %s: %v", taskId, err)
 	}

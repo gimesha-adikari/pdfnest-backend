@@ -45,6 +45,7 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 		&models.StudioStorageCleanupTask{},
 		&models.StudioStorageObjectRetirement{},
 		&backendmodels.WorkerResultOwnership{},
+		&backendmodels.TaskCompletion{},
 		&models.StudioEditorState{},
 		&models.StudioJob{},
 	)

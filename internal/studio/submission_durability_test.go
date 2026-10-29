@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 	"pdfnest-backend/internal/edit"
 	"pdfnest-backend/internal/identity"
+	backendModels "pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/studio/models"
 )
 
@@ -338,4 +339,19 @@ func TestAcknowledgedSuccessRequiresPublicationBeforeCleanup(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, persisted.ReconciledAt)
 	require.NotNil(t, persisted.ResultVersionID)
+}
+
+func TestStorageCleanupPreservesUnresolvedTaskArtifact(t *testing.T) {
+	_, repo := getTestServiceAndRepository(t)
+	db := repo.(*gormRepository).db
+	key := "outputs/tasks/held/result.pdf"
+	row := backendModels.TaskCompletion{ID: "held", OwnerIdentity: "owner", DownloadToken: "token", State: "publishing", ResultKey: key}
+	require.NoError(t, db.Create(&row).Error)
+	retired, err := repo.(*gormRepository).RetireStorageObject(context.Background(), key)
+	require.NoError(t, err)
+	require.False(t, retired)
+	require.NoError(t, db.Model(&row).Update("state", "deleted").Error)
+	retired, err = repo.(*gormRepository).RetireStorageObject(context.Background(), key)
+	require.NoError(t, err)
+	require.True(t, retired)
 }

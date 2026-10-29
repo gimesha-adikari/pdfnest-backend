@@ -677,6 +677,7 @@ func (r *gormRepository) StorageObjectReferenced(ctx context.Context, key string
 		r.db.WithContext(ctx).Model(&models.StudioAsset{}).Where("r2_key = ?", key),
 		r.db.WithContext(ctx).Model(&models.StudioExport{}).Where("r2_key = ?", key),
 		r.db.WithContext(ctx).Model(&models.StudioJob{}).Where("source_key = ? OR payload_key = ? OR pending_object_keys @> ?::jsonb", key, key, string(mustJSONKey(key))),
+		r.db.WithContext(ctx).Table("task_completions").Where("result_key = ? AND state <> ?", key, "deleted"),
 		r.db.WithContext(ctx).Table("worker_result_ownerships").Where("state <> 'deleted' AND (source_keys::jsonb @> ?::jsonb OR result_key = ? OR metadata_key = ?)", string(mustJSONKey(key)), key, key),
 	} {
 		var count int64

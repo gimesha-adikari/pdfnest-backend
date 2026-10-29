@@ -23,6 +23,8 @@ import (
 	"pdfnest-backend/internal/conversion"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
+	"pdfnest-backend/internal/models"
+	studioModels "pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/worker"
 
@@ -90,13 +92,14 @@ func TestPDFToMarkdownRouteAliasesAllocateOnceForGuest(t *testing.T) {
 			_, err = resultFile.WriteString("# Result\n")
 			require.NoError(t, err)
 			require.NoError(t, resultFile.Close())
-			require.NoError(t, tasks.Registry.Set(accepted.TaskID, "COMPLETED", 100, resultFile.Name(), ""))
+			require.NoError(t, tasks.Registry.PublishArtifact(context.Background(), accepted.TaskID, "outputs/tasks/"+accepted.TaskID+"/result.md", resultFile.Name(), "text/markdown"))
 
 			unauthorizedStatus := getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, "other-guest")
 			require.Equal(t, fiber.StatusForbidden, unauthorizedStatus)
 			state, err = redisClient.HGetAll(context.Background(), stateKey).Result()
 			require.NoError(t, err)
-			require.Equal(t, "4", state["pending_3h"], "an unauthorized download must not settle billing")
+			require.Equal(t, "0", state["pending_3h"], "artifact publication settled once before any download")
+			require.Equal(t, "4", state["used_3h"], "unauthorized download cannot change the committed publication")
 
 			t.Setenv("BILLING_MODE", "free")
 			require.Equal(t, fiber.StatusOK, getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, guestID))
@@ -153,7 +156,7 @@ func TestPDFToMarkdownRouteAliasesCreateOneAccountReservation(t *testing.T) {
 			_, err = resultFile.WriteString("# Result\n")
 			require.NoError(t, err)
 			require.NoError(t, resultFile.Close())
-			require.NoError(t, tasks.Registry.Set(accepted.TaskID, "COMPLETED", 100, resultFile.Name(), ""))
+			require.NoError(t, tasks.Registry.PublishArtifact(context.Background(), accepted.TaskID, "outputs/tasks/"+accepted.TaskID+"/result.md", resultFile.Name(), "text/markdown"))
 			require.Equal(t, fiber.StatusForbidden, getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, "other-user"))
 			t.Setenv("BILLING_MODE", "free")
 			require.Equal(t, fiber.StatusOK, getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, userID))
@@ -171,7 +174,7 @@ func TestPDFToMarkdownRouteAliasesCreateOneAccountReservation(t *testing.T) {
 	}
 }
 
-func TestPDFToMarkdownAccountWorkerFailureReleasesReservation(t *testing.T) {
+func TestPDFToMarkdownAccountUncertainWorkerAcknowledgementRetainsReservation(t *testing.T) {
 	db := setupGIM11IsolatedTestDB(t)
 	t.Setenv("BILLING_MODE", "normal")
 	setPDFToMarkdownR2Environment(t)
@@ -181,11 +184,11 @@ func TestPDFToMarkdownAccountWorkerFailureReleasesReservation(t *testing.T) {
 	response, body := postPDFToMarkdownRoute(
 		t, app, "/api/conversion/pdf-to-markdown", userID, string(identity.TypeUser),
 	)
-	require.Equal(t, fiber.StatusBadGateway, response, body)
+	require.Equal(t, fiber.StatusAccepted, response, body)
 	var reservations []config.BillingReservation
 	require.NoError(t, db.Where("user_id = ?", userID).Find(&reservations).Error)
 	require.Len(t, reservations, 1)
-	require.Equal(t, "released", reservations[0].Status)
+	require.Equal(t, "reserved", reservations[0].Status)
 	require.Equal(t, 4, reservations[0].Units)
 	require.Equal(t, 4, reservations[0].PlanUnits)
 	require.Zero(t, reservations[0].CreditUnits)
@@ -259,7 +262,7 @@ func TestPDFToMarkdownReleasesReservationWhenTaskPersistenceFails(t *testing.T) 
 	require.Equal(t, deletesBefore+1, pdfToMarkdownR2DeleteRequest.Load(), "uploaded source object should be cleaned when task persistence fails")
 }
 
-func TestPDFToMarkdownWorkerSubmissionFailureReleasesGuestReservation(t *testing.T) {
+func TestPDFToMarkdownUncertainWorkerAcknowledgementRetainsGuestReservation(t *testing.T) {
 	t.Setenv("BILLING_MODE", "normal")
 	setPDFToMarkdownR2Environment(t)
 	app, redisClient, workerCalls, workerStatus := newPDFToMarkdownRouteTestApp(t)
@@ -269,13 +272,13 @@ func TestPDFToMarkdownWorkerSubmissionFailureReleasesGuestReservation(t *testing
 	response, body := postPDFToMarkdownRoute(
 		t, app, "/api/conversion/pdf-to-markdown", guestID, string(identity.TypeGuest),
 	)
-	require.Equal(t, fiber.StatusBadGateway, response, body)
-	require.Contains(t, body, `"code":"WORKER_DISPATCH_ERR"`)
+	require.Equal(t, fiber.StatusAccepted, response, body)
+	require.Contains(t, body, `"status":"PROCESSING"`)
 	require.EqualValues(t, 1, workerCalls.Load())
 
 	state, err := redisClient.HGetAll(context.Background(), "platen:guestquota:state:"+guestID).Result()
 	require.NoError(t, err)
-	require.Equal(t, "0", state["pending_3h"], "worker failure must release the single reservation")
+	require.Equal(t, "4", state["pending_3h"], "ambiguous dispatch must retain its single reservation")
 	require.Equal(t, "0", state["used_3h"])
 	keys, err := redisClient.Keys(context.Background(), tasks.TaskKeyPrefix+"*").Result()
 	require.NoError(t, err)
@@ -284,12 +287,12 @@ func TestPDFToMarkdownWorkerSubmissionFailureReleasesGuestReservation(t *testing
 	task, err := tasks.Registry.Get(taskID)
 	require.NoError(t, err)
 	require.NotNil(t, task)
-	require.Equal(t, "FAILED", task.Status)
+	require.Equal(t, "QUEUED", task.Status)
 	require.NotEmpty(t, task.ReservationID)
 	require.Equal(t, string(billing.ReservationKindGuest), task.ReservationKind)
 	reservationKeys, err := redisClient.Keys(context.Background(), "platen:guestquota:res:*").Result()
 	require.NoError(t, err)
-	require.Empty(t, reservationKeys)
+	require.Len(t, reservationKeys, 1)
 }
 
 func TestPDFToMarkdownFreeGuestTaskStaysUnbilledAfterSwitchToNormal(t *testing.T) {
@@ -322,7 +325,7 @@ func TestPDFToMarkdownFreeGuestTaskStaysUnbilledAfterSwitchToNormal(t *testing.T
 	_, err = resultFile.WriteString("# Free Result\n")
 	require.NoError(t, err)
 	require.NoError(t, resultFile.Close())
-	require.NoError(t, tasks.Registry.Set(accepted.TaskID, "COMPLETED", 100, resultFile.Name(), ""))
+	require.NoError(t, tasks.Registry.PublishArtifact(context.Background(), accepted.TaskID, "outputs/tasks/"+accepted.TaskID+"/result.md", resultFile.Name(), "text/markdown"))
 	t.Setenv("BILLING_MODE", "normal")
 	require.Equal(t, fiber.StatusOK, getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, guestID))
 	quotaKeys, err = redisClient.Keys(context.Background(), "platen:guestquota:*").Result()
@@ -358,10 +361,12 @@ func TestPDFToMarkdownFreeAccountTaskStaysUnbilledAfterSwitchToNormal(t *testing
 	_, err = resultFile.WriteString("# Free Account Result\n")
 	require.NoError(t, err)
 	require.NoError(t, resultFile.Close())
-	require.NoError(t, tasks.Registry.Set(accepted.TaskID, "COMPLETED", 100, resultFile.Name(), ""))
+	require.NoError(t, tasks.Registry.PublishArtifact(context.Background(), accepted.TaskID, "outputs/tasks/"+accepted.TaskID+"/result.md", resultFile.Name(), "text/markdown"))
 	t.Setenv("BILLING_MODE", "normal")
 	require.Equal(t, fiber.StatusOK, getPDFToMarkdownTaskDownload(t, app, accepted.TaskID, userID))
-	require.Nil(t, config.DB, "empty-ID finalization must not need billing PostgreSQL")
+	var charges int64
+	require.NoError(t, config.DB.Model(&config.UsageLog{}).Where("user_id::text = ?", userID).Count(&charges).Error)
+	require.Zero(t, charges, "free-mode durable catalog writes must never create a billing charge")
 }
 
 func TestPDFToMarkdownStaleTaskReleasesStoredGuestReservation(t *testing.T) {
@@ -506,6 +511,11 @@ func TestPDFToMarkdownValidationFailureReleasesIdempotencyKey(t *testing.T) {
 
 func newPDFToMarkdownRouteTestApp(t *testing.T) (*fiber.App, *redis.Client, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
+	if config.DB == nil {
+		setupGIM11IsolatedTestDB(t)
+	}
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	previousRedis := config.Redis
@@ -724,7 +734,13 @@ func setupGIM11IsolatedTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("GIM6_TEST_DATABASE_URL"))
 	if dsn == "" {
+		dsn = strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	}
+	if dsn == "" {
 		t.Skip("GIM6_TEST_DATABASE_URL is unset; isolated PDF-to-Markdown PostgreSQL assertions were not run")
+	}
+	if strings.HasPrefix(dsn, "host=/tmp/platen-") && strings.Contains(dsn, "user=platen_") {
+		return openGIM11DurabilityDB(t, dsn)
 	}
 	parsed, err := url.Parse(dsn)
 	require.NoError(t, err, "GIM6_TEST_DATABASE_URL must be a PostgreSQL URL")
@@ -740,14 +756,16 @@ func setupGIM11IsolatedTestDB(t *testing.T) *gorm.DB {
 	require.True(t, strings.HasPrefix(databaseName, "test_") || strings.HasSuffix(databaseName, "_test"),
 		"GIM6_TEST_DATABASE_URL database name must start with test_ or end with _test")
 
+	return openGIM11DurabilityDB(t, dsn)
+}
+func openGIM11DurabilityDB(t *testing.T, dsn string) *gorm.DB {
+	t.Helper()
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Skipf("explicitly configured isolated local PostgreSQL is unavailable: %v", err)
-	}
-	require.NoError(t, db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}))
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}, &models.TaskCompletion{}, &models.WorkerResultOwnership{}, &studioModels.StudioStorageObjectRetirement{}))
 	previousDB := config.DB
 	config.DB = db
-	t.Cleanup(func() { config.DB = previousDB })
+	t.Cleanup(func() { config.DB = previousDB; pool, _ := db.DB(); _ = pool.Close() })
 	return db
 }
 

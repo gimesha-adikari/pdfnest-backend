@@ -129,8 +129,21 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 		if row.ResultKey != "" && row.ResultKey != key {
 			return errors.New("artifact key already chosen")
 		}
-		if row.State == "publishing" && (row.ArtifactSHA256 != fingerprint || row.ArtifactBytes != size) {
+		if row.State == "publishing" && row.ResultKey != "" && (row.ArtifactSHA256 != fingerprint || row.ArtifactBytes != size) {
 			return errors.New("artifact identity already chosen")
+		}
+
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?,81807))", key).Error; err != nil {
+			return err
+		}
+		var retired int64
+		if tx.Migrator().HasTable("studio_storage_object_retirements") {
+			if err := tx.Table("studio_storage_object_retirements").Where("object_key = ?", key).Count(&retired).Error; err != nil {
+				return err
+			}
+			if retired != 0 {
+				return errors.New("artifact key is permanently retired")
+			}
 		}
 		row.ArtifactSHA256 = fingerprint
 		row.ArtifactBytes = size
@@ -266,6 +279,11 @@ func transitionDurable(ctx context.Context, id, owner, state, message string) (*
 		if (owner != "" || state == "cancelled") && row.OwnerIdentity != "" && owner != row.OwnerIdentity {
 			return nil
 		}
+		if row.State == "failed" && state == "failed" && message != "" {
+			row.Error = message
+			changed = true
+			return tx.Save(&row).Error
+		}
 		if row.State != "active" {
 			return nil
 		}
@@ -284,44 +302,97 @@ func (r *TaskRegistry) SweepDurableCompletions(ctx context.Context, now time.Tim
 	if config.DB == nil {
 		return errors.New("durable task database unavailable")
 	}
-	var rows []models.TaskCompletion
-	if err := config.DB.WithContext(ctx).Where("state = ? OR (state IN ? AND expires_at <= ?)", "publishing", []string{"completed", "deleting"}, now).Order("updated_at ASC").Limit(100).Find(&rows).Error; err != nil {
-		return err
-	}
 	var firstErr error
-	for _, row := range rows {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	// Separate finite queues prevent indefinitely uncertain publication from
+	// starving active recovery or expired completed-artifact reclamation.
+	for _, state := range []string{"active", "publishing", "retained"} {
+		var rows []models.TaskCompletion
+		query := config.DB.WithContext(ctx)
+		if state == "retained" {
+			query = query.Where("state IN ? AND expires_at <= ?", []string{"completed", "deleting"}, now)
+		} else {
+			query = query.Where("state = ?", state)
 		}
-		if row.State == "publishing" {
-			if err := r.ReconcileCompletion(ctx, row.ID); err != nil && firstErr == nil {
+		if err := query.Order("updated_at ASC, id ASC").Limit(100).Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			// Move attempted, still-pending records behind untouched records. This is
+			// scheduling evidence only; it never authorizes deletion or settlement.
+			if updateErr := config.DB.WithContext(ctx).Model(&models.TaskCompletion{}).Where("id = ? AND state = ?", row.ID, row.State).UpdateColumn("updated_at", now).Error; updateErr != nil {
+				return updateErr
+			}
+			var err error
+			switch row.State {
+			case "active":
+				err = r.recoverActiveTask(ctx, &row, now)
+			case "publishing":
+				if row.ResultKey == "" {
+					err = r.reconcileExternalTask(ctx, &row)
+				} else {
+					err = r.ReconcileCompletion(ctx, row.ID)
+				}
+			default:
+				err = r.retireTaskArtifact(ctx, row.ID, now)
+			}
+			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-			continue
-		}
-		err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			var current models.TaskCompletion
-			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", row.ID).Error; err != nil {
-				return err
-			}
-			if (current.State != "completed" && current.State != "deleting") || current.ExpiresAt.After(now) {
-				return nil
-			}
-			// Ownership is exclusive to one task prefix; no shared inputs are accepted.
-			if !strings.HasPrefix(current.ResultKey, "outputs/tasks/"+current.ID+"/") {
-				return errors.New("invalid persisted artifact ownership")
-			}
-			if err := storage.DeleteObject(ctx, current.ResultKey); err != nil {
-				return err
-			}
-			current.State = "deleted"
-			return tx.Save(&current).Error
-		})
-		if err != nil && firstErr == nil {
-			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+func (r *TaskRegistry) recoverActiveTask(ctx context.Context, row *models.TaskCompletion, now time.Time) error {
+	if config.DB.Migrator().HasTable(&models.WorkerResultOwnership{}) {
+		var owned models.WorkerResultOwnership
+		if err := config.DB.WithContext(ctx).Where("worker_job_id = ?", row.ID).Limit(1).Find(&owned).Error; err != nil {
+			return err
+		}
+		if owned.ID != "" {
+			return r.reconcileExternalTask(ctx, row)
+		}
+	}
+	if row.ExpiresAt.After(now) {
+		return nil
+	}
+	changed := false
+	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current models.TaskCompletion
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", row.ID).Error; err != nil {
+			return err
+		}
+		if current.State != "active" || current.ExpiresAt.After(now) {
+			return nil
+		}
+
+		if tx.Migrator().HasTable(&models.WorkerResultOwnership{}) {
+			var admitted int64
+			if err := tx.Model(&models.WorkerResultOwnership{}).Where("worker_job_id = ?", row.ID).Count(&admitted).Error; err != nil {
+				return err
+			}
+			if admitted > 0 {
+				return nil
+			}
+		}
+		// An external admission racing recovery is protected by its known task row:
+		// external dispatch must follow this row's active decision.
+		current.State = "failed"
+		current.Error = "Task expired before artifact publication."
+		changed = true
+		return tx.Save(&current).Error
+	})
+	if err != nil {
+		return err
+	}
+	if changed && row.ReservationID != "" && StaleTaskBillingHandlerWithKind != nil {
+		StaleTaskBillingHandlerWithKind(row.ReservationID, row.ReservationKind)
+	}
+	return nil
 }
 
 func StartDurableCompletionWorker(ctx context.Context, interval time.Duration) {
@@ -350,7 +421,7 @@ func marshalDurableStatus(row *models.TaskCompletion) ([]byte, error) {
 	return json.Marshal(durableStatus(row))
 }
 
-func allowDurableUpdate(id, status string) (bool, error) {
+func allowDurableUpdate(id, status, message string) (bool, error) {
 	row, err := durableTask(context.Background(), id)
 	if err != nil {
 		return false, err
@@ -359,11 +430,147 @@ func allowDurableUpdate(id, status string) (bool, error) {
 		return true, nil
 	}
 	if status == "FAILED" || status == "CANCELLED" {
-		_, changed, err := transitionDurable(context.Background(), id, "", strings.ToLower(status), "Task processing failed or cancelled.")
+		if message == "" {
+			message = "Task processing failed or cancelled."
+		}
+		_, changed, err := transitionDurable(context.Background(), id, "", strings.ToLower(status), message)
 		return changed, err
 	}
 	if status == "COMPLETED" {
 		return row.State == "completed", nil
 	}
 	return row.State == "active", nil
+}
+
+func (r *TaskRegistry) reconcileExternalTask(ctx context.Context, row *models.TaskCompletion) error {
+	var owned models.WorkerResultOwnership
+	err := config.DB.WithContext(ctx).Where("worker_job_id = ?", row.ID).First(&owned).Error
+	if err != nil {
+		return err
+	}
+	if owned.State != "terminal" {
+		return ErrSettlementPending
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(owned.StatusJSON), &status); err != nil {
+		return err
+	}
+	if status.Status == "succeeded" {
+		if !strings.HasPrefix(owned.ResultKey, "jobs/markdown/output/") || strings.Contains(owned.ResultKey, "..") {
+			return errors.New("unexpected legacy Worker artifact namespace")
+		}
+		path, cleanup, err := storage.ResolveObject(ctx, owned.ResultKey, "task-worker-result-", ".md")
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		return r.PublishArtifact(ctx, row.ID, "outputs/tasks/"+row.ID+"/result.md", path, "text/markdown; charset=utf-8")
+	}
+	if status.Status != "failed" && status.Status != "cancelled" {
+		return ErrSettlementPending
+	}
+	err = config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current models.TaskCompletion
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, "id = ?", row.ID).Error; err != nil {
+			return err
+		}
+		if current.State != "active" || current.ResultKey != "" {
+			return nil
+		}
+		current.State = status.Status
+		current.Error = "Worker processing did not publish a usable artifact."
+		return tx.Save(&current).Error
+	})
+	if err != nil {
+		return err
+	}
+	if StaleTaskBillingHandlerWithKind != nil {
+		StaleTaskBillingHandlerWithKind(row.ReservationID, row.ReservationKind)
+	}
+	return nil
+}
+
+func (r *TaskRegistry) retireTaskArtifact(ctx context.Context, id string, now time.Time) error {
+	claimed := false
+	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row models.TaskCompletion
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if (row.State != "completed" && row.State != "deleting") || row.ExpiresAt.After(now) {
+			return nil
+		}
+		if row.State == "deleting" {
+			claimed = true
+			return nil
+		}
+		key := row.ResultKey
+		if !strings.HasPrefix(key, "outputs/tasks/"+id+"/") || strings.Contains(key, "..") {
+			return errors.New("invalid persisted artifact ownership")
+		}
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?,81807))", key).Error; err != nil {
+			return err
+		}
+		for _, table := range []string{"studio_assets", "studio_exports"} {
+			if !tx.Migrator().HasTable(table) {
+				continue
+			}
+			var count int64
+			if err := tx.Table(table).Where("r2_key = ?", key).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return nil
+			}
+		}
+		if tx.Migrator().HasTable("studio_jobs") {
+			encoded, _ := json.Marshal([]string{key})
+			var count int64
+			if err := tx.Table("studio_jobs").Where("source_key = ? OR payload_key = ? OR pending_object_keys @> ?::jsonb", key, key, string(encoded)).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return nil
+			}
+		}
+		if tx.Migrator().HasTable(&models.WorkerResultOwnership{}) {
+			encoded, _ := json.Marshal([]string{key})
+			var count int64
+			if err := tx.Model(&models.WorkerResultOwnership{}).Where("state <> ? AND (source_keys::jsonb @> ?::jsonb OR result_key = ? OR metadata_key = ?)", "deleted", string(encoded), key, key).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return nil
+			}
+		}
+		// This tombstone and the deletion decision commit before storage I/O.
+		if err := tx.Table("studio_storage_object_retirements").Clauses(clause.OnConflict{DoNothing: true}).Create(map[string]any{"object_key": key, "created_at": now}).Error; err != nil {
+			return err
+		}
+		row.State = "deleting"
+		if err := tx.Save(&row).Error; err != nil {
+			return err
+		}
+		claimed = true
+		return nil
+	})
+	if err != nil || !claimed {
+		return err
+	}
+	return config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row models.TaskCompletion
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if row.State != "deleting" {
+			return nil
+		}
+		if err := storage.DeleteObject(ctx, row.ResultKey); err != nil {
+			return err
+		}
+		row.State = "deleted"
+		return tx.Save(&row).Error
+	})
 }

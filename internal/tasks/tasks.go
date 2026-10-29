@@ -239,6 +239,11 @@ func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, 
 		return nil, false, "", fmt.Errorf("failed to unmarshal task status payload JSON: %w", err)
 	}
 
+	if durable != nil && status.Status == "COMPLETED" {
+		// An actor's Redis mirror cannot bypass durable artifact settlement.
+		return durableStatus(durable), false, "", nil
+	}
+
 	stalePerformed := (luaRes.Result == "STALE_TRANSITION_PERFORMED")
 	if stalePerformed {
 		if durable != nil {
@@ -269,7 +274,7 @@ func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
 }
 
 func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, downloadToken string, reservationID ...string) (bool, error) {
-	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+	if allowed, err := allowDurableUpdate(id, status, errStr); err != nil || !allowed {
 		return false, err
 	}
 
@@ -365,7 +370,7 @@ func (r *TaskRegistry) SetWithKeyAndBilling(id string, status string, progress i
 }
 
 func (r *TaskRegistry) setWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
-	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+	if allowed, err := allowDurableUpdate(id, status, errStr); err != nil || !allowed {
 		return false, err
 	}
 
@@ -436,7 +441,7 @@ func (r *TaskRegistry) setWithKey(id string, status string, progress int, result
 }
 
 func (r *TaskRegistry) Set(id string, status string, progress int, resultURL string, errStr string) error {
-	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+	if allowed, err := allowDurableUpdate(id, status, errStr); err != nil || !allowed {
 		return err
 	}
 

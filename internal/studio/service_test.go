@@ -41,6 +41,7 @@ func getTestServiceAndRepository(t *testing.T) (Service, Repository) {
 		&models.StudioStorageCleanupTask{},
 		&models.StudioStorageObjectRetirement{},
 		&backendmodels.WorkerResultOwnership{},
+		&backendmodels.TaskCompletion{},
 		&models.StudioEditorState{},
 		&models.StudioJob{},
 	)

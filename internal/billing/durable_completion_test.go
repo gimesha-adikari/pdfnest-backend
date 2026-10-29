@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
+	studioModels "pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/tasks"
 
 	"github.com/alicebob/miniredis/v2"
@@ -35,6 +37,9 @@ func completionFixture(t *testing.T, guest bool) (*gorm.DB, *redis.Client, *mini
 	t.Setenv("STORAGE_MODE", "local")
 	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	db := setupTestDB(t)
+	if err := db.AutoMigrate(&studioModels.StudioStorageObjectRetirement{}, &models.WorkerResultOwnership{}); err != nil {
+		t.Fatal(err)
+	}
 	srv := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	oldRedis := config.Redis
@@ -334,7 +339,7 @@ func TestDurableCompletionRetentionRetryAndDuplicateCleanup(t *testing.T) {
 	if err := tasks.Registry.SweepDurableCompletions(t.Context(), time.Now()); err == nil {
 		t.Fatal("expected physical deletion error")
 	}
-	if completionRow(t, db, row.ID).State != "completed" {
+	if completionRow(t, db, row.ID).State != "deleting" {
 		t.Fatal("deletion intent lost")
 	}
 	os.RemoveAll(path)
@@ -473,4 +478,155 @@ func TestDurableCompletionCancellationRequiresOwnerEvenForEmptyCaller(t *testing
 			t.Fatal("unauthorized caller changed durable task")
 		}
 	}
+}
+
+func TestDurableCompletionExpiredActiveCrashReleasesOnceAndRejectsLatePublisher(t *testing.T) {
+	db, client, _, row, src := completionFixture(t, false)
+	now := time.Now()
+	if err := db.Model(row).Update("expires_at", now.Add(-time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	client.Del(t.Context(), tasks.TaskKeyPrefix+row.ID)
+	if err := tasks.Registry.SweepDurableCompletions(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if completionRow(t, db, row.ID).State != "failed" {
+		t.Fatal("crashed active task not recovered")
+	}
+	assertReserved(t, db, row.ReservationID, "released")
+	if err := tasks.Registry.PublishArtifact(t.Context(), row.ID, "outputs/tasks/"+row.ID+"/result.txt", src, "text/plain"); !errors.Is(err, tasks.ErrTaskTerminal) {
+		t.Fatalf("late publisher revived expired task: %v", err)
+	}
+	if err := tasks.Registry.SweepDurableCompletions(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	assertReserved(t, db, row.ReservationID, "released")
+}
+
+func TestDurableCompletionUncertainBatchCannotStarveExpiredCompletedCleanup(t *testing.T) {
+	db, _, _, row, src := completionFixture(t, false)
+	key := "outputs/tasks/" + row.ID + "/result.txt"
+	if err := tasks.Registry.PublishArtifact(t.Context(), row.ID, key, src, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	db.Model(row).Update("expires_at", now.Add(-time.Hour))
+	var held []models.TaskCompletion
+	var ids []string
+	for i := 0; i < 101; i++ {
+		id := uuid.NewString()
+		ids = append(ids, id)
+		held = append(held, models.TaskCompletion{ID: id, OwnerIdentity: "held", DownloadToken: "token", State: "publishing", ResultKey: "outputs/tasks/" + id + "/missing", UpdatedAt: now.Add(-time.Hour)})
+	}
+	if err := db.Create(&held).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&models.TaskCompletion{}, "id IN ?", ids) })
+	_ = tasks.Registry.SweepDurableCompletions(t.Context(), now)
+	if completionRow(t, db, row.ID).State != "deleted" || storage.ObjectExists(t.Context(), key) {
+		t.Fatal("uncertain publishing batch starved completed cleanup")
+	}
+}
+
+func TestDurableCompletionWorkerSnapshotRecoversAfterRedisExpiryWithoutDoubleCharge(t *testing.T) {
+	db, client, _, row, _ := completionFixture(t, false)
+	key := "jobs/markdown/output/" + uuid.NewString() + ".md"
+	if err := storage.SaveObjectBytes(t.Context(), key, []byte("# Recovered artifact\n"), "text/markdown"); err != nil {
+		t.Fatal(err)
+	}
+	owned := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", WorkerJobID: row.ID, OwnerIdentity: row.OwnerIdentity, SubmitPath: "/api/v1/jobs/submit", SourceKeys: `[]`, State: "terminal", ResultKey: key, StatusJSON: `{"status":"succeeded"}`}
+	if err := db.Create(&owned).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&owned) })
+	client.Del(t.Context(), tasks.TaskKeyPrefix+row.ID)
+	for i := 0; i < 2; i++ {
+		if err := tasks.Registry.SweepDurableCompletions(t.Context(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := completionRow(t, db, row.ID)
+	if result.State != "completed" || !storage.ObjectExists(t.Context(), result.ResultKey) {
+		t.Fatalf("snapshot not recovered: %+v", result)
+	}
+	assertReserved(t, db, row.ReservationID, "committed")
+	var reservation config.BillingReservation
+	db.First(&reservation, "id = ?", row.ReservationID)
+	var count int64
+	db.Model(&config.UsageLog{}).Where("user_id = ?", reservation.UserID).Count(&count)
+	if count != 1 {
+		t.Fatalf("recovery charged %d times", count)
+	}
+}
+
+func TestDurableCompletionCleanupProtectsSharedWorkerInputAndRetiresKey(t *testing.T) {
+	db, _, _, row, src := completionFixture(t, false)
+	key := "outputs/tasks/" + row.ID + "/result.txt"
+	if err := tasks.Registry.PublishArtifact(t.Context(), row.ID, key, src, "text/plain"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	db.Model(row).Update("expires_at", now.Add(-time.Hour))
+	encoded, _ := json.Marshal([]string{key})
+	pin := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", SubmitPath: "/api/v1/editor/extract", SourceKeys: string(encoded), State: "uncertain"}
+	if err := db.Create(&pin).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&pin) })
+	if err := tasks.Registry.SweepDurableCompletions(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if !storage.ObjectExists(t.Context(), key) {
+		t.Fatal("live shared input deleted")
+	}
+	db.Model(&pin).Update("state", "deleted")
+	if err := tasks.Registry.SweepDurableCompletions(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if storage.ObjectExists(t.Context(), key) {
+		t.Fatal("unreferenced completed artifact not deleted")
+	}
+	var retired int64
+	db.Table("studio_storage_object_retirements").Where("object_key = ?", key).Count(&retired)
+	if retired != 1 {
+		t.Fatal("deletion lacks durable immutable retirement")
+	}
+}
+
+func TestDurableCompletionExternalAdmissionWinsExpiredRecoveryRace(t *testing.T) {
+	db, _, _, row, _ := completionFixture(t, false)
+	now := time.Now()
+	db.Model(row).Update("expires_at", now.Add(-time.Hour))
+	observed := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	name := "external-admission-race-" + uuid.NewString()
+	if err := db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		if tx.Statement.Table == "worker_result_ownerships" {
+			once.Do(func() { close(observed); <-resume })
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Callback().Query().Remove(name) })
+	done := make(chan error, 1)
+	go func() { done <- tasks.Registry.SweepDurableCompletions(context.Background(), now) }()
+	select {
+	case <-observed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovery did not inspect admission")
+	}
+	owned := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", WorkerJobID: row.ID, SourceKeys: `[]`, SubmitPath: "/api/v1/jobs/submit", State: "uncertain"}
+	if err := db.Create(&owned).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Delete(&owned) })
+	close(resume)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if completionRow(t, db, row.ID).State != "active" {
+		t.Fatal("concurrent admitted actor was expired")
+	}
+	assertReserved(t, db, row.ReservationID, "reserved")
 }
