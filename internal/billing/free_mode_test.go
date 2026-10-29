@@ -12,6 +12,7 @@ import (
 
 	"pdfnest-backend/config"
 	"pdfnest-backend/internal/identity"
+	"pdfnest-backend/internal/models"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
@@ -377,7 +378,7 @@ func setupGIM6IsolatedTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Skipf("explicitly configured isolated local PostgreSQL is unavailable: %v", err)
 	}
-	require.NoError(t, db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}))
+	require.NoError(t, db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}))
 	previousDB := config.DB
 	config.DB = db
 	t.Cleanup(func() { config.DB = previousDB })

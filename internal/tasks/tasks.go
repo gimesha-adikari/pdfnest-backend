@@ -178,6 +178,20 @@ var CancelTaskBillingHandler func(reservationID string)
 var CancelTaskBillingHandlerWithKind func(reservationID, reservationKind string)
 
 func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, error) {
+	durable, durableErr := durableTask(context.Background(), id)
+	if durableErr != nil {
+		return nil, false, "", durableErr
+	}
+	if durable != nil && durable.State != "active" {
+		task := durableStatus(durable)
+		if durable.State == "completed" && !time.Now().Before(durable.ExpiresAt) {
+			task.Status = "EXPIRED"
+			task.ResultKey = ""
+			task.ResultURL = ""
+		}
+		return task, false, "", nil
+	}
+
 	client := r.getClient()
 	if client == nil {
 		return nil, false, "", errors.New("redis client not configured")
@@ -214,6 +228,9 @@ func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, 
 	}
 
 	if luaRes.Result == "NOT_FOUND" || luaRes.Payload == "" {
+		if durable != nil {
+			return durableStatus(durable), false, "", nil
+		}
 		return nil, false, "", nil
 	}
 
@@ -224,6 +241,15 @@ func (r *TaskRegistry) GetWithTransition(id string) (*TaskStatus, bool, string, 
 
 	stalePerformed := (luaRes.Result == "STALE_TRANSITION_PERFORMED")
 	if stalePerformed {
+		if durable != nil {
+			row, changed, err := transitionDurable(context.Background(), id, "", "failed", status.Error)
+			if err != nil {
+				return nil, false, "", err
+			}
+			if !changed && row != nil {
+				return durableStatus(row), false, "", nil
+			}
+		}
 		if luaRes.ReservationID != "" {
 			if StaleTaskBillingHandlerWithKind != nil {
 				StaleTaskBillingHandlerWithKind(luaRes.ReservationID, status.ReservationKind)
@@ -243,6 +269,10 @@ func (r *TaskRegistry) Get(id string) (*TaskStatus, error) {
 }
 
 func (r *TaskRegistry) SetWithDownloadToken(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, downloadToken string, reservationID ...string) (bool, error) {
+	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+		return false, err
+	}
+
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
@@ -335,6 +365,10 @@ func (r *TaskRegistry) SetWithKeyAndBilling(id string, status string, progress i
 }
 
 func (r *TaskRegistry) setWithKey(id string, status string, progress int, resultKey string, errStr string, ownerIdentity string, reservationID string, reservationKind string) (bool, error) {
+	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+		return false, err
+	}
+
 	client := r.getClient()
 	if client == nil {
 		log.Printf("[TASK REGISTRY ERROR] Redis client not configured for Set task %s", id)
@@ -402,6 +436,10 @@ func (r *TaskRegistry) setWithKey(id string, status string, progress int, result
 }
 
 func (r *TaskRegistry) Set(id string, status string, progress int, resultURL string, errStr string) error {
+	if allowed, err := allowDurableUpdate(id, status); err != nil || !allowed {
+		return err
+	}
+
 	var resultKey string
 	if strings.HasPrefix(resultURL, "r2://") {
 		resultKey = strings.TrimPrefix(resultURL, "r2://")
@@ -478,6 +516,21 @@ type cancelLuaResult struct {
 }
 
 func (r *TaskRegistry) CancelTask(id string, ownerIdentity string) (string, *TaskStatus, error) {
+	row, changed, durableErr := transitionDurable(context.Background(), id, ownerIdentity, "cancelled", "Task processing cancelled by user.")
+	if durableErr != nil {
+		return "ERROR", nil, durableErr
+	}
+	if row != nil {
+		task := durableStatus(row)
+		if row.OwnerIdentity != "" && ownerIdentity != row.OwnerIdentity {
+			return "UNAUTHORIZED", task, nil
+		}
+		if changed {
+			return "CANCELLED_SUCCESS", task, nil
+		}
+		return "TERMINAL_ALREADY", task, nil
+	}
+
 	client := r.getClient()
 	if client == nil {
 		return "ERROR", nil, errors.New("redis client not configured")

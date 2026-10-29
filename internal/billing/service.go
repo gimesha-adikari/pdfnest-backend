@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
@@ -195,7 +196,7 @@ func (s *Service) ReleaseAsync(ctx context.Context, reservationID string, kind R
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		return GuestQuota.Release(ctx, reservationID)
+		return tasks.WithReservationRelease(ctx, reservationID, func(_ *gorm.DB) error { return GuestQuota.Release(ctx, reservationID) })
 	case ReservationKindDatabase, "":
 		return s.Release(reservationID)
 	default:
@@ -408,89 +409,91 @@ func (s *Service) Commit(reservationID string) error {
 	if strings.TrimSpace(reservationID) == "" {
 		return nil
 	}
+	return config.DB.Transaction(func(tx *gorm.DB) error { return s.commitTransaction(tx, reservationID, false) })
+}
 
+func (s *Service) commitTransaction(tx *gorm.DB, reservationID string, strict bool) error {
 	now := time.Now()
+	var res config.BillingReservation
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", reservationID).
+		First(&res).Error; err != nil {
+		return err
+	}
 
-	return config.DB.Transaction(func(tx *gorm.DB) error {
-		var res config.BillingReservation
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ?", reservationID).
-			First(&res).Error; err != nil {
-			return err
+	if res.Status == "committed" {
+		return nil
+	}
+	if res.Status != "reserved" {
+		if strict {
+			return errors.New("reservation has no committed outcome")
 		}
+		return nil
+	}
 
-		if res.Status != "reserved" {
-			return nil
-		}
+	// Conditional SQL update: only update if status is still 'reserved'
+	result := tx.Model(&config.BillingReservation{}).
+		Where("id = ? AND status = ?", reservationID, "reserved").
+		Updates(map[string]interface{}{
+			"status":     "committed",
+			"updated_at": now,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil
+	}
 
-		// Conditional SQL update: only update if status is still 'reserved'
-		result := tx.Model(&config.BillingReservation{}).
-			Where("id = ? AND status = ?", reservationID, "reserved").
-			Updates(map[string]interface{}{
-				"status":     "committed",
-				"updated_at": now,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return nil
-		}
+	var sub config.Subscription
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ?", res.UserID).
+		First(&sub).Error; err != nil {
+		return err
+	}
 
-		var sub config.Subscription
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("user_id = ?", res.UserID).
-			First(&sub).Error; err != nil {
-			return err
-		}
+	syncWindows(&sub, now)
 
-		syncWindows(&sub, now)
+	sub.UsedUnits3h += res.PlanUnits
+	sub.UsedUnitsDaily += res.PlanUnits
+	sub.UsedUnitsMonthly += res.PlanUnits
 
-		sub.UsedUnits3h += res.PlanUnits
-		sub.UsedUnitsDaily += res.PlanUnits
-		sub.UsedUnitsMonthly += res.PlanUnits
+	sub.CustomCredits -= res.CreditUnits
+	if sub.CustomCredits < 0 {
+		sub.CustomCredits = 0
+	}
+	sub.UpdatedAt = now
 
-		sub.CustomCredits -= res.CreditUnits
-		if sub.CustomCredits < 0 {
-			sub.CustomCredits = 0
-		}
-		sub.UpdatedAt = now
+	if err := tx.Save(&sub).Error; err != nil {
+		return err
+	}
 
-		if err := tx.Save(&sub).Error; err != nil {
-			return err
-		}
+	workCount := res.PagesCount
+	if workCount == 0 {
+		workCount = res.ImagesCount
+	}
 
-		workCount := res.PagesCount
-		if workCount == 0 {
-			workCount = res.ImagesCount
-		}
-
-		usage := config.UsageLog{
-			ID:         uuid.New().String(),
-			UserID:     res.UserID,
-			ToolName:   res.ToolName,
-			IsCredit:   res.CreditUnits > 0,
-			PagesCount: workCount,
-			CreatedAt:  now,
-		}
-		return tx.Create(&usage).Error
-	})
+	usage := config.UsageLog{
+		ID:         uuid.New().String(),
+		UserID:     res.UserID,
+		ToolName:   res.ToolName,
+		IsCredit:   res.CreditUnits > 0,
+		PagesCount: workCount,
+		CreatedAt:  now,
+	}
+	return tx.Create(&usage).Error
 }
 
 func (s *Service) Release(reservationID string) error {
 	if strings.TrimSpace(reservationID) == "" {
 		return nil
 	}
-
-	now := time.Now()
-
-	// Conditional SQL update: transition status to 'released' only if currently 'reserved'
-	return config.DB.Model(&config.BillingReservation{}).
-		Where("id = ? AND status = ?", reservationID, "reserved").
-		Updates(map[string]interface{}{
-			"status":     "released",
-			"updated_at": now,
-		}).Error
+	return tasks.WithReservationRelease(context.Background(), reservationID, func(tx *gorm.DB) error {
+		if tx == nil {
+			return errors.New("billing database not configured")
+		}
+		return tx.Model(&config.BillingReservation{}).Where("id = ? AND status = ?", reservationID, "reserved").Updates(map[string]interface{}{"status": "released", "updated_at": time.Now()}).Error
+	})
 }
 
 func activeReservationTotals(tx *gorm.DB, userID string, now time.Time) (reservationTotals, error) {
@@ -501,7 +504,7 @@ func activeReservationTotals(tx *gorm.DB, userID string, now time.Time) (reserva
 				"COALESCE(SUM(plan_units), 0) AS plan_units, "+
 				"COALESCE(SUM(credit_units), 0) AS credit_units",
 		).
-		Where("user_id = ? AND status = ? AND expires_at > ?", userID, "reserved", now).
+		Where("user_id = ? AND status = ? AND (expires_at > ? OR EXISTS (SELECT 1 FROM task_completions tc WHERE tc.reservation_id = CAST(billing_reservations.id AS TEXT) AND tc.state IN ('active', 'publishing')))", userID, "reserved", now).
 		Scan(&totals).Error
 	return totals, err
 }

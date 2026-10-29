@@ -18,6 +18,7 @@ import (
 	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
+	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/uploads"
 
@@ -379,7 +380,7 @@ func setupGuestAsyncIntegration(t *testing.T) (*gorm.DB, *redis.Client) {
 	if err != nil {
 		t.Fatalf("open isolated postgres: %v", err)
 	}
-	if err := db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}); err != nil {
+	if err := db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}); err != nil {
 		t.Fatalf("migrate isolated postgres: %v", err)
 	}
 	options, err := redis.ParseURL(redisURL)

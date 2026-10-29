@@ -2,7 +2,9 @@ package billing
 
 import (
 	"context"
+	"gorm.io/gorm"
 	"log"
+	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/tasks"
 )
 
@@ -10,6 +12,19 @@ var GuestQuota *GuestQuotaStore
 
 func Initialize(guestQuota *GuestQuotaStore) {
 	GuestQuota = guestQuota
+	tasks.SettleTaskBilling = func(ctx context.Context, tx *gorm.DB, row *models.TaskCompletion) error {
+		switch ReservationKind(row.ReservationKind) {
+		case ReservationKindDatabase:
+			return Default.commitTransaction(tx, row.ReservationID, true)
+		case ReservationKindGuest:
+			if GuestQuota == nil {
+				return ErrGuestQuotaStoreUnavailable
+			}
+			return GuestQuota.CommitConfirmed(ctx, row.ReservationID)
+		default:
+			return ErrReservationKindAmbiguous
+		}
+	}
 	tasks.StaleTaskBillingHandlerWithKind = func(reservationID, reservationKind string) {
 		if err := Default.ReleaseAsync(context.Background(), reservationID, ReservationKind(reservationKind)); err != nil {
 			log.Printf("[BILLING TASK FINALIZATION] release reservation %q failed: %v", reservationID, err)
