@@ -80,6 +80,10 @@ jobs:
           git -C "$RUNNER_TEMP/backend-worker-compat" fetch --depth 1 origin 8595d73f8c39865f35acd6259b91ed897fc07f7c
           git -C "$RUNNER_TEMP/backend-worker-compat" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/backend-worker-compat" rev-parse HEAD)" = 8595d73f8c39865f35acd6259b91ed897fc07f7c
+          # The old-receiver fixture reads this exact historical module via git
+          # show; retain it without changing the reviewed current checkout.
+          git -C "$RUNNER_TEMP/backend-worker-compat" fetch --depth 1 origin 18c96a36271c0f6269d33ca5aac6e82e4ab964cc
+          git -C "$RUNNER_TEMP/backend-worker-compat" cat-file -e 18c96a36271c0f6269d33ca5aac6e82e4ab964cc:app/core/security.py
           python -m pip install --no-cache-dir uv==0.11.28
           uv sync --project "$RUNNER_TEMP/backend-worker-compat" --frozen --no-install-project
           uv pip check --python "$UV_PROJECT_ENVIRONMENT/bin/python"
