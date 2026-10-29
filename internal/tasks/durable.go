@@ -2,14 +2,10 @@ package tasks
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -86,7 +82,7 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 	if config.DB == nil {
 		return errors.New("durable task database unavailable")
 	}
-	if !strings.HasPrefix(key, "outputs/tasks/"+id+"/") || strings.Contains(key, "..") {
+	if !validTaskArtifactKey(id, key) {
 		return errors.New("invalid task artifact key")
 	}
 	existing, lookupErr := durableTask(ctx, id)
@@ -99,17 +95,11 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 		}
 		return r.ReconcileCompletion(ctx, id)
 	}
-	file, err := os.Open(source)
+	snapshot, fingerprint, size, cleanup, err := storage.StageArtifactSource(ctx, source)
 	if err != nil {
 		return fmt.Errorf("%w: artifact source: %v", ErrSettlementPending, err)
 	}
-	digest := sha256.New()
-	size, hashErr := io.Copy(digest, file)
-	file.Close()
-	if hashErr != nil {
-		return hashErr
-	}
-	fingerprint := hex.EncodeToString(digest.Sum(nil))
+	defer cleanup()
 	err = config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row models.TaskCompletion
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
@@ -172,10 +162,14 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 		if row.State != "publishing" || row.ResultKey != key {
 			return ErrTaskTerminal
 		}
-		if storage.ObjectExists(ctx, key) {
+		proofErr := storage.VerifyArtifact(ctx, key, row.ArtifactSHA256, row.ArtifactBytes)
+		if proofErr == nil {
 			return nil
 		}
-		return storage.SaveObjectFile(ctx, key, source, contentType)
+		if !errors.Is(proofErr, storage.ErrObjectNotFound) {
+			return proofErr
+		}
+		return storage.SaveVerifiedArtifact(ctx, key, snapshot, row.ArtifactSHA256, row.ArtifactBytes, contentType)
 	})
 	if err != nil {
 		return fmt.Errorf("%w: artifact write: %v", ErrSettlementPending, err)
@@ -183,11 +177,14 @@ func (r *TaskRegistry) PublishArtifact(ctx context.Context, id, key, source, con
 	return r.ReconcileCompletion(ctx, id)
 }
 
-// ReconcileCompletion keeps the ownership row locked across availability proof
+// ReconcileCompletion keeps the ownership row locked across exact content proof
 // and settlement. All application reclamation and reservation release paths
 // coordinate through the same row. A process crash rolls back DB settlement;
 // guest Redis receipts preserve the outcome of an ambiguous remote ACK.
 func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error {
+	if config.DB == nil {
+		return errors.New("durable task database unavailable")
+	}
 	var completed *models.TaskCompletion
 	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row models.TaskCompletion
@@ -195,6 +192,12 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 			return err
 		}
 		if row.State == "completed" {
+			if !validTaskArtifactKey(row.ID, row.ResultKey) {
+				return ErrSettlementPending
+			}
+			if err := storage.VerifyArtifact(ctx, row.ResultKey, row.ArtifactSHA256, row.ArtifactBytes); err != nil {
+				return fmt.Errorf("%w: artifact verification: %w", ErrSettlementPending, err)
+			}
 			completed = &row
 			return nil
 		}
@@ -204,8 +207,20 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 		if row.State != "publishing" {
 			return ErrTaskTerminal
 		}
-		if !storage.ObjectExists(ctx, row.ResultKey) {
+		if !validTaskArtifactKey(row.ID, row.ResultKey) {
 			return ErrSettlementPending
+		}
+		proofErr := storage.VerifyArtifact(ctx, row.ResultKey, row.ArtifactSHA256, row.ArtifactBytes)
+		if errors.Is(proofErr, storage.ErrObjectNotFound) {
+			// Reuse only an already retained, known successful Worker result.
+			// Native jobs without durable generated output stay safely pinned.
+			proofErr = recoverTaskArtifact(ctx, tx, &row)
+			if proofErr == nil {
+				proofErr = storage.VerifyArtifact(ctx, row.ResultKey, row.ArtifactSHA256, row.ArtifactBytes)
+			}
+		}
+		if proofErr != nil {
+			return fmt.Errorf("%w: artifact verification: %w", ErrSettlementPending, proofErr)
 		}
 		if row.ReservationID != "" {
 			if SettleTaskBilling == nil {
@@ -237,6 +252,37 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 		}
 	}
 	return nil
+}
+
+func validTaskArtifactKey(id, key string) bool {
+	return storage.CanonicalObjectKey(key) && strings.HasPrefix(key, "outputs/tasks/"+id+"/") && !strings.Contains(key, "..")
+}
+
+func recoverTaskArtifact(ctx context.Context, tx *gorm.DB, row *models.TaskCompletion) error {
+	var owned models.WorkerResultOwnership
+	if err := tx.Where("worker_job_id = ? AND owner_identity = ? AND state = ?", row.ID, row.OwnerIdentity, "terminal").Limit(1).Find(&owned).Error; err != nil {
+		return err
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	if owned.ID == "" || json.Unmarshal([]byte(owned.StatusJSON), &status) != nil || status.Status != "succeeded" {
+		return ErrSettlementPending
+	}
+	if owned.SubmitPath != "/api/v1/jobs/submit" && owned.SubmitPath != "/api/v1/markdown/convert" {
+		return ErrSettlementPending
+	}
+	const prefix = "jobs/markdown/output/"
+	name := strings.TrimPrefix(owned.ResultKey, prefix)
+	if !storage.CanonicalObjectKey(owned.ResultKey) || !strings.HasPrefix(owned.ResultKey, prefix) || strings.Contains(name, "/") || !strings.HasSuffix(name, ".md") {
+		return ErrSettlementPending
+	}
+	source, cleanup, err := storage.ResolveVerifiedArtifact(ctx, owned.ResultKey, row.ArtifactSHA256, row.ArtifactBytes)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return storage.SaveVerifiedArtifact(ctx, row.ResultKey, source, row.ArtifactSHA256, row.ArtifactBytes, "text/markdown; charset=utf-8")
 }
 
 // WithReservationRelease serializes a release against artifact publication.
@@ -507,7 +553,7 @@ func (r *TaskRegistry) retireTaskArtifact(ctx context.Context, id string, now ti
 			return nil
 		}
 		key := row.ResultKey
-		if !strings.HasPrefix(key, "outputs/tasks/"+id+"/") || strings.Contains(key, "..") {
+		if !validTaskArtifactKey(id, key) {
 			return errors.New("invalid persisted artifact ownership")
 		}
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?,81807))", key).Error; err != nil {
