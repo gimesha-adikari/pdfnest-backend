@@ -70,6 +70,9 @@ func (w *storageCleanupWorker) RunOnce(ctx context.Context) {
 }
 
 func (w *storageCleanupWorker) RunOnceAt(ctx context.Context, now time.Time) int {
+	if err := w.repo.EnqueueExpiredStorageCleanup(ctx, now, storageCleanupBatchSize); err != nil {
+		log.Printf("[STUDIO STORAGE CLEANUP] expiry enqueue failed: %v", err)
+	}
 	tasks, err := w.repo.ClaimStorageCleanupTasks(ctx, now, storageCleanupBatchSize, storageCleanupLease)
 	if err != nil {
 		log.Printf("[STUDIO STORAGE CLEANUP] claim failed: %v", err)
