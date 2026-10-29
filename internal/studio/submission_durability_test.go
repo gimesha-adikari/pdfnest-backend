@@ -57,7 +57,7 @@ func TestDurableAdmissionProtectsDispatchFromExpiryAndDuplicate(t *testing.T) {
 	f := newDurableEditorFixture(t)
 	c := f.coordinator.(*studioJobCoordinator)
 	nestedKey := "studio/test/nested-materialization-" + uuid.NewString()
-	c.materializer = &intentWritingMaterializer{StudioVersionMaterializer: c.materializer, key: nestedKey, path: filepath.Join("..", "..", "..", "benchmarks", "fixtures", "small_text.pdf")}
+	c.materializer = &intentWritingMaterializer{StudioVersionMaterializer: c.materializer, key: nestedKey, path: c.materializer.(*durableEditorMaterializer).path}
 	gate := &admissionGateGateway{StudioWorkerGateway: f.gateway, entered: make(chan struct{}), release: make(chan struct{})}
 	c.gateway = gate
 	req := extractionRequest(f.baseVersion.ID, uuid.NewString())

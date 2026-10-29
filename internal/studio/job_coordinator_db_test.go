@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jung-kurt/gofpdf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -181,7 +182,16 @@ func newDurableEditorFixture(t *testing.T) durableEditorFixture {
 	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 
 	service, repository := getTestServiceAndRepository(t)
-	fixturePath := filepath.Join("..", "..", "..", "benchmarks", "fixtures", "small_text.pdf")
+	// Keep the five-page lifecycle fixture inside this checkout: CI must not
+	// depend on an adjacent benchmark repository or its historical PDF corpus.
+	fixturePath := filepath.Join(t.TempDir(), "durable-editor.pdf")
+	pdf := gofpdf.New("P", "pt", "A4", "")
+	for page := 0; page < 5; page++ {
+		pdf.AddPage()
+		pdf.SetFont("Arial", "", 12)
+		pdf.Text(50, 80, "Durable editor lifecycle fixture")
+	}
+	require.NoError(t, pdf.OutputFileAndClose(fixturePath))
 	fixtureBytes, err := os.ReadFile(fixturePath)
 	require.NoError(t, err)
 	pageCount, err := validateMaterializedOutput(fixturePath)
