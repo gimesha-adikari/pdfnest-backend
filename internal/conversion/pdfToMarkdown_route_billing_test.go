@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/models"
+	"pdfnest-backend/internal/storage"
 	studioModels "pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/tasks"
 	"pdfnest-backend/internal/worker"
@@ -259,7 +261,10 @@ func TestPDFToMarkdownReleasesReservationWhenTaskPersistenceFails(t *testing.T) 
 	reservationKeys, err := redisClient.Keys(context.Background(), "platen:guestquota:res:*").Result()
 	require.NoError(t, err)
 	require.Empty(t, reservationKeys, "no billing reservation may remain after failed task creation")
-	require.Equal(t, deletesBefore+1, pdfToMarkdownR2DeleteRequest.Load(), "uploaded source object should be cleaned when task persistence fails")
+	require.Equal(t, deletesBefore, pdfToMarkdownR2DeleteRequest.Load(), "local source cleanup must not call an incidental remote store")
+	remaining, err := filepath.Glob(filepath.Join(storage.GetLocalStorageDir(), "jobs", "markdown", "source", "*.pdf"))
+	require.NoError(t, err)
+	require.Empty(t, remaining, "uploaded local source must be cleaned when task persistence fails")
 }
 
 func TestPDFToMarkdownUncertainWorkerAcknowledgementRetainsGuestReservation(t *testing.T) {

@@ -125,22 +125,23 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 		reservationID = res.ID
 	}
 
-	r2Store, err := storage.Default()
-	if err != nil {
-		if identityType == string(identity.TypeGuest) {
-			_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
-		} else {
-			_ = billing.Default.Release(reservationID)
+	if storage.RemoteStorageEnabled() {
+		if _, err := storage.Default(); err != nil {
+			if identityType == string(identity.TypeGuest) {
+				_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
+			} else {
+				_ = billing.Default.Release(reservationID)
+			}
+			idempotency.Release(c, nil)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"code":    "STORAGE_INIT_ERR",
+				"message": "Failed to initialize cloud storage",
+			})
 		}
-		idempotency.Release(c, nil)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"code":    "STORAGE_INIT_ERR",
-			"message": "Failed to initialize cloud storage",
-		})
 	}
 
 	sourceKey := fmt.Sprintf("jobs/markdown/source/%s.pdf", taskId)
-	if err := r2Store.UploadFile(upload.Path, sourceKey, "application/pdf"); err != nil {
+	if err := storage.SaveObjectFile(c.UserContext(), sourceKey, upload.Path, "application/pdf"); err != nil {
 		if identityType == string(identity.TypeGuest) {
 			_ = billing.GuestQuota.Release(identity.RequestContext(c), reservationID)
 		} else {
@@ -161,7 +162,7 @@ func (ctrl *Controller) HandleAsyncPDFToMarkdown(c *fiber.Ctx) error {
 		} else {
 			_ = billing.Default.Release(reservationID)
 		}
-		if cleanupErr := r2Store.DeleteObject(context.Background(), sourceKey); cleanupErr != nil {
+		if cleanupErr := storage.DeleteObject(context.Background(), sourceKey); cleanupErr != nil {
 			log.Printf("[PDF TO MARKDOWN CLEANUP] source object cleanup failed for task %s: %v", taskId, cleanupErr)
 		}
 		idempotency.Release(c, nil)
