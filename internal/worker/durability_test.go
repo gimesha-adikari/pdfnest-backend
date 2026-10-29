@@ -278,7 +278,7 @@ func TestDurabilityCleanupPinsUnsettledAndSharedArtifacts(t *testing.T) {
 	if err := db.Model(&pin).Update("state", "deleted").Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := s.cleanup(context.Background(), row.ID, now); err != nil {
+	if err := s.cleanup(context.Background(), row.ID, now.Add(16*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if deletes.Load() != 1 {
@@ -575,6 +575,9 @@ func TestDurabilityLegacyActorKnownIdentityRecoversLostACK(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, `{"id":"`+jobID+`","status":"succeeded","result":{"artifact_key":"`+key+`"}}`)
 	})
+	if err := db.Create(&models.TaskCompletion{ID: jobID, OwnerIdentity: "user:owned", DownloadToken: "token", State: "active"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	payload, _ := json.Marshal(map[string]any{"actor_name": "pdf_to_markdown_job", "owner_identity": "user:owned", "args": []any{jobID, "jobs/markdown/source/" + jobID + ".pdf", "password", "eng", false, false, "document.pdf"}, "kwargs": map[string]any{}})
 	submit := func() error {
 		req, _ := http.NewRequest(http.MethodPost, s.BaseURL+"/api/v1/jobs/submit", bytes.NewReader(payload))
@@ -611,5 +614,34 @@ func TestDurabilityLegacyActorKnownIdentityRecoversLostACK(t *testing.T) {
 	}
 	if submitted.Load() != 1 {
 		t.Fatal("recovered actor dispatched twice")
+	}
+}
+
+func TestDurabilityPinnedBatchCannotStarveLaterCleanup(t *testing.T) {
+	db := durabilityDB(t)
+	now := time.Now()
+	for i := 0; i < 51; i++ {
+		row := seedTerminal(t, db, "", now.Add(-time.Hour))
+		pin := models.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "h", SourceKeys: mustJSONStringArray(row.ResultKey), SubmitPath: "/api/v1/editor/extract", State: "uncertain"}
+		if err := db.Create(&pin).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	eligible := seedTerminal(t, db, "", now.Add(-time.Minute))
+	var deletes atomic.Int32
+	s := &DurabilityStore{DB: db, DeleteObject: func(context.Context, string) error { deletes.Add(1); return nil }}
+	// Two finite batches must reach the later unpinned result without dropping
+	// any ownership hold in the older batch.
+	for i := 0; i < 2; i++ {
+		if err := s.runOnce(context.Background(), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var row models.WorkerResultOwnership
+	if err := db.First(&row, "id = ?", eligible.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.State != "deleted" || deletes.Load() != 1 {
+		t.Fatalf("pinned batch starved later result: %s deletes=%d", row.State, deletes.Load())
 	}
 }

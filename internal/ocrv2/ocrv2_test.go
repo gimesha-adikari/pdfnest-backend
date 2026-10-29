@@ -22,6 +22,7 @@ import (
 	"pdfnest-backend/internal/limiter"
 	"pdfnest-backend/internal/middleware"
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/testfixture"
 	"pdfnest-backend/internal/uploads"
 	"pdfnest-backend/internal/worker"
 
@@ -220,14 +221,15 @@ func TestControllerCapabilitiesArePublicAndReturnSafeFields(t *testing.T) {
 
 func samplePDFPath(t *testing.T) string {
 	t.Helper()
-	path, err := filepath.Abs(filepath.Join("..", "..", "..", "pdfnest", "tests", "fixtures", "normal_text.pdf"))
+	data, err := testfixture.PDFBytes()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Skipf("sample PDF unavailable: %v", err)
+	fixturePath := filepath.Join(t.TempDir(), "normal_text.pdf")
+	if err := os.WriteFile(fixturePath, data, 0600); err != nil {
+		t.Fatal(err)
 	}
-	return path
+	return fixturePath
 }
 
 func TestServiceExecuteTextValidatesProfileLanguageAndPDF(t *testing.T) {

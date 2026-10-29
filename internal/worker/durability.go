@@ -140,6 +140,16 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 		defer cancel()
 		var created *gorm.DB
 		admissionErr := s.DB.WithContext(dbctx).Transaction(func(tx *gorm.DB) error {
+			if knownJobID != "" {
+				var task models.TaskCompletion
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", knownJobID).Error; err != nil {
+					return err
+				}
+				if task.State != "active" {
+					return errors.New("task no longer admits external dispatch")
+				}
+			}
+
 			if err := lockStorageKeys(tx, sources); err != nil {
 				return err
 			}
@@ -612,7 +622,7 @@ func (s *DurabilityStore) runOnce(ctx context.Context, now time.Time) error {
 		}
 	}
 	rows = nil
-	if err := s.DB.WithContext(ctx).Where("state IN ? AND expires_at <= ? AND next_attempt_at <= ?", []string{"terminal", "deleting"}, now, now).Order("expires_at, id").Limit(50).Find(&rows).Error; err != nil {
+	if err := s.DB.WithContext(ctx).Where("state IN ? AND expires_at <= ? AND next_attempt_at <= ?", []string{"terminal", "deleting"}, now, now).Order("next_attempt_at, id").Limit(50).Find(&rows).Error; err != nil {
 		return err
 	}
 	for _, row := range rows {
@@ -651,7 +661,7 @@ func (s *DurabilityStore) cleanup(ctx context.Context, id string, now time.Time)
 			return err
 		}
 		if pinned {
-			return nil
+			return tx.Model(&row).Update("next_attempt_at", now.Add(15*time.Minute)).Error
 		}
 		if !validResultKey(&row, row.ResultKey) || !validResultKey(&row, row.MetadataKey) {
 			return errors.New("unsafe result cleanup reference")
@@ -665,7 +675,7 @@ func (s *DurabilityStore) cleanup(ctx context.Context, id string, now time.Time)
 				return err
 			}
 			if count > 0 {
-				return nil
+				return tx.Model(&row).Update("next_attempt_at", now.Add(15*time.Minute)).Error
 			}
 			if tx.Migrator().HasTable("studio_storage_object_retirements") {
 				if err := tx.Table("studio_storage_object_retirements").Clauses(clause.OnConflict{DoNothing: true}).Create(map[string]any{"object_key": key, "created_at": now}).Error; err != nil {
