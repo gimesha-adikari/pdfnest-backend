@@ -84,8 +84,8 @@ func renderPdfWithPyMuPDF(pdfBytes []byte, pageNum int, dpi float64) ([]byte, er
 	_ = tmpJpg.Close()
 	defer os.Remove(tmpJpgPath)
 
-	pythonBin := "/home/gimesha/My_Projects/platen/pdfnest-worker/.venv/bin/python"
-	if _, statErr := os.Stat(pythonBin); statErr != nil {
+	pythonBin := os.Getenv("STUDIO_TEST_PYTHON")
+	if pythonBin == "" {
 		pythonBin = "python3"
 	}
 
@@ -101,7 +101,9 @@ matrix = fitz.Matrix(zoom, zoom)
 pix = page.get_pixmap(matrix=matrix)
 pix.save(sys.argv[4])
 `
-	cmd := exec.Command(pythonBin, "-c", pyScript, tmpPdf.Name(), strconv.Itoa(pageNum), fmt.Sprintf("%.2f", dpi), tmpJpgPath)
+	renderCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(renderCtx, pythonBin, "-c", pyScript, tmpPdf.Name(), strconv.Itoa(pageNum), fmt.Sprintf("%.2f", dpi), tmpJpgPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("pymupdf execution failed: %w (output: %s)", err, string(output))
