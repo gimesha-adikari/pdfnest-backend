@@ -132,11 +132,9 @@ func runBoundedGit(ctx context.Context, cmd *exec.Cmd, root string, limits Acqui
 		}
 	}()
 	output, runErr := (process.Runner{}).RunCommand(runCtx, 0, cmd)
-	// A normally exiting Git parent must not leave descendants that can write
-	// after the sandbox is released. Confinement denies setsid/setpgid escape.
-	if cmd.Process != nil {
-		_ = process.KillProcessGroup(cmd.Process.Pid, 50*time.Millisecond)
-	}
+	// Runner has already reaped the command leader here: its numeric PID/PGID
+	// must not be used to signal processes after possible identifier reuse.
+	// Required mode's bwrap PID namespace drains its descendants on exit.
 	close(stopped)
 	if err := <-monitored; err != nil {
 		return output, err

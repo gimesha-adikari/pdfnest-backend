@@ -52,6 +52,13 @@ of the slot root and a newer generation in the root-owned record. The adapter
 checks changed inode, newer generation and clean kernel baseline before reuse.
 It performs none of those external recovery/setup actions itself.
 
+"Finite" describes the fixed maximum number of concurrent slot owners. Leases
+have no wall-clock expiration: clone execution retains its existing timeout and
+the caller owns the lease through downstream analysis. A caller/process failure
+quarantines its generation rather than releasing storage on a timer. An expired
+timer alone would not prove old writers stopped, so this adapter promises no
+time-bounded recycling or downstream analysis deadline.
+
 The built `git-quota-exec capability` reports BLOCKED/exit 125 without approved
 configuration. A successful kernel query says KERNEL_QUOTAS_VERIFIED and marks
 confinement runtime NOT_EXERCISED; it does not claim allocation qualification.
