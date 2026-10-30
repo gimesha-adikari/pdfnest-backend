@@ -310,5 +310,6 @@ func TestPublicMarkdownQueuedLifecycle(t *testing.T) {
 			t.FailNow()
 		}
 	}
+	qualifyLocalNativeClients(t, root)
 	require.Equal(t, int64(0), client.ZCard(context.Background(), "pdfnest:limiter:active").Val())
 }

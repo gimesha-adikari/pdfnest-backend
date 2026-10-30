@@ -71,7 +71,7 @@ def qualify(worker, redis_binary, report):
     report["worker_sha"] = subprocess.check_output(["git", "-C", str(worker), "rev-parse", "HEAD"], text=True).strip()
     report["source_files_sha256"] = {
         name: hashlib.sha256((BACKEND / name).read_bytes()).hexdigest()
-        for name in ("internal/conversion/pdfToMarkdown.go", "internal/tasks/durable.go", "internal/worker/durability.go", "internal/conversion/pdfToMarkdown_public_e2e_test.go")
+        for name in ("internal/conversion/pdfToMarkdown.go", "internal/tasks/durable.go", "internal/worker/durability.go", "internal/conversion/pdfToMarkdown_public_e2e_test.go", "internal/conversion/native_public_e2e_test.go")
     }
     report["worker_files_sha256"] = {
         name: hashlib.sha256((worker / name).read_bytes()).hexdigest()
@@ -160,7 +160,7 @@ def qualify(worker, redis_binary, report):
                 assert go_process.poll() is None, "Go fixture exited before deterministic cancellation checkpoint"
                 return (root / "start-actor").is_file()
             until(cancelled_before_actor, seconds=120)
-            launch("actor", [sys.executable, "-m", "dramatiq", "tests.f15_queued_actor:broker", "--processes", "1", "--threads", "1", "--queues", "conversion", "--worker-shutdown-timeout", "5000"])
+            launch("actor", [sys.executable, "-m", "dramatiq", "tests.f15_queued_actor:broker", "--processes", "1", "--threads", "1", "--worker-shutdown-timeout", "5000"])
             go_exit = go_process.wait(timeout=300)
             go_log.flush()
             output = (root / "go-test.log").read_text()
@@ -171,6 +171,8 @@ def qualify(worker, redis_binary, report):
             assert go_exit == 0, "public route E2E failed"
             report["cases"] = [json.loads(line.split("PUBLIC_MARKDOWN_E2E ", 1)[1]) for line in output.splitlines() if "PUBLIC_MARKDOWN_E2E " in line]
             assert len(report["cases"]) == 5
+            report["native_compatibility"] = [json.loads(line.split("LOCAL_NATIVE_E2E ", 1)[1]) for line in output.splitlines() if "LOCAL_NATIVE_E2E " in line]
+            assert len(report["native_compatibility"]) == 3
             events = [json.loads(line) for line in (root / "actor-events.jsonl").read_text().splitlines()]
             ids = {case["task_id"] for case in report["cases"]}
             native = [event for event in events if event["event"] == "native_start" and event["job_id"] in ids]
@@ -178,7 +180,7 @@ def qualify(worker, redis_binary, report):
             cancelled_ids = {case["task_id"] for case in report["cases"] if case["identity"] == "guest_cancelled"}
             assert not any(event["job_id"] in cancelled_ids for event in native)
             assert all(event["pid"] != os.getpid() and event["pid"] != api.pid for event in native)
-            until(lambda: not redis.llen("dramatiq:conversion") and redis.hlen("dramatiq:conversion.msgs") == 0)
+            until(lambda: all(not redis.llen("dramatiq:" + queue) and redis.hlen("dramatiq:" + queue + ".msgs") == 0 for queue in ("conversion", "ocr", "editor")))
             assert redis.zcard("pdfnest:limiter:active") == 0
             report["native_events"] = native
             report["cleanup"] = {"queue_messages": 0, "broker_payloads": 0, "active_leases": 0}
