@@ -67,7 +67,15 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 		})
 	}
 
-	_, _ = tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID, string(billing.ReservationKindDatabase))
+	created, createErr := tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID, string(billing.ReservationKindDatabase))
+	if createErr != nil || !created {
+		_ = billing.Default.Release(reservation.ID)
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
+	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, userID, reservation.ID, string(billing.ReservationKindDatabase)); err != nil {
+		_ = billing.Default.Release(reservation.ID)
+		return c.SendStatus(fiber.StatusServiceUnavailable)
+	}
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
 		taskCtx, taskCancel := context.WithCancel(context.Background())
@@ -95,17 +103,9 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 
 		defer func() {
 			close(stopPoller)
-			store, err := storage.Default()
-			if err == nil {
-				ctx := context.Background()
-				for _, ref := range refs {
-					if ref.Key != "" {
-						_ = store.DeleteObject(ctx, ref.Key)
-					}
-				}
-			} else {
-				log.Printf("[OCR R2 JOB] Warning: Failed to init storage for cleanup: %v", err)
-			}
+			// Uploaded references may be reused by another live job. Their
+			// upload/session retention authority owns reclamation; this task
+			// must not delete shared inputs merely because its goroutine ends.
 
 			if r := recover(); r != nil {
 				_ = billing.Default.Release(reservationID)
@@ -136,14 +136,12 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 			return
 		}
 
-		if err := billing.Default.Commit(reservationID); err != nil {
-			_ = billing.Default.Release(reservationID)
-			_ = os.Remove(outPath)
-			tasks.Registry.Set(id, "FAILED", 0, "", "Billing finalization failed")
-			return
+		defer os.Remove(outPath)
+		key := "outputs/tasks/" + id + "/compiled.pdf"
+		if err := tasks.Registry.PublishArtifact(context.Background(), id, key, outPath, "application/pdf"); err != nil {
+			log.Printf("[OCR R2 JOB] completion %s needs reconciliation: %v", id, err)
 		}
 
-		_ = tasks.Registry.Set(id, "COMPLETED", 100, outPath, "")
 	}(taskId, req.Files, reservation.ID, lang)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{

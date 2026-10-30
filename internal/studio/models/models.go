@@ -146,12 +146,13 @@ type StudioJob struct {
 	Parameters      JSON       `gorm:"type:jsonb;not null" json:"parameters"`
 	// Result is internal reconciliation metadata. It may contain worker/R2
 	// artifact keys and must never be returned through the Studio job API.
-	Result       JSON       `gorm:"type:jsonb" json:"-"`
-	SourceKey    string     `gorm:"type:varchar(512)" json:"-"`
-	PayloadKey   string     `gorm:"type:varchar(512)" json:"-"`
-	ReconciledAt *time.Time `json:"reconciled_at,omitempty"`
-	CreatedAt    time.Time  `gorm:"index;not null" json:"created_at"`
-	UpdatedAt    time.Time  `gorm:"index;not null" json:"updated_at"`
+	Result            JSON       `gorm:"type:jsonb" json:"-"`
+	PendingObjectKeys JSON       `gorm:"type:jsonb" json:"-"`
+	SourceKey         string     `gorm:"type:varchar(512)" json:"-"`
+	PayloadKey        string     `gorm:"type:varchar(512)" json:"-"`
+	ReconciledAt      *time.Time `json:"reconciled_at,omitempty"`
+	CreatedAt         time.Time  `gorm:"index;not null" json:"created_at"`
+	UpdatedAt         time.Time  `gorm:"index;not null" json:"updated_at"`
 }
 
 // StudioEditorState is the immutable, validated layout baseline produced by an
@@ -210,4 +211,12 @@ type StudioStorageCleanupTask struct {
 	LastError      string     `gorm:"type:varchar(512)" json:"-"`
 	CreatedAt      time.Time  `json:"-"`
 	UpdatedAt      time.Time  `json:"-"`
+}
+
+// StudioStorageObjectRetirement is an immutable key tombstone. Object keys
+// are never reused: physical deletion must not race a new catalog reference,
+// including after the retry ledger entry itself has been completed.
+type StudioStorageObjectRetirement struct {
+	ObjectKey string    `gorm:"type:varchar(512);primaryKey" json:"-"`
+	CreatedAt time.Time `json:"-"`
 }

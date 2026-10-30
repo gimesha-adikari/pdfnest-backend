@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -22,11 +21,11 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jung-kurt/gofpdf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"pdfnest-backend/internal/storage"
-	"pdfnest-backend/internal/studio/vdm"
 )
 
 // setupMockPyMuPDFWorkerServer spins up an authenticated HTTP mock worker server
@@ -86,6 +85,7 @@ func setupMockPyMuPDFWorkerServer(t *testing.T, secret string) *httptest.Server 
 }
 
 func TestStress_IdenticalConcurrentTilesSingleflight(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "stress-secret-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 	workerServer := setupMockPyMuPDFWorkerServer(t, secret)
@@ -95,57 +95,8 @@ func TestStress_IdenticalConcurrentTilesSingleflight(t *testing.T) {
 	app, _, _, renderer, _ := setupTestApp(t)
 	guestID := "guest_stress_sf_" + uuid.New().String()
 
-	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "stress_sf.pdf",
-		FileSize:         int64(len(pdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, err := app.Test(req, 5000)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "stress.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	// Fire 30 concurrent requests for the exact same tile on cold cache
 	concurrency := 30
@@ -165,6 +116,7 @@ func TestStress_IdenticalConcurrentTilesSingleflight(t *testing.T) {
 			r.Header.Set("X-Test-Guest-ID", guestID)
 			res, testErr := app.Test(r, 10000)
 			if testErr == nil {
+				defer res.Body.Close()
 				statusCodes[idx] = res.StatusCode
 				b, _ := io.ReadAll(res.Body)
 				payloads[idx] = b
@@ -188,6 +140,7 @@ func TestStress_IdenticalConcurrentTilesSingleflight(t *testing.T) {
 }
 
 func TestStress_DifferentSubTilesConcurrentLoad(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "stress-diff-tiles-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 	workerServer := setupMockPyMuPDFWorkerServer(t, secret)
@@ -197,54 +150,8 @@ func TestStress_DifferentSubTilesConcurrentLoad(t *testing.T) {
 	app, _, _, _, _ := setupTestApp(t)
 	guestID := "guest_diff_tiles_" + uuid.New().String()
 
-	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "diff_tiles.pdf",
-		FileSize:         int64(len(pdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, _ := app.Test(req, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "stress.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	// 12 distinct tiles across a grid (x: 0, 150, 300, y: 0, 200, 400, 600)
 	type tileSpec struct {
@@ -277,6 +184,7 @@ func TestStress_DifferentSubTilesConcurrentLoad(t *testing.T) {
 			r.Header.Set("X-Test-Guest-ID", guestID)
 			res, err := app.Test(r, 10000)
 			if err == nil {
+				defer res.Body.Close()
 				results[idx] = res.StatusCode
 				b, _ := io.ReadAll(res.Body)
 				img, decErr := jpeg.Decode(bytes.NewReader(b))
@@ -296,6 +204,7 @@ func TestStress_DifferentSubTilesConcurrentLoad(t *testing.T) {
 }
 
 func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "stress-multidoc-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 	workerServer := setupMockPyMuPDFWorkerServer(t, secret)
@@ -305,67 +214,15 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 	app, _, _, _, _ := setupTestApp(t)
 
 	// Create 2 independent documents with 2 pages each
-	createDoc := func(docIdx int) (string, string, string, string) {
+	createDoc := func(docIdx int) (string, string, string, []string) {
 		guestID := fmt.Sprintf("guest_doc_%d_%s", docIdx, uuid.New().String())
-		pdfBytes := createDeterministicTestPDF(t)
-		pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-		storageDir := storage.GetLocalStorageDir()
-		_ = os.MkdirAll(storageDir, 0755)
-		localPdfPath := filepath.Join(storageDir, pdfKey)
-		require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-		_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-
-		assetID := fmt.Sprintf("ast_%d_%s", docIdx, uuid.New().String())
-		p1ID := uuid.New().String()
-		p2ID := uuid.New().String()
-
-		createBody, _ := json.Marshal(CreateSessionRequest{
-			FileName:         fmt.Sprintf("doc_%d.pdf", docIdx),
-			FileSize:         int64(len(pdfBytes)),
-			InitialPageCount: 2,
-			SourceAssetID:    assetID,
-			SourceR2Key:      pdfKey,
-			InitialVDM: vdm.DocumentModel{
-				PageCount: 2,
-				Pages: []vdm.PageDescriptor{
-					{
-						PageID:           p1ID,
-						SourceAssetID:    &assetID,
-						SourcePageNumber: 1,
-						Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-						Rotation:         0,
-						IsBlank:          false,
-					},
-					{
-						PageID:           p2ID,
-						SourceAssetID:    &assetID,
-						SourcePageNumber: 2,
-						Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-						Rotation:         0,
-						IsBlank:          false,
-					},
-				},
-			},
-		})
-
-		req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Test-Guest-ID", guestID)
-		resp, _ := app.Test(req, 5000)
-		var initResp struct {
-			Session struct {
-				ID string `json:"id"`
-			} `json:"session"`
-			ActiveVersion struct {
-				ID string `json:"id"`
-			} `json:"active_version"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&initResp)
-		return guestID, initResp.Session.ID, initResp.ActiveVersion.ID, p1ID
+		fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), fmt.Sprintf("doc_%d.pdf", docIdx))
+		require.Len(t, fixture.VDM.Pages, 2)
+		return guestID, fixture.Session.ID, fixture.ActiveVersion.ID, []string{fixture.VDM.Pages[0].PageID, fixture.VDM.Pages[1].PageID}
 	}
 
-	g1, s1, v1, p1 := createDoc(1)
-	g2, s2, v2, p2 := createDoc(2)
+	g1, s1, v1, pages1 := createDoc(1)
+	g2, s2, v2, pages2 := createDoc(2)
 
 	// Fire concurrent requests targeting both documents simultaneously
 	var wg sync.WaitGroup
@@ -373,6 +230,7 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 	success2 := int32(0)
 
 	for i := 0; i < 10; i++ {
+		p1, p2 := pages1[i%len(pages1)], pages2[i%len(pages2)]
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -380,6 +238,9 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, url, nil)
 			r.Header.Set("X-Test-Guest-ID", g1)
 			res, err := app.Test(r, 10000)
+			if res != nil {
+				defer res.Body.Close()
+			}
 			if err == nil && res.StatusCode == http.StatusOK {
 				atomic.AddInt32(&success1, 1)
 			}
@@ -391,6 +252,9 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, url, nil)
 			r.Header.Set("X-Test-Guest-ID", g2)
 			res, err := app.Test(r, 10000)
+			if res != nil {
+				defer res.Body.Close()
+			}
 			if err == nil && res.StatusCode == http.StatusOK {
 				atomic.AddInt32(&success2, 1)
 			}
@@ -403,6 +267,7 @@ func TestStress_MultiPageAndMultiDocumentConcurrentLoad(t *testing.T) {
 }
 
 func TestStress_WorkerSaturationAndQueueFull429Propagation(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	// Setup a mock worker that returns HTTP 429 RENDER_QUEUE_FULL
 	saturatedWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
@@ -417,54 +282,8 @@ func TestStress_WorkerSaturationAndQueueFull429Propagation(t *testing.T) {
 	app, _, _, renderer, _ := setupTestApp(t)
 	guestID := "guest_sat_" + uuid.New().String()
 
-	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "sat.pdf",
-		FileSize:         int64(len(pdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, _ := app.Test(req, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "stress.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	// Request tile when worker is saturated -> must return HTTP 429 Too Many Requests
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p1ID)
@@ -481,61 +300,28 @@ func TestStress_WorkerSaturationAndQueueFull429Propagation(t *testing.T) {
 }
 
 func TestStress_CorruptPDFHandlingAndErrorMetrics(t *testing.T) {
-	app, _, _, renderer, _ := setupTestApp(t)
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	app, repo, _, renderer, _ := setupTestApp(t)
 	guestID := "guest_corrupt_" + uuid.New().String()
 
-	// Write corrupt bytes
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, []byte("NOT_A_VALID_PDF_HEADER_CORRUPT"), 0644)
-	defer os.Remove(localPdfPath)
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "corrupt.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
+	asset, err := repo.GetAsset(context.Background(), *fixture.VDM.Pages[0].SourceAssetID)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(storage.GetLocalStorageDir(), asset.R2Key), []byte("NOT_A_VALID_PDF_HEADER_CORRUPT"), 0600))
 
-	assetID := "ast_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "corrupt.pdf",
-		FileSize:         100,
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, _ := app.Test(req, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
-
-	// Mock renderer that returns error on corrupt PDF
+	// Exercise the real parser failure after successful admission; no malformed source
+	// may bypass upload validation merely to manufacture a rendering error.
 	renderer.SetWorkerRenderer(func(ctx context.Context, pdfPath string, pageNumber int, dpi float64) (image.Image, error) {
-		return nil, fmt.Errorf("fitz: cannot open broken document")
+		data, err := os.ReadFile(pdfPath)
+		if err != nil {
+			return nil, err
+		}
+		jpegBytes, err := renderPdfWithPyMuPDF(data, pageNumber, dpi)
+		if err != nil {
+			return nil, err
+		}
+		return jpeg.Decode(bytes.NewReader(jpegBytes))
 	})
 
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0", sessionID, v0ID, p1ID)
@@ -550,6 +336,7 @@ func TestStress_CorruptPDFHandlingAndErrorMetrics(t *testing.T) {
 }
 
 func TestStress_ScaleProgression_1To8(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "stress-scales-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 	workerServer := setupMockPyMuPDFWorkerServer(t, secret)
@@ -559,54 +346,8 @@ func TestStress_ScaleProgression_1To8(t *testing.T) {
 	app, _, _, _, _ := setupTestApp(t)
 	guestID := "guest_scales_" + uuid.New().String()
 
-	pdfBytes := createDeterministicTestPDF(t)
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "scales.pdf",
-		FileSize:         int64(len(pdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.28, Height: 841.89},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, _ := app.Test(req, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "stress.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	// Test scale progression: 1.0, 2.0, 4.0, 8.0 with a 200x200 tile
 	scales := []float64{1.0, 2.0, 4.0, 8.0}
@@ -618,7 +359,9 @@ func TestStress_ScaleProgression_1To8(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, res.StatusCode, "Scale %.1f must render successfully", sc)
 
-		b, _ := io.ReadAll(res.Body)
+		b, err := io.ReadAll(res.Body)
+		require.NoError(t, err)
+		require.NoError(t, res.Body.Close())
 		img, err := jpeg.Decode(bytes.NewReader(b))
 		require.NoError(t, err)
 		assert.Equal(t, 200, img.Bounds().Dx())
@@ -627,6 +370,7 @@ func TestStress_ScaleProgression_1To8(t *testing.T) {
 }
 
 func TestStress_MetricsEndpointObservability(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	app, _, _, _, _ := setupTestApp(t)
 	guestID := "guest_metrics_" + uuid.New().String()
 
@@ -647,10 +391,11 @@ func TestStress_MetricsEndpointObservability(t *testing.T) {
 }
 
 func TestStress_HugePageClipSafetyAndMaxTileDimension(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "stress-huge-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 
-	// Launch worker server backed by PyMuPDF supporting clip
+	// Return real page pixels; the backend crops and validates the requested tile.
 	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseMultipartForm(10 * 1024 * 1024)
 		file, _, err := r.FormFile("file")
@@ -684,68 +429,15 @@ func TestStress_HugePageClipSafetyAndMaxTileDimension(t *testing.T) {
 	app, _, _, _, _ := setupTestApp(t)
 	guestID := "guest_huge_" + uuid.New().String()
 
-	// 48 x 36 inch page fixture (3456 x 2592 pt)
-	cmd := exec.Command("./.venv/bin/python", "-c", `
-import pymupdf as fitz
-doc = fitz.open()
-page = doc.new_page(width=3456, height=2592)
-page.draw_rect(fitz.Rect(100, 100, 200, 200), color=(0, 1, 0), fill=(0, 1, 0))
-print(doc.tobytes().hex())
-`)
-	cmd.Dir = "/home/gimesha/My_Projects/platen/pdfnest-worker"
-	out, err := cmd.Output()
-	require.NoError(t, err)
-	hugePdfHex := string(bytes.TrimSpace(out))
-	hugePdfBytes, err := hex.DecodeString(hugePdfHex)
-	require.NoError(t, err)
-
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, hugePdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_huge_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "huge_blueprint.pdf",
-		FileSize:         int64(len(hugePdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 3456.0, Height: 2592.0},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Test-Guest-ID", guestID)
-	resp, _ := app.Test(req, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	// 48 x 36 inch page fixture (3456 x 2592 pt), generated entirely in Go.
+	pdf := gofpdf.NewCustom(&gofpdf.InitType{UnitStr: "pt", Size: gofpdf.SizeType{Wd: 3456, Ht: 2592}})
+	pdf.AddPage()
+	pdf.SetFillColor(0, 255, 0)
+	pdf.Rect(100, 100, 100, 100, "F")
+	var pdfBuffer bytes.Buffer
+	require.NoError(t, pdf.Output(&pdfBuffer))
+	fixture := createRenderingSession(t, app, guestID, pdfBuffer.Bytes(), "huge_blueprint.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	// 1. Valid sub-tile request on huge page at Scale 1.0 (tile 256x256 covering marker)
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=100&tile_y=100&tile_w=256&tile_h=256", sessionID, v0ID, p1ID)

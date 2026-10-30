@@ -13,12 +13,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"pdfnest-backend/internal/storage"
-	"pdfnest-backend/internal/structure"
 )
 
 func TestStudioFinalizer_FlattensFoundationTextOverlayIntoPDF(t *testing.T) {
-	service, repo, _, ident, session, version, initial := finalizerFixture(t)
-	finalizer := NewFinalizer(repo, structure.NewService())
+	service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
 	coordinator := NewOperationCoordinator(repo)
 
 	rotated, err := coordinator.Execute(context.Background(), session.ID, ident, commandRequest(t, version.ID, "overlay-rotate-"+uuid.NewString(), CommandRotatePage, RotatePageParameters{
@@ -54,8 +52,7 @@ func TestStudioFinalizer_FlattensFoundationTextOverlayIntoPDF(t *testing.T) {
 }
 
 func TestStudioMaterializationCoordinator_CompressPreservesFlattenedOverlayAndRedo(t *testing.T) {
-	service, repo, _, ident, session, version, initial := finalizerFixture(t)
-	finalizer := NewFinalizer(repo, structure.NewService())
+	service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
 	commandCoordinator := NewOperationCoordinator(repo)
 	overlayResult, err := commandCoordinator.Execute(context.Background(), session.ID, ident, commandRequest(t, version.ID, "overlay-materialize-"+uuid.NewString(), CommandAddTextOverlay, AddTextOverlayParameters{
 		PageID: initial.Pages[0].PageID, Text: "Compress Overlay", X: 72, Y: 500, FontSize: 18,
@@ -100,8 +97,7 @@ func TestStudioMaterializationCoordinator_CompressPreservesFlattenedOverlayAndRe
 }
 
 func TestStudioFinalizer_FlattensPageNumbersAndMaterializationClearsDeferredRule(t *testing.T) {
-	service, repo, _, ident, session, version, initial := finalizerFixture(t)
-	finalizer := NewFinalizer(repo, structure.NewService())
+	service, repo, finalizer, ident, session, version, initial := finalizerFixture(t)
 	coordinator := NewOperationCoordinator(repo)
 	numbered, err := coordinator.Execute(context.Background(), session.ID, ident, commandRequest(t, version.ID, "page-numbering-finality-"+uuid.NewString(), CommandUpdatePageNumbering, UpdatePageNumberingParameters{
 		Enabled: true, Position: "bc", FontSize: 12, FontFamily: "Helvetica",

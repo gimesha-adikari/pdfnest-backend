@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/temp"
 	"strings"
 	"time"
@@ -58,6 +59,11 @@ func StartCleanupWorker(checkInterval time.Duration, fileTTL time.Duration) {
 }
 
 func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
+	durableRoot := filepath.Clean(storage.GetLocalStorageDir())
+	cleanedDir := filepath.Clean(dirPath)
+	if cleanedDir == durableRoot || strings.HasPrefix(cleanedDir, durableRoot+string(filepath.Separator)) {
+		return 0
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		return 0
@@ -66,6 +72,7 @@ func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
 	now := time.Now()
 	evictionCount := 0
 	dedicatedDir := filepath.Clean(temp.GetDir())
+	durableDir := filepath.Clean(storage.GetLocalStorageDir())
 
 	for _, entry := range entries {
 		name := entry.Name()
@@ -76,7 +83,7 @@ func sweepDir(dirPath string, ttl time.Duration, checkPrefix bool) int {
 		fullPath := filepath.Join(dirPath, name)
 
 		// Never delete the active dedicated temp directory itself or any pdfnest-temp workspace directory
-		if filepath.Clean(fullPath) == dedicatedDir || strings.HasPrefix(name, "pdfnest-temp") {
+		if filepath.Clean(fullPath) == dedicatedDir || strings.HasPrefix(name, "pdfnest-temp") || durableDir == filepath.Clean(fullPath) || strings.HasPrefix(durableDir, filepath.Clean(fullPath)+string(filepath.Separator)) {
 			continue
 		}
 

@@ -6,12 +6,14 @@ WORKDIR /src
 
 COPY go.mod go.sum ./
 
-RUN go mod download
+RUN --mount=type=cache,id=platen-go-modules,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -o /out/server .
+RUN --mount=type=cache,id=platen-go-modules,target=/go/pkg/mod \
+    --mount=type=cache,id=platen-go-build,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=readonly -o /out/server .
 
 FROM debian:bookworm-slim
 
@@ -19,14 +21,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PORT=10000 \
     CHROMIUM_PATH=/usr/bin/chromium
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,id=platen-bookworm-lists,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=platen-bookworm-archives,target=/var/cache/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update && \
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
     ca-certificates \
     curl \
     dumb-init \
     ghostscript \
     chromium \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+    git
 
 WORKDIR /app
 

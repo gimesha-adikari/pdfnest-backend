@@ -595,6 +595,12 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
 	}
 
+	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, ownerIdentity, reservationID, string(lease.reservationKind)); err != nil {
+		lease.settle()
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"code": "TASK_DURABILITY_UNAVAILABLE", "message": "Unable to durably admit this task."})
+	}
+
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id, target string, printOpts PrintOptions, reservationID, owner string) {
@@ -701,46 +707,13 @@ func (ctrl *Controller) HandleAsyncHTMLToPDF(c *fiber.Ctx) error {
 			return
 		}
 
-		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
-		r2Store, r2Err := storage.Default()
-		isProd := os.Getenv("APP_ENV") == "production"
-
-		if r2Err != nil || r2Store == nil {
-			if isProd {
-				releaseBilling()
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
-				return
-			}
-			if err := lease.commit(); err != nil {
-				releaseBilling()
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-				return
-			}
-			billingSettled = true
-			_, _ = tasks.Registry.SetWithKey(id, "COMPLETED", 100, outPath, "", owner)
+		key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
+		if err := tasks.Registry.PublishArtifact(context.Background(), id, key, outPath, "application/pdf"); err != nil {
+			log.Printf("[CONVERSION TASK] durable completion %s requires reconciliation: %v", id, err)
 			return
 		}
-
-		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
-			releaseBilling()
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
-			return
-		}
-
-		if err := lease.commit(); err != nil {
-			_ = os.Remove(outPath)
-			releaseBilling()
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
-			return
-		}
-
 		billingSettled = true
-		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
-		if !accepted {
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
-		}
+
 	}(taskId, targetURL, opts, reservationID, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
@@ -809,6 +782,12 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 		_ = os.Remove(inputPath)
 		idempotency.Release(c, nil)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to register task"})
+	}
+
+	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, ownerIdentity, reservationID, string(lease.reservationKind)); err != nil {
+		lease.settle()
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"code": "TASK_DURABILITY_UNAVAILABLE", "message": "Unable to durably admit this task."})
 	}
 
 	_ = idempotency.SetTaskID(c, taskId, nil)
@@ -918,38 +897,19 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 			return
 		}
 
-		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
-		r2Store, r2Err := storage.Default()
-
-		if r2Err != nil || r2Store == nil {
-			// A temporary path is neither a durable object key nor a deliverable
-			// result: the common cleanup below removes it. Never publish or charge
-			// a successful task when its output cannot be persisted, in any venue.
+		// Preserve the reviewed Markdown fail-closed storage admission.
+		if store, err := storage.Default(); err != nil || store == nil {
 			releaseBilling()
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Result storage is unavailable. No document was published.", owner)
+			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Completed document storage is unavailable.", owner)
 			return
 		}
-
-		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
-			releaseBilling()
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
+		key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
+		if err := tasks.Registry.PublishArtifact(context.Background(), id, key, outPath, "application/pdf"); err != nil {
+			log.Printf("[CONVERSION TASK] durable completion %s requires reconciliation: %v", id, err)
 			return
 		}
-
-		if err := lease.commit(); err != nil {
-			_ = os.Remove(outPath)
-			releaseBilling()
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed.", owner)
-			return
-		}
-
 		billingSettled = true
-		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
-		if !accepted {
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			log.Printf("[CONVERSION TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
-		}
+
 	}(taskId, inputPath, opts, reservationID, ownerIdentity)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{

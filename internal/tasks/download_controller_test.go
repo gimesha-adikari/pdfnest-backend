@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"pdfnest-backend/internal/identity"
 	"strings"
 	"testing"
@@ -526,4 +527,39 @@ func TestDownloadController_SecurityAuthorizationMatrix(t *testing.T) {
 			t.Errorf("Expected PDF stream payload, got %s", string(bodyBytes))
 		}
 	})
+}
+
+func TestDownloadUnavailableArtifactNeverCommitsLegacyBilling(t *testing.T) {
+	_, reg, cleanup := setupDownloadTestRedis(t)
+	defer cleanup()
+	original := CommitTaskBillingHandlerWithKind
+	called := false
+	CommitTaskBillingHandlerWithKind = func(string, string) { called = true }
+	defer func() { CommitTaskBillingHandlerWithKind = original }()
+	id := "unavailable-billing-artifact"
+	if err := reg.Set(id, "PENDING", 0, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := reg.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status = "COMPLETED"
+	task.ResultURL = filepath.Join(t.TempDir(), "missing.pdf")
+	task.ReservationID = "reserved-but-no-artifact"
+	data, _ := json.Marshal(task)
+	reg.client.Set(context.Background(), TaskKeyPrefix+id, data, TaskTTL)
+	app := fiber.New()
+	app.Get("/:id", HandleTaskDownload)
+	response, err := app.Test(httptest.NewRequest("GET", "/"+id, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusGone {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	if called {
+		t.Fatal("unavailable artifact committed billing")
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -14,7 +13,6 @@ import (
 
 	"pdfnest-backend/internal/analyzer/engine"
 	"pdfnest-backend/internal/netguard"
-	"pdfnest-backend/internal/process"
 )
 
 var blockedCIDRs []*net.IPNet
@@ -55,6 +53,11 @@ func ValidateGitURL(rawURL string) error {
 
 // ValidateGitURLWithResolver validates a Git URL using a custom DNS resolver.
 func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
+	// Session creation and queued-job validation also resolve DNS through this
+	// boundary, so required storage policy must refuse those paths as well.
+	if err := checkGitStoragePolicy(); err != nil {
+		return err
+	}
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		return fmt.Errorf("empty git url")
@@ -207,6 +210,13 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 			_ = sandbox.Cleanup()
 		}
 	}()
+	// Check before DNS resolution, guarded transport, or any native process.
+	if err := checkGitStoragePolicy(); err != nil {
+		return nil, err
+	}
+	if err := sandbox.admitGitQuota(); err != nil {
+		return nil, err
+	}
 	gitURL = strings.TrimSpace(gitURL)
 	if err := ValidateGitURL(gitURL); err != nil {
 		return nil, err
@@ -222,17 +232,16 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 
 	startTime := time.Now()
 
+	scratchRoot, home, temp, err := sandbox.gitScratch()
+	if err != nil {
+		return nil, fmt.Errorf("%w: prepare auxiliary scratch: %w", ErrGitAcquisitionFailed, err)
+	}
 	parsed, _ := url.Parse(gitURL) // Validated above.
 	proxy, err := netguard.StartGit(cloneCtx, parsed.Hostname(), timeout)
 	if err != nil {
 		return nil, fmt.Errorf("%w: guarded transport unavailable", ErrGitAcquisitionFailed)
 	}
 	defer proxy.Close()
-	home, err := os.MkdirTemp("", "platen-git-home-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(home)
 	args := []string{
 		"-c", "http.followRedirects=false",
 		"-c", "http.proxy=" + proxy.URL,
@@ -246,8 +255,11 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	}
 	cmd := exec.Command(gitBinary, args...)
 	cmd.Dir = home
-	cmd.Env = isolatedGitEnv(home)
-	output, err := runBoundedGit(cloneCtx, cmd, sandbox.RootPath, limits)
+	cmd.Env = isolatedGitEnv(home, temp)
+	if err := sandbox.confineGit(cmd); err != nil {
+		return nil, err
+	}
+	output, err := runBoundedGit(cloneCtx, cmd, scratchRoot, limits)
 	if errors.Is(err, ErrGitResourceLimit) {
 		return nil, err
 	}
@@ -277,6 +289,12 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 
 		// 4. Stderr pattern classification
 		lowerOut := strings.ToLower(outStr)
+		if strings.Contains(lowerOut, "git_storage_unavailable:") {
+			return nil, fmt.Errorf("%w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable)
+		}
+		if strings.Contains(lowerOut, "disk quota exceeded") {
+			return nil, fmt.Errorf("%w: kernel quota refused allocation", ErrGitResourceLimit)
+		}
 		if strings.Contains(lowerOut, "authentication failed") ||
 			strings.Contains(lowerOut, "could not read username") ||
 			strings.Contains(lowerOut, "terminal prompts disabled") {
@@ -302,10 +320,19 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	// Capture commit hash via direct rev-parse
 	var commitHash string
 	revCmd := exec.Command(gitBinary, "-C", sandbox.RootPath, "rev-parse", "HEAD")
-	revCmd.Env = isolatedGitEnv(home)
+	revCmd.Env = isolatedGitEnv(home, temp)
 	revCmd.Dir = home
-	if revOut, revErr := (process.Runner{}).RunCommand(cloneCtx, 0, revCmd); revErr == nil {
+	if err := sandbox.confineGit(revCmd); err != nil {
+		return nil, err
+	}
+	if revOut, revErr := runBoundedGit(cloneCtx, revCmd, scratchRoot, limits); revErr == nil {
 		commitHash = strings.TrimSpace(string(revOut))
+	} else if errors.Is(revErr, ErrGitResourceLimit) {
+		return nil, revErr
+	}
+	// Keep scratch acceptance separate from repository provenance statistics.
+	if _, _, err := checkGitWorkspace(cloneCtx, scratchRoot, effectiveGitLimits(limits)); err != nil {
+		return nil, err
 	}
 
 	fileCount, totalBytes, err := checkGitWorkspace(cloneCtx, sandbox.RootPath, effectiveGitLimits(limits))

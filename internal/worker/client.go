@@ -96,6 +96,13 @@ func (st *signingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	store := currentDurabilityStore()
+	if store != nil {
+		return store.durableRoundTrip(req, base)
+	}
+	if durabilityRequired() && (queuedSubmission(req.URL.Path) || strings.Contains(req.URL.Path, "/jobs/")) {
+		return nil, ErrDurabilityUnavailable
+	}
 	return base.RoundTrip(req)
 }
 

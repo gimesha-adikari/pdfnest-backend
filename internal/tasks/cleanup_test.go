@@ -100,3 +100,32 @@ func TestJanitor_NeverDeletesDedicatedTempDir(t *testing.T) {
 	defer os.Remove(testFile)
 }
 
+func TestSweepDirPreservesDurableStorageAndItsAncestor(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "pdfnest-durable-parent")
+	durable := filepath.Join(parent, "results")
+	if err := os.MkdirAll(durable, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCAL_STORAGE_DIR", durable)
+	result := filepath.Join(durable, "pinned-result.pdf")
+	if err := os.WriteFile(result, []byte("pinned unresolved artifact"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(parent, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(durable, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if swept := sweepDir(root, time.Hour, true); swept != 0 {
+		t.Fatalf("durable ancestor swept: %d", swept)
+	}
+	if swept := sweepDir(parent, time.Hour, false); swept != 0 {
+		t.Fatalf("durable root swept: %d", swept)
+	}
+	if _, err := os.Stat(result); err != nil {
+		t.Fatal("pinned durable artifact removed", err)
+	}
+}
