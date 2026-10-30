@@ -170,7 +170,7 @@ func (s *Sandbox) confineGit(cmd *exec.Cmd) error {
 	if cmd.Path != "/usr/bin/git" {
 		return fmt.Errorf("%w: required mode uses fixed system Git", ErrGitStorageUnavailable)
 	}
-	cmd.Args = append([]string{s.quotaLease.Helper(), "run", s.quotaLease.ConfigPath(), s.quotaLease.Path(), "--"}, cmd.Args[1:]...)
+	cmd.Args = append([]string{s.quotaLease.Helper(), "run", s.quotaLease.ConfigPath(), s.quotaLease.Path(), s.quotaLease.Token(), "--"}, cmd.Args[1:]...)
 	cmd.Path = s.quotaLease.Helper()
 	return nil
 }

@@ -5,9 +5,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 
@@ -15,6 +17,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "authority" {
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer cancel()
+		if err := gitquota.ServeAuthority(ctx, os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(125)
+		}
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "capability" {
 		path := os.Getenv("ANALYZER_GIT_QUOTA_CONFIG")
 		if len(os.Args) == 3 {
@@ -22,7 +33,7 @@ func main() {
 		}
 		manager, err := gitquota.Load(path)
 		if err == nil {
-			err = manager.ProbeLocal()
+			err = manager.Probe()
 		}
 		abi, abiErr := gitquota.ConfinementABI()
 		result := map[string]any{"quotaStatus": "BLOCKED", "hardAllocatedBytes": gitquota.HardBytes, "hardTotalInodes": gitquota.HardInodes, "landlockABI": abi, "confinementRuntime": "NOT_EXERCISED"}
@@ -48,7 +59,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("usage: git-quota-exec probe CONFIG | run CONFIG SLOT -- GIT_ARGS...")
+		return fmt.Errorf("usage: git-quota-exec authority CONFIG | probe CONFIG | run CONFIG SLOT TOKEN -- GIT_ARGS...")
 	}
 	manager, err := gitquota.Load(args[1])
 	if err != nil {
@@ -67,9 +78,18 @@ func run(args []string) error {
 		}
 	}
 	if args[0] == "probe" && len(args) == 2 {
+		if err := manager.Probe(); err != nil {
+			return err
+		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"quotaStatus": "KERNEL_QUOTAS_VERIFIED", "confinementRuntime": "NOT_EXERCISED", "hardAllocatedBytes": gitquota.HardBytes, "hardTotalInodes": gitquota.HardInodes})
 	}
-	if (args[0] != "run" && args[0] != "confined") || len(args) < 5 || args[3] != "--" {
+	if args[0] == "run" {
+		if len(args) < 6 || args[4] != "--" {
+			return fmt.Errorf("run requires a protected authority lease token")
+		}
+		return manager.RunSupervised(args[2], args[3], args[5:])
+	}
+	if args[0] != "confined" || len(args) < 5 || args[3] != "--" {
 		return fmt.Errorf("invalid helper invocation")
 	}
 	if !manager.Allows(args[2]) {
@@ -77,19 +97,6 @@ func run(args []string) error {
 	}
 	if err := manager.CheckGit(); err != nil {
 		return err
-	}
-	if args[0] == "run" {
-		if err := manager.CheckBwrap(); err != nil {
-			return err
-		}
-		helper, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		if err := gitquota.DropPrivileges(); err != nil {
-			return err
-		}
-		return syscall.Exec("/usr/bin/bwrap", gitquota.NamespaceArgs(helper, args[1], args[2], args[4:]), os.Environ())
 	}
 	if err := gitquota.CheckNamespace(args[2]); err != nil {
 		return err

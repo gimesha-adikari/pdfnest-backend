@@ -16,3 +16,5 @@ func (*Lease) Path() string               { return "" }
 func (*Lease) Helper() string             { return "" }
 func (*Lease) ConfigPath() string         { return "" }
 func (*Lease) Release() error             { return ErrUnavailable }
+
+func (*Lease) Token() string { return "" }
