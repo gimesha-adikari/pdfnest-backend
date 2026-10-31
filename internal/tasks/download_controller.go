@@ -40,17 +40,19 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		})
 	}
 
-	if task.ReservationID != "" && (CommitTaskBillingHandlerWithKind != nil || CommitTaskBillingHandler != nil) {
-		if CommitTaskBillingHandlerWithKind != nil {
-			CommitTaskBillingHandlerWithKind(task.ReservationID, task.ReservationKind)
-		} else {
-			CommitTaskBillingHandler(task.ReservationID)
-		}
+	durable, durableErr := durableTask(c.UserContext(), id)
+	if durableErr != nil {
+		return c.SendStatus(fiber.StatusServiceUnavailable)
 	}
 
 	key := task.ResultKey
 	if key == "" && strings.HasPrefix(task.ResultURL, "r2://") {
 		key = strings.TrimPrefix(task.ResultURL, "r2://")
+	}
+
+	if key != "" && !storage.RemoteStorageEnabled() {
+		task.ResultURL = filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(key))
+		key = ""
 	}
 
 	if key != "" {
@@ -73,6 +75,14 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		defer func() {
 			_ = os.Remove(tmpPath)
 		}()
+
+		if durable == nil && task.ReservationID != "" && (CommitTaskBillingHandlerWithKind != nil || CommitTaskBillingHandler != nil) {
+			if CommitTaskBillingHandlerWithKind != nil {
+				CommitTaskBillingHandlerWithKind(task.ReservationID, task.ReservationKind)
+			} else {
+				CommitTaskBillingHandler(task.ReservationID)
+			}
+		}
 
 		// The object key is server-controlled, so its extension is safe for content-type selection.
 		contentType := "application/octet-stream"
@@ -98,11 +108,19 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 
 	// Retain the local fallback while tasks created before object storage migration can expire.
 	filePath := task.ResultURL
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	if info, err := os.Stat(filePath); err != nil || info.IsDir() {
 		return c.Status(fiber.StatusGone).JSON(fiber.Map{
 			"code":    "ASSET_REMOVED",
 			"message": "The requested temporary asset has been cleaned from cache storage.",
 		})
+	}
+
+	if durable == nil && task.ReservationID != "" && (CommitTaskBillingHandlerWithKind != nil || CommitTaskBillingHandler != nil) {
+		if CommitTaskBillingHandlerWithKind != nil {
+			CommitTaskBillingHandlerWithKind(task.ReservationID, task.ReservationKind)
+		} else {
+			CommitTaskBillingHandler(task.ReservationID)
+		}
 	}
 
 	c.Set("Content-Type", "application/octet-stream")

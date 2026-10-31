@@ -27,7 +27,7 @@ jobs:
           check-latest: true
 
       - name: Install Native OS Dependencies for Tests
-        run: sudo apt-get update && sudo apt-get install -y ghostscript poppler-utils postgresql
+        run: sudo apt-get update && sudo apt-get install -y ghostscript poppler-utils postgresql redis-server tesseract-ocr qpdf
 
       - name: Verify Go Backend Compilation
         run: go build ./...
@@ -60,8 +60,38 @@ jobs:
           command -v google-chrome || command -v chromium || command -v chromium-browser || command -v google-chrome-stable
           go test ./internal/conversion -run '^(TestMarkdown|TestCode)' -count=1 -p 1 -parallel 1 -timeout 5m
 
-      - name: Verify account security with isolated native PostgreSQL
+      - name: Verify account security and Studio retention with isolated native PostgreSQL
         run: scripts/test-account-security.sh
+
+      - name: Setup Python for pinned Worker compatibility
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare exact reviewed Worker compatibility source
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/backend-worker-compat-venv
+          UV_CONCURRENT_DOWNLOADS: '1'
+          UV_CONCURRENT_BUILDS: '1'
+          UV_CONCURRENT_INSTALLS: '1'
+        run: |
+          git init "$RUNNER_TEMP/backend-worker-compat"
+          git -C "$RUNNER_TEMP/backend-worker-compat" remote add origin https://github.com/gimesha-adikari/pdfnest-worker.git
+          git -C "$RUNNER_TEMP/backend-worker-compat" fetch --depth 1 origin 8595d73f8c39865f35acd6259b91ed897fc07f7c
+          git -C "$RUNNER_TEMP/backend-worker-compat" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/backend-worker-compat" rev-parse HEAD)" = 8595d73f8c39865f35acd6259b91ed897fc07f7c
+          # The old-receiver fixture reads this exact historical module via git
+          # show; retain it without changing the reviewed current checkout.
+          git -C "$RUNNER_TEMP/backend-worker-compat" fetch --depth 1 origin 18c96a36271c0f6269d33ca5aac6e82e4ab964cc
+          git -C "$RUNNER_TEMP/backend-worker-compat" cat-file -e 18c96a36271c0f6269d33ca5aac6e82e4ab964cc:app/core/security.py
+          python -m pip install --no-cache-dir uv==0.11.28
+          uv sync --project "$RUNNER_TEMP/backend-worker-compat" --frozen --no-install-project
+          uv pip check --python "$UV_PROJECT_ENVIRONMENT/bin/python"
+          echo "F15_WORKER_ROOT=$RUNNER_TEMP/backend-worker-compat" >> "$GITHUB_ENV"
+          echo "F15_PYTHON=$UV_PROJECT_ENVIRONMENT/bin/python" >> "$GITHUB_ENV"
+
+      - name: Verify backend durability with isolated PostgreSQL and Redis
+        run: scripts/test-backend-durability.sh
 
       - name: Verify Analyzer public failure boundaries
         run: scripts/test-analyzer-public-errors.sh

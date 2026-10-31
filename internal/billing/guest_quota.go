@@ -59,6 +59,8 @@ func (s *GuestQuotaStore) stateKey(guestID string) string {
 	return s.prefix + "state:" + guestID
 }
 
+func (s *GuestQuotaStore) outcomeKey(id string) string { return s.prefix + "outcome:" + id }
+
 func (s *GuestQuotaStore) resKey(reservationID string) string {
 	return s.prefix + "res:" + reservationID
 }
@@ -168,6 +170,17 @@ func (s *GuestQuotaStore) reserveWithLimits(ctx context.Context, guestID string,
 }
 
 func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) error {
+	return s.commit(ctx, reservationID, false)
+}
+
+// CommitConfirmed distinguishes an ACK-lost success from a released or expired
+// reservation. Receipts have no TTL: an unresolved SQL outbox may retry after
+// any process outage, so absence must never be accepted as charge evidence.
+func (s *GuestQuotaStore) CommitConfirmed(ctx context.Context, id string) error {
+	return s.commit(ctx, id, true)
+}
+
+func (s *GuestQuotaStore) commit(ctx context.Context, reservationID string, strict bool) error {
 	if strings.TrimSpace(reservationID) == "" {
 		return nil
 	}
@@ -178,7 +191,14 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 	res, err := s.loadReservation(ctx, reservationID)
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
-			return nil
+			if !strict {
+				return nil
+			}
+			outcome, receiptErr := s.rdb.Get(ctx, s.outcomeKey(reservationID)).Result()
+			if receiptErr == nil && outcome == "committed" {
+				return nil
+			}
+			return errors.New("guest reservation lacks committed outcome")
 		}
 		return err
 	}
@@ -187,14 +207,21 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 	stateKey := s.stateKey(res.GuestID)
 	reservationKey := s.resKey(reservationID)
 
-	return watchReservation(ctx, s.rdb, []string{stateKey, reservationKey}, func(tx *redis.Tx) error {
+	return watchReservation(ctx, s.rdb, []string{stateKey, reservationKey, s.outcomeKey(reservationID)}, func(tx *redis.Tx) error {
 		// Re-read the reservation inside the watched transaction. A duplicate
 		// commit must observe the reservation deletion and become a no-op even
 		// when the first commit changed the state key and caused a WATCH retry.
 		current, err := s.loadReservationFrom(ctx, tx, reservationID)
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
-				return nil
+				if !strict {
+					return nil
+				}
+				outcome, receiptErr := tx.Get(ctx, s.outcomeKey(reservationID)).Result()
+				if receiptErr == nil && outcome == "committed" {
+					return nil
+				}
+				return errors.New("guest reservation lacks committed outcome")
 			}
 			return err
 		}
@@ -226,6 +253,7 @@ func (s *GuestQuotaStore) Commit(ctx context.Context, reservationID string) erro
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			pipe.HSet(ctx, s.stateKey(current.GuestID), state.toMap()...)
 			pipe.Expire(ctx, stateKey, s.ttl)
+			pipe.Set(ctx, s.outcomeKey(reservationID), "committed", 0)
 			pipe.Del(ctx, reservationKey)
 			return nil
 		})
@@ -287,6 +315,7 @@ func (s *GuestQuotaStore) Release(ctx context.Context, reservationID string) err
 		_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			pipe.HSet(ctx, s.stateKey(current.GuestID), state.toMap()...)
 			pipe.Expire(ctx, stateKey, s.ttl)
+			pipe.Set(ctx, s.outcomeKey(reservationID), "released", 0)
 			pipe.Del(ctx, reservationKey)
 			return nil
 		})

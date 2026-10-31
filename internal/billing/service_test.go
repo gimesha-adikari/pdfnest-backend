@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/models"
 
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
@@ -23,7 +24,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Skip("Postgres database connection unavailable, skipping test")
 	}
 
-	_ = db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{})
+	_ = db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{})
 	config.DB = db
 	return db
 }

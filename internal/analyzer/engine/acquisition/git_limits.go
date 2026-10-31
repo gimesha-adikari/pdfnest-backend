@@ -10,13 +10,37 @@ import (
 	"syscall"
 	"time"
 
+	"pdfnest-backend/internal/analyzer/engine/acquisition/gitquota"
 	"pdfnest-backend/internal/process"
 )
 
-func isolatedGitEnv(home string) []string {
+func isolatedGitEnv(home, temp string) []string {
 	return []string{"PATH=/usr/bin:/bin", "HOME=" + home, "XDG_CONFIG_HOME=" + home,
+		"XDG_CACHE_HOME=" + home, "XDG_DATA_HOME=" + home, "XDG_STATE_HOME=" + home,
+		"TMPDIR=" + temp, "TMP=" + temp, "TEMP=" + temp,
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1", "LC_ALL=C"}
+}
+
+// Required mode consumes independent administrator-owned configuration and
+// verifies kernel quota state through the fixed read-only broker before DNS.
+// Monitoring remains a separate defense and is never promoted to a hard quota.
+func checkGitStoragePolicy() error {
+	switch os.Getenv("ANALYZER_GIT_STORAGE_POLICY") {
+	case "", "monitored":
+		return nil
+	case "required":
+		manager, err := gitquota.Load(os.Getenv("ANALYZER_GIT_QUOTA_CONFIG"))
+		if err == nil {
+			err = manager.Probe()
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: invalid Git storage policy", ErrGitAcquisitionFailed)
+	}
 }
 
 func effectiveGitLimits(limits AcquisitionLimits) AcquisitionLimits {
@@ -108,6 +132,9 @@ func runBoundedGit(ctx context.Context, cmd *exec.Cmd, root string, limits Acqui
 		}
 	}()
 	output, runErr := (process.Runner{}).RunCommand(runCtx, 0, cmd)
+	// Runner has already reaped the command leader here: its numeric PID/PGID
+	// must not be used to signal processes after possible identifier reuse.
+	// Required mode's bwrap PID namespace drains its descendants on exit.
 	close(stopped)
 	if err := <-monitored; err != nil {
 		return output, err

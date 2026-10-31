@@ -58,25 +58,8 @@ func (p *finalizerTestProcessor) RotatePDF(inputPath string, rotations map[strin
 	return current, nil
 }
 
-func (p *finalizerTestProcessor) AddTextToPDF(inputPath string, _ []structure.TextElement) (string, error) {
-	output := filepath.Join(os.TempDir(), "studio-finalizer-test-text-"+uuid.NewString()+".pdf")
-	in, err := os.Open(inputPath)
-	if err != nil {
-		return "", err
-	}
-	defer in.Close()
-	out, err := os.Create(output)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return "", err
-	}
-	if err := out.Close(); err != nil {
-		return "", err
-	}
-	return output, nil
+func (p *finalizerTestProcessor) AddTextToPDF(inputPath string, elements []structure.TextElement) (string, error) {
+	return structure.NewService().AddTextToPDF(inputPath, elements)
 }
 
 func (p *finalizerTestProcessor) SignPDF(inputPath string, signaturePath string, outputPath string, stampsJSON string) error {

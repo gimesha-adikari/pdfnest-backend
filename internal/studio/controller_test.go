@@ -18,10 +18,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"pdfnest-backend/internal/identity"
+	backendmodels "pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio/models"
 	"pdfnest-backend/internal/studio/vdm"
@@ -33,10 +33,8 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
 	}
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	require.NoError(t, err, "Failed to connect to PostgreSQL")
-
-	err = db.AutoMigrate(
+	db := openStudioTestDatabase(t, dsn)
+	err := db.AutoMigrate(
 		&models.StudioDocument{},
 		&models.StudioAsset{},
 		&models.StudioSnapshot{},
@@ -45,6 +43,9 @@ func setupTestApp(t *testing.T) (*fiber.App, Repository, Service, TileRenderer, 
 		&models.StudioSession{},
 		&models.StudioExport{},
 		&models.StudioStorageCleanupTask{},
+		&models.StudioStorageObjectRetirement{},
+		&backendmodels.WorkerResultOwnership{},
+		&backendmodels.TaskCompletion{},
 		&models.StudioEditorState{},
 		&models.StudioJob{},
 	)

@@ -215,6 +215,12 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		return c.Status(500).JSON(APIError{Code: "TASK_ERR", Message: "Failed to register task"})
 	}
 
+	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, ownerIdentity, reservation.ID, string(reservation.Kind)); err != nil {
+		_ = billing.Default.ReleaseAsync(context.Background(), reservation.ID, reservation.Kind)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(APIError{Code: "TASK_DURABILITY_UNAVAILABLE", Message: "Unable to durably admit this task."})
+	}
+
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id, srcPath, reservationID, lang, owner string, reservationKind billing.ReservationKind) {
@@ -313,51 +319,12 @@ func (ctrl *Controller) HandleAsyncExtractText(c *fiber.Ctx) error {
 		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/%s", id, filepath.Base(outPath))
-		r2Store, r2Err := storage.Default()
-		isProd := os.Getenv("APP_ENV") == "production"
-
-		if r2Err != nil || r2Store == nil {
-			if isProd {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
-				return
-			}
-			if err := persistLocalTaskResult(taskCtx, r2Key, outPath); err != nil {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to persist completed document locally.", owner)
-				return
-			}
-			if err := billing.Default.CommitAsync(context.Background(), reservationID, reservationKind); err != nil {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-				return
-			}
-			localResultPath := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(r2Key))
-			// Set must receive the durable filesystem path, not the local object
-			// key; SetWithKey intentionally represents result arguments as R2
-			// keys. The durable copy survives temporary-job cleanup.
-			_ = tasks.Registry.Set(id, "COMPLETED", 100, localResultPath, "")
-			return
+		if err := tasks.Registry.PublishArtifact(context.Background(), id, r2Key, outPath, "text/plain; charset=utf-8"); err != nil {
+			// The durable row now owns uncertain publication and settlement.
+			// Release is guarded by that row; never delete a possibly charged result.
+			log.Printf("[OCR TASK] durable completion %s requires reconciliation: %v", id, err)
 		}
 
-		if err := r2Store.UploadFile(outPath, r2Key, "text/plain; charset=utf-8"); err != nil {
-			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
-			return
-		}
-
-		if err := billing.Default.CommitAsync(context.Background(), reservationID, reservationKind); err != nil {
-			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-			return
-		}
-
-		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
-		if !accepted {
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			log.Printf("[OCR TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
-		}
 	}(taskId, inputPath, reservation.ID, lang, ownerIdentity, reservation.Kind)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})
@@ -460,6 +427,12 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		return c.Status(500).JSON(APIError{Code: "TASK_ERR", Message: "Failed to register task"})
 	}
 
+	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, ownerIdentity, reservation.ID, string(reservation.Kind)); err != nil {
+		_ = billing.Default.ReleaseAsync(context.Background(), reservation.ID, reservation.Kind)
+		idempotency.Release(c, nil)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(APIError{Code: "TASK_DURABILITY_UNAVAILABLE", Message: "Unable to durably admit this task."})
+	}
+
 	_ = idempotency.SetTaskID(c, taskId, nil)
 
 	go func(id string, imgPaths []string, reservationID, lang, owner string, reservationKind billing.ReservationKind) {
@@ -558,50 +531,10 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 
 		r2Key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
-		r2Store, r2Err := storage.Default()
-		isProd := os.Getenv("APP_ENV") == "production"
-
-		if r2Err != nil || r2Store == nil {
-			if isProd {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Cloud storage is unconfigured in production environment.", owner)
-				return
-			}
-			if err := persistLocalTaskResult(taskCtx, r2Key, outPath); err != nil {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to persist completed document locally.", owner)
-				return
-			}
-			if err := billing.Default.CommitAsync(context.Background(), reservationID, reservationKind); err != nil {
-				_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-				return
-			}
-			localResultPath := filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(r2Key))
-			// Keep the local fallback as a durable filesystem result URL. The
-			// managed branch above persists an R2 key and uses SetWithKey.
-			_ = tasks.Registry.Set(id, "COMPLETED", 100, localResultPath, "")
-			return
+		if err := tasks.Registry.PublishArtifact(context.Background(), id, r2Key, outPath, "application/pdf"); err != nil {
+			log.Printf("[OCR TASK] durable completion %s requires reconciliation: %v", id, err)
 		}
 
-		if err := r2Store.UploadFile(outPath, r2Key, "application/pdf"); err != nil {
-			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Failed to save completed document to cloud storage.", owner)
-			return
-		}
-
-		if err := billing.Default.CommitAsync(context.Background(), reservationID, reservationKind); err != nil {
-			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Billing finalization failed", owner)
-			return
-		}
-
-		accepted, _ := tasks.Registry.SetWithKey(id, "COMPLETED", 100, r2Key, "", owner)
-		if !accepted {
-			_ = r2Store.DeleteObject(context.Background(), r2Key)
-			log.Printf("[OCR TASK] SetWithKey COMPLETED rejected for task %s (status already terminal)", id)
-		}
 	}(taskId, tempPaths, reservation.ID, lang, ownerIdentity, reservation.Kind)
 
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"taskId": taskId})

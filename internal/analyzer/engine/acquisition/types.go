@@ -22,6 +22,10 @@ var (
 	// ErrGitAcquisitionFailed is returned when Git shallow clone fails.
 	ErrGitAcquisitionFailed = errors.New("GIT_ACQUISITION_FAILED: git clone operation failed")
 
+	// ErrGitStorageUnavailable means hard-quota admission could not be established;
+	// it does not imply that a repository exceeded a demonstrated kernel limit.
+	ErrGitStorageUnavailable = errors.New("GIT_STORAGE_UNAVAILABLE: independently enforced acquisition storage is unavailable")
+
 	// ErrGitTimeout is returned when Git clone exceeds the acquisition deadline.
 	ErrGitTimeout = errors.New("GIT_TIMEOUT: git clone operation timed out")
 

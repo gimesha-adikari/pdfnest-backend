@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -18,7 +17,9 @@ import (
 	"pdfnest-backend/internal/idempotency"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/limiter"
+	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/testfixture"
 	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
@@ -74,10 +75,9 @@ func TestGuestAsyncRequestPostFixSuccess(t *testing.T) {
 		NewController(NewService()).HandleAsyncExtractText,
 	)
 
-	fixture := filepath.Join("..", "..", "..", "pdfnest", "tests", "fixtures", "normal_text.pdf")
-	fixtureBytes, err := os.ReadFile(fixture)
+	fixtureBytes, err := testfixture.PDFBytes()
 	if err != nil {
-		t.Fatalf("read controlled fixture %s: %v", fixture, err)
+		t.Fatalf("generate controlled fixture: %v", err)
 	}
 
 	var body bytes.Buffer
@@ -304,10 +304,9 @@ func newGuestAsyncTestApp(guestID string) *fiber.App {
 
 func submitGuestAsyncTestTask(t *testing.T, app *fiber.App) string {
 	t.Helper()
-	fixture := filepath.Join("..", "..", "..", "pdfnest", "tests", "fixtures", "normal_text.pdf")
-	fixtureBytes, err := os.ReadFile(fixture)
+	fixtureBytes, err := testfixture.PDFBytes()
 	if err != nil {
-		t.Fatalf("read controlled fixture %s: %v", fixture, err)
+		t.Fatalf("generate controlled fixture: %v", err)
 	}
 
 	var body bytes.Buffer
@@ -379,7 +378,7 @@ func setupGuestAsyncIntegration(t *testing.T) (*gorm.DB, *redis.Client) {
 	if err != nil {
 		t.Fatalf("open isolated postgres: %v", err)
 	}
-	if err := db.AutoMigrate(&config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}); err != nil {
+	if err := db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}); err != nil {
 		t.Fatalf("migrate isolated postgres: %v", err)
 	}
 	options, err := redis.ParseURL(redisURL)

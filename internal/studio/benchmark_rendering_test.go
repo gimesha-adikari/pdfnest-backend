@@ -2,7 +2,6 @@ package studio
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,8 +9,6 @@ import (
 	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,9 +17,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"pdfnest-backend/internal/storage"
-	"pdfnest-backend/internal/studio/vdm"
 )
 
 func createSolidTestJpeg(w, h int, r, g, b uint8) []byte {
@@ -35,6 +29,7 @@ func createSolidTestJpeg(w, h int, r, g, b uint8) []byte {
 
 // TestBenchmark_ModeB_WarmCacheVsColdCache benchmarks cold cache vs warm cache latency
 func TestBenchmark_ModeB_WarmCacheVsColdCache(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "bench-warm-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 
@@ -52,54 +47,8 @@ func TestBenchmark_ModeB_WarmCacheVsColdCache(t *testing.T) {
 	app, _, _, _, _ := setupTestApp(t)
 	guestID := "guest_warm_" + uuid.New().String()
 
-	pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-	pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-	storageDir := storage.GetLocalStorageDir()
-	_ = os.MkdirAll(storageDir, 0755)
-	localPdfPath := filepath.Join(storageDir, pdfKey)
-	require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-	_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-	defer os.Remove(localPdfPath)
-
-	assetID := "ast_warm_" + uuid.New().String()
-	p1ID := uuid.New().String()
-
-	createBody, _ := json.Marshal(CreateSessionRequest{
-		FileName:         "warm_bench.pdf",
-		FileSize:         int64(len(pdfBytes)),
-		InitialPageCount: 1,
-		SourceAssetID:    assetID,
-		SourceR2Key:      pdfKey,
-		InitialVDM: vdm.DocumentModel{
-			PageCount: 1,
-			Pages: []vdm.PageDescriptor{
-				{
-					PageID:           p1ID,
-					SourceAssetID:    &assetID,
-					SourcePageNumber: 1,
-					Dimensions:       &vdm.Dimensions{Width: 595.0, Height: 842.0},
-					Rotation:         0,
-					IsBlank:          false,
-				},
-			},
-		},
-	})
-
-	reqInit := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-	reqInit.Header.Set("Content-Type", "application/json")
-	reqInit.Header.Set("X-Test-Guest-ID", guestID)
-	respInit, _ := app.Test(reqInit, 5000)
-	var initResp struct {
-		Session struct {
-			ID string `json:"id"`
-		} `json:"session"`
-		ActiveVersion struct {
-			ID string `json:"id"`
-		} `json:"active_version"`
-	}
-	_ = json.NewDecoder(respInit.Body).Decode(&initResp)
-	sessionID := initResp.Session.ID
-	v0ID := initResp.ActiveVersion.ID
+	fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "benchmark.pdf")
+	sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 	tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=0&tile_y=0&tile_w=256&tile_h=256", sessionID, v0ID, p1ID)
 
@@ -110,6 +59,7 @@ func TestBenchmark_ModeB_WarmCacheVsColdCache(t *testing.T) {
 	respCold, err := app.Test(reqCold, 5000)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, respCold.StatusCode)
+	require.NoError(t, respCold.Body.Close())
 	coldDuration := time.Since(tCold0)
 
 	assert.Equal(t, uint64(1), atomic.LoadUint64(&workerCalls))
@@ -140,6 +90,7 @@ func TestBenchmark_ModeB_WarmCacheVsColdCache(t *testing.T) {
 
 // TestBenchmark_ModeC_SingleflightScaling tests singleflight coalescing across concurrency 1, 2, 4, 8, 16, 32, 64
 func TestBenchmark_ModeC_SingleflightScaling(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	concurrencyLevels := []int{1, 2, 4, 8, 16, 32, 64}
 
 	for _, conc := range concurrencyLevels {
@@ -163,54 +114,8 @@ func TestBenchmark_ModeC_SingleflightScaling(t *testing.T) {
 			app, _, _, _, _ := setupTestApp(t)
 			guestID := fmt.Sprintf("guest_conc_%d_%s", conc, uuid.New().String())
 
-			pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-			pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-			storageDir := storage.GetLocalStorageDir()
-			_ = os.MkdirAll(storageDir, 0755)
-			localPdfPath := filepath.Join(storageDir, pdfKey)
-			require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-			_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-			defer os.Remove(localPdfPath)
-
-			assetID := fmt.Sprintf("ast_c_%d_%s", conc, uuid.New().String())
-			p1ID := uuid.New().String()
-
-			createBody, _ := json.Marshal(CreateSessionRequest{
-				FileName:         "bench_c.pdf",
-				FileSize:         int64(len(pdfBytes)),
-				InitialPageCount: 1,
-				SourceAssetID:    assetID,
-				SourceR2Key:      pdfKey,
-				InitialVDM: vdm.DocumentModel{
-					PageCount: 1,
-					Pages: []vdm.PageDescriptor{
-						{
-							PageID:           p1ID,
-							SourceAssetID:    &assetID,
-							SourcePageNumber: 1,
-							Dimensions:       &vdm.Dimensions{Width: 595.0, Height: 842.0},
-							Rotation:         0,
-							IsBlank:          false,
-						},
-					},
-				},
-			})
-
-			reqInit := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-			reqInit.Header.Set("Content-Type", "application/json")
-			reqInit.Header.Set("X-Test-Guest-ID", guestID)
-			respInit, _ := app.Test(reqInit, 5000)
-			var initResp struct {
-				Session struct {
-					ID string `json:"id"`
-				} `json:"session"`
-				ActiveVersion struct {
-					ID string `json:"id"`
-				} `json:"active_version"`
-			}
-			_ = json.NewDecoder(respInit.Body).Decode(&initResp)
-			sessionID := initResp.Session.ID
-			v0ID := initResp.ActiveVersion.ID
+			fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "benchmark.pdf")
+			sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 			tileURL := fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=0&tile_y=0&tile_w=200&tile_h=200", sessionID, v0ID, p1ID)
 
@@ -254,6 +159,7 @@ func TestBenchmark_ModeC_SingleflightScaling(t *testing.T) {
 
 // TestBenchmark_ModeE_MultiDocumentConcurrency tests concurrent rendering across independent documents
 func TestBenchmark_ModeE_MultiDocumentConcurrency(t *testing.T) {
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	secret := "bench-multi-" + uuid.New().String()
 	t.Setenv("WORKER_SHARED_SECRET", secret)
 
@@ -277,54 +183,8 @@ func TestBenchmark_ModeE_MultiDocumentConcurrency(t *testing.T) {
 		guestID := fmt.Sprintf("guest_multidoc_%d_%s", d, uuid.New().String())
 		guestIDs = append(guestIDs, guestID)
 
-		pdfBytes := []byte("%PDF-1.4 dummy pdf bytes")
-		pdfKey := storage.NewOwnedKey(guestID, "studio_source", ".pdf")
-		storageDir := storage.GetLocalStorageDir()
-		_ = os.MkdirAll(storageDir, 0755)
-		localPdfPath := filepath.Join(storageDir, pdfKey)
-		require.NoError(t, os.MkdirAll(filepath.Dir(localPdfPath), 0755))
-		_ = os.WriteFile(localPdfPath, pdfBytes, 0644)
-		defer os.Remove(localPdfPath)
-
-		assetID := fmt.Sprintf("ast_multi_%d_%s", d, uuid.New().String())
-		p1ID := uuid.New().String()
-
-		createBody, _ := json.Marshal(CreateSessionRequest{
-			FileName:         fmt.Sprintf("multi_doc_%d.pdf", d),
-			FileSize:         int64(len(pdfBytes)),
-			InitialPageCount: 1,
-			SourceAssetID:    assetID,
-			SourceR2Key:      pdfKey,
-			InitialVDM: vdm.DocumentModel{
-				PageCount: 1,
-				Pages: []vdm.PageDescriptor{
-					{
-						PageID:           p1ID,
-						SourceAssetID:    &assetID,
-						SourcePageNumber: 1,
-						Dimensions:       &vdm.Dimensions{Width: 595.0, Height: 842.0},
-						Rotation:         0,
-						IsBlank:          false,
-					},
-				},
-			},
-		})
-
-		reqInit := httptest.NewRequest(http.MethodPost, "/api/studio/v1/sessions", bytes.NewReader(createBody))
-		reqInit.Header.Set("Content-Type", "application/json")
-		reqInit.Header.Set("X-Test-Guest-ID", guestID)
-		respInit, _ := app.Test(reqInit, 5000)
-		var initResp struct {
-			Session struct {
-				ID string `json:"id"`
-			} `json:"session"`
-			ActiveVersion struct {
-				ID string `json:"id"`
-			} `json:"active_version"`
-		}
-		_ = json.NewDecoder(respInit.Body).Decode(&initResp)
-		sessionID := initResp.Session.ID
-		v0ID := initResp.ActiveVersion.ID
+		fixture := createRenderingSession(t, app, guestID, createDeterministicTestPDF(t), "benchmark.pdf")
+		sessionID, v0ID, p1ID := fixture.Session.ID, fixture.ActiveVersion.ID, fixture.VDM.Pages[0].PageID
 
 		tileURLs = append(tileURLs, fmt.Sprintf("/api/studio/v1/sessions/%s/versions/%s/pages/%s/tile?scale=1.0&tile_x=0&tile_y=0&tile_w=150&tile_h=150", sessionID, v0ID, p1ID))
 	}
