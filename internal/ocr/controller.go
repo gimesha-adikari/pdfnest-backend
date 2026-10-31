@@ -525,6 +525,14 @@ func (ctrl *Controller) HandleAsyncImageToTextPDF(c *fiber.Ctx) error {
 		}
 		localOutPath = outPath
 
+		if _, err := uploads.CheckPDFPageLimit(outPath, "MAX_PAGES_OCR", 150); err != nil {
+			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
+			if taskCtx.Err() == nil {
+				_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "The image conversion service did not produce a valid PDF.", owner)
+			}
+			return
+		}
+
 		if taskCtx.Err() != nil {
 			_ = billing.Default.ReleaseAsync(context.Background(), reservationID, reservationKind)
 			return
