@@ -131,13 +131,9 @@ func (f *studioFinalizer) MaterializeVersion(ctx context.Context, sessionID uuid
 		return nil, err
 	}
 
-	asset, err := f.ensureSnapshot(ctx, sessionID, ident, sess, doc, version, documentModel)
+	asset, path, cleanup, err := f.ensureSnapshot(ctx, sessionID, ident, sess, doc, version, documentModel)
 	if err != nil {
 		return nil, err
-	}
-	path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-materialized", ".pdf")
-	if err != nil {
-		return nil, fmt.Errorf("%w: resolve snapshot input: %v", ErrFinalizationFailed, err)
 	}
 	return &MaterializedVersion{
 		SessionExpiresAt: sess.ExpiresAt,
@@ -197,26 +193,63 @@ func (f *studioFinalizer) MaterializeVersionByID(ctx context.Context, sessionID,
 }
 
 // resolveVersionSnapshot returns the immutable PDF already recorded for a
-// version when it is still structurally valid and available in the configured
-// storage. Callers may safely fall back to source materialization on a cache
-// miss, just as ensureSnapshot does.
+// version when its database links and stored bytes are still valid. The
+// version-by-ID materializer may fall back to the authoritative VDM on a cache
+// miss or invalid snapshot; user-visible finalization rejects an invalid
+// snapshot pointer because that version already has an immutable checkpoint.
 func (f *studioFinalizer) resolveVersionSnapshot(ctx context.Context, documentID uuid.UUID, version *models.StudioVersion, pageCount int) (*models.StudioAsset, string, func(), bool) {
-	if version == nil || version.SnapshotID == nil || *version.SnapshotID == uuid.Nil {
-		return nil, "", nil, false
-	}
-	snapshot, err := f.repo.GetSnapshot(ctx, *version.SnapshotID)
-	if err != nil || snapshot.VersionID != version.ID || snapshot.PageCount != pageCount {
-		return nil, "", nil, false
-	}
-	asset, err := f.repo.GetAsset(ctx, snapshot.AssetID)
-	if err != nil || asset.DocumentID != documentID {
-		return nil, "", nil, false
-	}
-	path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-materialized", ".pdf")
+	asset, path, cleanup, err := f.loadVerifiedSnapshot(ctx, documentID, version, pageCount)
 	if err != nil {
 		return nil, "", nil, false
 	}
 	return asset, path, cleanup, true
+}
+
+// loadVerifiedSnapshot checks the database links and the persisted PDF before
+// a snapshot is reused. Snapshot rows and storage keys are treated as immutable
+// metadata, but the object itself must still be present, readable, and match
+// the version's page count before it can back a materialization or export.
+func (f *studioFinalizer) loadVerifiedSnapshot(ctx context.Context, documentID uuid.UUID, version *models.StudioVersion, pageCount int) (*models.StudioAsset, string, func(), error) {
+	if version == nil || version.SnapshotID == nil || *version.SnapshotID == uuid.Nil {
+		return nil, "", nil, ErrSnapshotNotFound
+	}
+	snapshot, err := f.repo.GetSnapshot(ctx, *version.SnapshotID)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: snapshot record unavailable", ErrFinalizationFailed)
+	}
+	if snapshot.VersionID != version.ID || snapshot.PageCount != pageCount {
+		return nil, "", nil, fmt.Errorf("%w: snapshot metadata does not match the requested version", ErrInvalidFinalOutput)
+	}
+	asset, err := f.repo.GetAsset(ctx, snapshot.AssetID)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: snapshot asset unavailable", ErrFinalizationFailed)
+	}
+	if asset.DocumentID != documentID || !isStudioSnapshotAssetType(asset.AssetType) || asset.MimeType != "application/pdf" || asset.ByteSize <= 0 || asset.R2Key == "" {
+		return nil, "", nil, fmt.Errorf("%w: snapshot asset metadata is invalid", ErrInvalidFinalOutput)
+	}
+	path, cleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-materialized", ".pdf")
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: cached snapshot is unavailable", ErrFinalizationFailed)
+	}
+	info, err := validateFinalOutput(path, pageCount)
+	if err != nil {
+		cleanup()
+		return nil, "", nil, fmt.Errorf("%w: cached snapshot is invalid", ErrInvalidFinalOutput)
+	}
+	if info.Size() != asset.ByteSize {
+		cleanup()
+		return nil, "", nil, fmt.Errorf("%w: cached snapshot size does not match its asset record", ErrInvalidFinalOutput)
+	}
+	return asset, path, cleanup, nil
+}
+
+func isStudioSnapshotAssetType(assetType string) bool {
+	switch assetType {
+	case "snapshot", "materialized", "job_result":
+		return true
+	default:
+		return false
+	}
 }
 
 func (f *studioFinalizer) ResolveDownload(ctx context.Context, sessionID, exportID uuid.UUID, ident identity.Identity) (*ExportDownload, error) {
@@ -678,32 +711,31 @@ func (f *studioFinalizer) resolveSourceAssets(ctx context.Context, documentID uu
 	return paths, cleanup, nil
 }
 
-func (f *studioFinalizer) ensureSnapshot(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, sess *models.StudioSession, doc *models.StudioDocument, version *models.StudioVersion, documentModel *vdm.DocumentModel) (*models.StudioAsset, error) {
+func (f *studioFinalizer) ensureSnapshot(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, sess *models.StudioSession, doc *models.StudioDocument, version *models.StudioVersion, documentModel *vdm.DocumentModel) (*models.StudioAsset, string, func(), error) {
 	// A snapshot is immutable and unique per version. Reuse it for both user
 	// export and internal materialization retries.
 	if version.SnapshotID != nil && *version.SnapshotID != uuid.Nil {
-		if snapshot, err := f.repo.GetSnapshot(ctx, *version.SnapshotID); err == nil {
-			if asset, assetErr := f.repo.GetAsset(ctx, snapshot.AssetID); assetErr == nil &&
-				asset.DocumentID == doc.ID && storage.ObjectExists(ctx, asset.R2Key) {
-				return asset, nil
-			}
+		asset, path, cleanup, err := f.loadVerifiedSnapshot(ctx, doc.ID, version, documentModel.PageCount)
+		if err != nil {
+			return nil, "", nil, err
 		}
+		return asset, path, cleanup, nil
 	}
 
 	outputPath, cleanup, err := f.materialize(ctx, doc.ID, documentModel)
 	if err != nil {
-		return nil, err
+		return nil, "", nil, err
 	}
 	defer cleanup()
 
 	info, err := validateFinalOutput(outputPath, documentModel.PageCount)
 	if err != nil {
-		return nil, err
+		return nil, "", nil, err
 	}
 
 	key := storage.BuildKey(filepath.ToSlash(filepath.Join("studio", "snapshots", doc.ID.String())), ".pdf")
 	if err := persistStudioPDF(ctx, outputPath, key); err != nil {
-		return nil, fmt.Errorf("%w: persist snapshot: %v", ErrFinalizationFailed, err)
+		return nil, "", nil, fmt.Errorf("%w: persist snapshot: %v", ErrFinalizationFailed, err)
 	}
 	persisted := true
 	defer func() {
@@ -718,9 +750,13 @@ func (f *studioFinalizer) ensureSnapshot(ctx context.Context, sessionID uuid.UUI
 	snapshot := &models.StudioSnapshot{ID: uuid.New(), VersionID: version.ID, AssetID: assetID, PageCount: documentModel.PageCount, CreatedAt: f.now()}
 	if err := f.recordSnapshot(ctx, sessionID, ident, version.ID, doc.ID, asset, snapshot); err != nil {
 		persisted = false
-		return nil, err
+		return nil, "", nil, err
 	}
-	return asset, nil
+	path, pathCleanup, err := storage.ResolveObject(ctx, asset.R2Key, "pdfnest-studio-materialized", ".pdf")
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("%w: resolve persisted snapshot", ErrFinalizationFailed)
+	}
+	return asset, path, pathCleanup, nil
 }
 
 func (f *studioFinalizer) recordSnapshot(ctx context.Context, sessionID uuid.UUID, ident identity.Identity, versionID, documentID uuid.UUID, asset *models.StudioAsset, snapshot *models.StudioSnapshot) error {
