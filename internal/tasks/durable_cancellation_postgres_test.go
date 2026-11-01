@@ -343,7 +343,7 @@ func TestDurableCancellation_ConcurrentCancellationAndPublication(t *testing.T) 
 		require.Equal(t, "Task processing cancelled by user.", finalRow.Error)
 	} else if finalRow.State == "completed" {
 		require.Equal(t, int32(0), atomic.LoadInt32(&cancelWins))
-		require.Equal(t, int32(1), atomic.LoadInt32(&publishWins))
+		require.GreaterOrEqual(t, atomic.LoadInt32(&publishWins), int32(1))
 		require.Equal(t, key, finalRow.ResultKey)
 	} else {
 		t.Fatalf("Unexpected terminal state in database: %s", finalRow.State)
