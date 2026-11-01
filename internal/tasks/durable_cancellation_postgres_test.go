@@ -33,10 +33,7 @@ func setupTasksPostgresDB(t *testing.T) (*gorm.DB, *TaskRegistry, *miniredis.Min
 	t.Helper()
 	dsn := os.Getenv("BACKEND_DURABILITY_TEST_DSN")
 	if dsn == "" {
-		dsn = os.Getenv("DATABASE_URL")
-	}
-	if dsn == "" {
-		t.Skip("PostgreSQL test fixture unavailable: BACKEND_DURABILITY_TEST_DSN or DATABASE_URL required")
+		t.Skip("PostgreSQL test fixture unavailable: BACKEND_DURABILITY_TEST_DSN required; ambient DATABASE_URL fallback is strictly disabled")
 	}
 	require.Contains(t, dsn, "host=/tmp/platen-", "fixture must be private Unix-socket under /tmp/platen-")
 	require.Contains(t, dsn, "user=platen_", "fixture must use dedicated platen_ user")

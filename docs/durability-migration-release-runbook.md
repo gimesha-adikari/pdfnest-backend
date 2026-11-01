@@ -85,9 +85,9 @@ SELECT version, applied_at FROM public.schema_migrations ORDER BY version DESC L
 
 ---
 
-## 4. Phase 2: Snapshot & Backup Prerequisite
+## 4. Phase 2: Snapshot, Backup & Disposable Restore Rehearsal Prerequisite
 
-Take an explicit, verifiable snapshot of the database prior to applying DDL:
+Take an explicit, verifiable snapshot of the database and qualify actual recoverability via disposable rehearsal before applying DDL:
 
 ```bash
 # 1. Point DATABASE_URL environment variable to Railway production PostgreSQL instance
@@ -100,9 +100,27 @@ pg_dump "$DATABASE_URL" \
 # 2. Verify dump file exists and has non-zero size
 ls -lh "$BACKUP_FILE"
 
-# 3. Verify backup integrity and recoverability with pg_restore list
+# 3. Verify TOC listing
 pg_restore --list "$BACKUP_FILE" > /dev/null
-echo "Backup archive verified valid and recoverable."
+echo "Backup archive TOC listing verified."
+
+# 4. Perform live rehearsal restore into disposable target database
+# Note: pg_restore --list verifies archive framing, but NOT database recoverability.
+# A full rehearsal restore into a disposable PostgreSQL database is required.
+REHEARSAL_DB="pdfnest_rehearsal_$(date +%s)"
+createdb "$REHEARSAL_DB"
+pg_restore -d "$REHEARSAL_DB" --schema=public "$BACKUP_FILE"
+
+# 5. Verify row counts and integrity in restored database
+psql -d "$REHEARSAL_DB" -c "
+  SELECT 'users' AS tbl, count(*) FROM public.users
+  UNION ALL
+  SELECT 'studio_jobs', count(*) FROM public.studio_jobs
+  UNION ALL
+  SELECT 'schema_migrations', count(*) FROM public.schema_migrations;
+"
+dropdb "$REHEARSAL_DB"
+echo "Disposable rehearsal restore completed successfully with verified integrity."
 ```
 
 ---
@@ -221,21 +239,42 @@ ORDER BY table_name, column_name;
 ```
 *Expected: All 4 tables return the specified columns with matching types (`jsonb` for `pending_object_keys`, `varchar`/`text` for identifiers).*
 
-### Step 4.3: Confirm Exact Constraints and Indexes
+### Step 4.3: Confirm Exact Constraints and Indexes (Uniqueness & Validity)
 ```sql
--- Verify specific primary keys and indexes
+-- Verify specific primary keys, index names, uniqueness, and validity
 SELECT 
-    schemaname, tablename, indexname
-FROM pg_indexes 
-WHERE schemaname = 'public' 
-  AND tablename IN ('task_completions', 'worker_result_ownerships', 'studio_storage_object_retirements', 'backend_durability_schema')
-ORDER BY tablename, indexname;
+    t.relname AS tablename,
+    i.relname AS indexname,
+    idx.indisunique AS is_unique,
+    idx.indisvalid AS is_valid
+FROM pg_index idx
+JOIN pg_class t ON t.oid = idx.indrelid
+JOIN pg_class i ON i.oid = idx.indexrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = 'public' 
+  AND t.relname IN ('task_completions', 'worker_result_ownerships', 'studio_storage_object_retirements', 'backend_durability_schema')
+ORDER BY t.relname, i.relname;
 ```
-*Expected: The following 12 exact index objects must be returned:*
-- `backend_durability_schema`: `backend_durability_schema_pkey`
-- `studio_storage_object_retirements`: `studio_storage_object_retirements_pkey`
-- `task_completions`: `task_completions_pkey`, `idx_task_completions_expires_at`, `idx_task_completions_reservation_id`, `idx_task_completions_state`
-- `worker_result_ownerships`: `worker_result_ownerships_pkey`, `idx_worker_result_ownerships_expires_at`, `idx_worker_result_ownerships_next_attempt_at`, `idx_worker_result_ownerships_request_id` (UNIQUE), `idx_worker_result_ownerships_state`, `idx_worker_result_ownerships_worker_job_id`
+*Expected: The following 12 exact index objects must be returned, all with `is_valid = true`:*
+- `backend_durability_schema`:
+  - `backend_durability_schema_pkey` (UNIQUE, VALID)
+- `studio_storage_object_retirements`:
+  - `studio_storage_object_retirements_pkey` (UNIQUE, VALID)
+- `task_completions`:
+  - `task_completions_pkey` (UNIQUE, VALID)
+  - `idx_task_completions_expires_at` (NON-UNIQUE, VALID)
+  - `idx_task_completions_reservation_id` (NON-UNIQUE, VALID)
+  - `idx_task_completions_state` (NON-UNIQUE, VALID)
+- `worker_result_ownerships`:
+  - `worker_result_ownerships_pkey` (UNIQUE, VALID)
+  - `idx_worker_result_ownerships_expires_at` (NON-UNIQUE, VALID)
+  - `idx_worker_result_ownerships_next_attempt_at` (NON-UNIQUE, VALID)
+  - `idx_worker_result_ownerships_request_id` (UNIQUE, VALID)
+  - `idx_worker_result_ownerships_state` (NON-UNIQUE, VALID)
+  - `idx_worker_result_ownerships_worker_job_id` (NON-UNIQUE, VALID)
+
+> [!NOTE]
+> Automated verification of all 12 indexes, their uniqueness, and their validity is enforced in preflight test `TestPreflight_ExplicitIndexAndConstraintValidation`.
 
 > [!NOTE]
 > Idempotency of the upgrade script has been fully preflight-verified in disposable fixtures (`TestPreflight_UpgradeIdempotency`). Do not re-run DDL in production unnecessarily.
@@ -264,7 +303,8 @@ Once the database migration is confirmed:
 
 ### Procedure A: Binary Rollback with Retained Records (Default Recommended Response)
 If the new Backend binary exhibits runtime issues, **do not revert the database schema**. Revert the Railway deployment to the known-good Backend image (`40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02`).
-- As validated in the preflight test suite (`TestPreflight_OldBinaryCompatibilityWithUpgradedSchema`), the historical binary ignores the new durability tables and column, and continues to function normally.
+- **SQL-Level Compatibility:** As validated in `TestPreflight_OldBinaryCompatibilityWithUpgradedSchema`, existing queries and transactions continue to function without error because all schema modifications are additive and nullable.
+- **Actual Runtime Binary Compatibility:** As demonstrated in `TestPreflight_HistoricalBinaryRuntimeCompatibility`, the historical Backend binary at `40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02` was compiled from source and executed live against the upgraded database schema on disposable PostgreSQL. The binary successfully booted, connected to the migrated database, and responded `HTTP 200 OK` on `/api/health` and `/api/ready` (noting that the root `/healthz` route was introduced in subsequent backend revisions).
 - This preserves all task completion tokens and worker ownership records written while the new binary was running, avoiding data loss or broken client download URLs.
 
 ### Procedure B: Schema Rollback (`down.sql`) Safeguards
