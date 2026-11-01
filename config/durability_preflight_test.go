@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -18,54 +17,44 @@ import (
 
 func preflightDisposableDB(t *testing.T) (*gorm.DB, *sql.DB, string) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("BACKEND_DURABILITY_TEST_DSN")
 	if dsn == "" {
-		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
+		dsn = os.Getenv("DATABASE_URL")
 	}
+	if dsn == "" {
+		t.Skip("BACKEND_DURABILITY_TEST_DSN or DATABASE_URL disposable fixture required")
+	}
+	require.Contains(t, dsn, "host=/tmp/platen-", "fixture must be private Unix-socket under /tmp/platen-")
+	require.Contains(t, dsn, "user=platen_", "fixture must use dedicated platen_ user")
 
-	root, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Skipf("Disposable PostgreSQL fixture unavailable: %v", err)
-	}
-	rootPool, err := root.DB()
+	root, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
+	var address sql.NullString
+	require.NoError(t, root.QueryRow("SELECT inet_server_addr()::text").Scan(&address))
+	require.False(t, address.Valid, "only private Unix-socket fixtures allowed; TCP connections forbidden")
 
 	dbName := "preflight_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
-	require.NoError(t, rootPool.Ping())
-	_, err = rootPool.Exec(fmt.Sprintf(`CREATE DATABASE "%s"`, dbName))
+	_, err = root.Exec(fmt.Sprintf(`CREATE DATABASE "%s"`, dbName))
 	require.NoError(t, err)
 
-	var childDSN string
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		parsed, err := url.Parse(dsn)
-		require.NoError(t, err)
-		parsed.Path = "/" + dbName
-		childDSN = parsed.String()
-	} else {
-		// Key-value DSN
-		parts := strings.Fields(dsn)
-		replaced := false
-		for i, part := range parts {
-			if strings.HasPrefix(part, "dbname=") {
-				parts[i] = "dbname=" + dbName
-				replaced = true
-			}
+	fields := strings.Fields(dsn)
+	for i, s := range fields {
+		if strings.HasPrefix(s, "dbname=") {
+			fields[i] = "dbname=" + dbName
 		}
-		if !replaced {
-			parts = append(parts, "dbname="+dbName)
-		}
-		childDSN = strings.Join(parts, " ")
 	}
+	childDSN := strings.Join(fields, " ")
 
 	childDB, err := gorm.Open(postgres.Open(childDSN), &gorm.Config{})
 	require.NoError(t, err)
 	childPool, err := childDB.DB()
 	require.NoError(t, err)
+	childPool.SetMaxOpenConns(3)
 
 	t.Cleanup(func() {
 		_ = childPool.Close()
-		_, _ = rootPool.Exec(fmt.Sprintf(`DROP DATABASE "%s" WITH (FORCE)`, dbName))
-		_ = rootPool.Close()
+		_, _ = root.Exec(fmt.Sprintf(`DROP DATABASE "%s" WITH (FORCE)`, dbName))
+		_ = root.Close()
 	})
 
 	return childDB, childPool, dbName

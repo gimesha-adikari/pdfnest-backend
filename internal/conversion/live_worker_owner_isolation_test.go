@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -19,9 +21,59 @@ import (
 )
 
 func TestLiveWorkerOwnerIsolation_EndToEnd(t *testing.T) {
-	pythonPath := "/home/gimesha/My_Projects/platen/pdfnest-worker/.venv/bin/python3"
+	workerRoot := os.Getenv("WORKER_PR13_ROOT")
+	pythonPath := os.Getenv("WORKER_PR13_PYTHON")
+	expectedRev := os.Getenv("WORKER_PR13_REVISION")
+
+	if workerRoot == "" {
+		candidates := []string{
+			"../../../pdfnest-worker",
+			"../../pdfnest-worker",
+			"../pdfnest-worker",
+		}
+		for _, c := range candidates {
+			mainPy := filepath.Join(c, "app", "main.py")
+			if stat, err := os.Stat(mainPy); err == nil && !stat.IsDir() {
+				if abs, err := filepath.Abs(c); err == nil {
+					workerRoot = abs
+					break
+				}
+			}
+		}
+	}
+
+	if pythonPath == "" && workerRoot != "" {
+		candidateVenv := filepath.Join(workerRoot, ".venv", "bin", "python3")
+		if stat, err := os.Stat(candidateVenv); err == nil && !stat.IsDir() {
+			pythonPath = candidateVenv
+		} else {
+			candidateVenv2 := filepath.Join(workerRoot, ".venv", "bin", "python")
+			if stat, err := os.Stat(candidateVenv2); err == nil && !stat.IsDir() {
+				pythonPath = candidateVenv2
+			} else if lp, err := exec.LookPath("python3"); err == nil {
+				pythonPath = lp
+			}
+		}
+	}
+
+	if workerRoot == "" || pythonPath == "" {
+		t.Skip("WORKER_PR13_ROOT and WORKER_PR13_PYTHON required for live worker test")
+	}
 	if _, err := os.Stat(pythonPath); os.IsNotExist(err) {
-		t.Skip("worker python virtualenv not found, skipping live worker test")
+		t.Skipf("worker python binary %s not found", pythonPath)
+	}
+
+	if expectedRev != "" {
+		out, err := exec.Command("git", "-C", workerRoot, "rev-parse", "HEAD").Output()
+		require.NoError(t, err, "failed to check git revision of workerRoot")
+		actualRev := strings.TrimSpace(string(out))
+		require.True(
+			t,
+			strings.HasPrefix(actualRev, expectedRev) || strings.HasPrefix(expectedRev, actualRev),
+			"worker revision %s does not match expected %s",
+			actualRev,
+			expectedRev,
+		)
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -46,10 +98,10 @@ func TestLiveWorkerOwnerIsolation_EndToEnd(t *testing.T) {
 		"--log-level",
 		"warning",
 	)
-	cmd.Dir = "/home/gimesha/My_Projects/platen/pdfnest-worker"
+	cmd.Dir = workerRoot
 	cmd.Env = append(
 		os.Environ(),
-		"PYTHONPATH=/home/gimesha/My_Projects/platen/pdfnest-worker",
+		"PYTHONPATH="+workerRoot,
 		"WORKER_SHARED_SECRET="+sharedSecret,
 		"PDFNEST_RENDER_SESSION_DIR="+sessionDir,
 		"APP_ENV=test",

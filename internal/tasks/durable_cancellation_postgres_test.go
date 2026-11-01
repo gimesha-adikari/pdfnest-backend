@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,10 +31,15 @@ import (
 
 func setupTasksPostgresDB(t *testing.T) (*gorm.DB, *TaskRegistry, *miniredis.Miniredis) {
 	t.Helper()
-	dsn := os.Getenv("DATABASE_URL")
+	dsn := os.Getenv("BACKEND_DURABILITY_TEST_DSN")
 	if dsn == "" {
-		dsn = "host=localhost user=postgres password=2021 dbname=pdfnest port=5432 sslmode=disable"
+		dsn = os.Getenv("DATABASE_URL")
 	}
+	if dsn == "" {
+		t.Skip("PostgreSQL test fixture unavailable: BACKEND_DURABILITY_TEST_DSN or DATABASE_URL required")
+	}
+	require.Contains(t, dsn, "host=/tmp/platen-", "fixture must be private Unix-socket under /tmp/platen-")
+	require.Contains(t, dsn, "user=platen_", "fixture must use dedicated platen_ user")
 
 	bootstrap, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -41,6 +47,10 @@ func setupTasksPostgresDB(t *testing.T) (*gorm.DB, *TaskRegistry, *miniredis.Min
 	}
 	pool, err := bootstrap.DB()
 	require.NoError(t, err)
+
+	var address sql.NullString
+	require.NoError(t, pool.QueryRow("SELECT inet_server_addr()::text").Scan(&address))
+	require.False(t, address.Valid, "only private Unix-socket fixtures allowed; TCP connections forbidden")
 
 	schema := "tasks_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	require.NoError(t, bootstrap.Exec("CREATE SCHEMA "+schema).Error)
