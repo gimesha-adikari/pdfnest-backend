@@ -28,7 +28,7 @@ for package in config studio billing tasks ocr worker conversion; do
   export BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL"
   case "$package" in
     config)
-      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -race ./config -run '^(TestBackendDurabilityDraft|TestPreflight_)' -count=1 -timeout=5m ;;
+      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -v -race ./config -run '^(TestBackendDurabilityDraft|TestPreflight_)' -count=1 -timeout=5m ;;
     studio)
       # These are application/DB suites. Rendering benchmarks and stress suites
       # require a separately running native Worker and are qualified separately.

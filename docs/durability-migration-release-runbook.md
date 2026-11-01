@@ -85,43 +85,195 @@ SELECT version, applied_at FROM public.schema_migrations ORDER BY version DESC L
 
 ---
 
-## 4. Phase 2: Snapshot, Backup & Disposable Restore Rehearsal Prerequisite
+## 4. Phase 2: Production Snapshot, Access-Controlled Backup & Disposable Restore Rehearsal Prerequisite
 
-Take an explicit, verifiable snapshot of the database and qualify actual recoverability via disposable rehearsal before applying DDL:
+> [!CAUTION]
+> **CRITICAL REHEARSAL ISOLATION REQUIREMENT — NEVER TARGET PRODUCTION:**
+> Rehearsal restore commands (`createdb`, `pg_restore`, `dropdb`, verification queries, dry-run DDL) must **NEVER** target the production database server or cluster.
+> Running rehearsal or test DDL against production risks table locking, naming collisions, or catastrophic data loss.
+> Rehearsal **strictly requires** a separately specified, non-production disposable PostgreSQL instance (e.g. dedicated local container or isolated private Unix-socket fixture) specified via `DISPOSABLE_REHEARSAL_PG_URL`.
+
+### Step 2.1: Fail-Safe Backup & Rehearsal Script
+
+The following script implements fail-fast shell execution (`set -euo pipefail`), automated trap cleanup, strict file permissions (`umask 077`, `chmod 600`), host boundary enforcement, TOC validation, live rehearsal restore on a dedicated non-production target, data integrity assertions, and migration dry-run:
 
 ```bash
-# 1. Point DATABASE_URL environment variable to Railway production PostgreSQL instance
-BACKUP_FILE="pdfnest_backup_pre_durability_$(date +%Y%m%d_%H%M%S).dump"
+#!/usr/bin/env bash
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+# Configuration & Host Safeguards
+# -----------------------------------------------------------------------------
+# DATABASE_URL: Railway production PostgreSQL connection string
+# DISPOSABLE_REHEARSAL_PG_URL: Separately specified non-production PostgreSQL URL
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "FATAL: DATABASE_URL must point to the production database." >&2
+  exit 1
+fi
+
+if [ -z "${DISPOSABLE_REHEARSAL_PG_URL:-}" ]; then
+  echo "FATAL: DISPOSABLE_REHEARSAL_PG_URL must point to a separate disposable non-production database instance." >&2
+  echo "Creating rehearsal databases on the production cluster is strictly forbidden." >&2
+  exit 1
+fi
+
+if [ "$DATABASE_URL" = "$DISPOSABLE_REHEARSAL_PG_URL" ]; then
+  echo "FATAL: DISPOSABLE_REHEARSAL_PG_URL must NOT equal DATABASE_URL." >&2
+  exit 1
+fi
+
+# Assert production host and rehearsal host do not collide
+prod_host=$(echo "$DATABASE_URL" | sed -E -n 's/.*@([^:/]+).*/\1/p')
+rehearsal_host=$(echo "$DISPOSABLE_REHEARSAL_PG_URL" | sed -E -n 's/.*@([^:/]+).*/\1/p')
+if [ -n "$prod_host" ] && [ "$prod_host" = "$rehearsal_host" ]; then
+  echo "FATAL: Production host ($prod_host) and rehearsal host ($rehearsal_host) match. Rehearsal must run on a physically separate server." >&2
+  exit 1
+fi
+
+# Restrict default file creation permissions for process
+umask 077
+
+BACKUP_DIR="${BACKUP_DIR:-$(mktemp -d /tmp/platen-backup-XXXXXX)}"
+BACKUP_FILE="$BACKUP_DIR/pdfnest_backup_pre_durability_$(date +%Y%m%d_%H%M%S).dump"
+REHEARSAL_DB="rehearsal_$(date +%s)_$RANDOM"
+
+# -----------------------------------------------------------------------------
+# Automated Trap Cleanup
+# -----------------------------------------------------------------------------
+cleanup() {
+  local exit_code=$?
+  echo "Executing safe rehearsal cleanup..."
+  if [ -n "${REHEARSAL_DB:-}" ] && [ -n "${DISPOSABLE_REHEARSAL_PG_URL:-}" ]; then
+    dropdb --if-exists --uri="$DISPOSABLE_REHEARSAL_PG_URL" "$REHEARSAL_DB" 2>/dev/null || true
+  fi
+  # Clean up ephemeral backup directory if requested or on failure
+  if [ "${CLEANUP_BACKUP_ON_EXIT:-false}" = "true" ] || [ $exit_code -ne 0 ]; then
+    if [ -f "$BACKUP_FILE" ]; then
+      shred -u "$BACKUP_FILE" 2>/dev/null || rm -f "$BACKUP_FILE"
+    fi
+    rm -rf "$BACKUP_DIR"
+  fi
+  exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
+# -----------------------------------------------------------------------------
+# 1. Take Custom-Format Production Snapshot
+# -----------------------------------------------------------------------------
+echo "==> 1. Taking custom-format production backup..."
+touch "$BACKUP_FILE"
+chmod 600 "$BACKUP_FILE"
+
 pg_dump "$DATABASE_URL" \
   --format=custom \
   --schema=public \
   --file="$BACKUP_FILE"
 
-# 2. Verify dump file exists and has non-zero size
+test -s "$BACKUP_FILE" || { echo "FATAL: Dump file is empty or missing."; exit 1; }
 ls -lh "$BACKUP_FILE"
 
-# 3. Verify TOC listing
-pg_restore --list "$BACKUP_FILE" > /dev/null
+# Optional: Encrypt backup archive if retained or transferred across network
+if [ "${ENCRYPT_BACKUP:-false}" = "true" ]; then
+  echo "==> Encrypting backup with AES-256..."
+  gpg --symmetric --cipher-algo AES256 --output "${BACKUP_FILE}.gpg" "$BACKUP_FILE"
+  chmod 600 "${BACKUP_FILE}.gpg"
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Verify TOC Listing
+# -----------------------------------------------------------------------------
+echo "==> 2. Verifying archive TOC framing..."
+pg_restore --list "$BACKUP_FILE" > "$BACKUP_DIR/toc.list"
+grep -q "TABLE DATA public users" "$BACKUP_DIR/toc.list" || { echo "FATAL: TOC missing users table data."; exit 1; }
+grep -q "TABLE DATA public studio_jobs" "$BACKUP_DIR/toc.list" || { echo "FATAL: TOC missing studio_jobs table data."; exit 1; }
 echo "Backup archive TOC listing verified."
 
-# 4. Perform live rehearsal restore into disposable target database
-# Note: pg_restore --list verifies archive framing, but NOT database recoverability.
-# A full rehearsal restore into a disposable PostgreSQL database is required.
-REHEARSAL_DB="pdfnest_rehearsal_$(date +%s)"
-createdb "$REHEARSAL_DB"
-pg_restore -d "$REHEARSAL_DB" --schema=public "$BACKUP_FILE"
+# -----------------------------------------------------------------------------
+# 3. Create Disposable Rehearsal Database on Separate Non-Production Target
+# -----------------------------------------------------------------------------
+echo "==> 3. Creating rehearsal database on separate non-production target..."
+createdb --uri="$DISPOSABLE_REHEARSAL_PG_URL" "$REHEARSAL_DB"
 
-# 5. Verify row counts and integrity in restored database
-psql -d "$REHEARSAL_DB" -c "
-  SELECT 'users' AS tbl, count(*) FROM public.users
+# -----------------------------------------------------------------------------
+# 4. Perform Real Rehearsal Restore
+# -----------------------------------------------------------------------------
+echo "==> 4. Restoring snapshot into disposable rehearsal database..."
+pg_restore --uri="$DISPOSABLE_REHEARSAL_PG_URL/$REHEARSAL_DB" \
+  --schema=public \
+  --no-owner \
+  --no-privileges \
+  "$BACKUP_FILE"
+
+# -----------------------------------------------------------------------------
+# 5. Verify Row Counts, Keys, and Schema Integrity
+# -----------------------------------------------------------------------------
+echo "==> 5. Verifying restored data integrity on rehearsal database..."
+psql --uri="$DISPOSABLE_REHEARSAL_PG_URL/$REHEARSAL_DB" -v ON_ERROR_STOP=1 -c "
+  SELECT 'users' AS tbl, count(*) AS rows FROM public.users
   UNION ALL
-  SELECT 'studio_jobs', count(*) FROM public.studio_jobs
+  SELECT 'studio_jobs', count(*) AS rows FROM public.studio_jobs
   UNION ALL
-  SELECT 'schema_migrations', count(*) FROM public.schema_migrations;
+  SELECT 'schema_migrations', count(*) AS rows FROM public.schema_migrations;
 "
-dropdb "$REHEARSAL_DB"
-echo "Disposable rehearsal restore completed successfully with verified integrity."
+
+# Verify primary and foreign keys
+psql --uri="$DISPOSABLE_REHEARSAL_PG_URL/$REHEARSAL_DB" -v ON_ERROR_STOP=1 -c "
+  SELECT conname, contype, conrelid::regclass 
+  FROM pg_constraint 
+  WHERE connamespace = 'public'::regnamespace 
+    AND conrelid::regclass::text IN ('users', 'studio_jobs', 'subscriptions');
+"
+
+# -----------------------------------------------------------------------------
+# 6. Rehearsal Migration Dry Run
+# -----------------------------------------------------------------------------
+echo "==> 6. Testing durability migration against restored rehearsal data..."
+psql --uri="$DISPOSABLE_REHEARSAL_PG_URL/$REHEARSAL_DB" -v ON_ERROR_STOP=1 -f config/migrations/20261029_backend_durability.up.sql
+
+echo "==> 7. Validating 12 durability index objects on rehearsal database..."
+psql --uri="$DISPOSABLE_REHEARSAL_PG_URL/$REHEARSAL_DB" -v ON_ERROR_STOP=1 -c "
+  SELECT 
+      t.relname AS tablename,
+      i.relname AS indexname,
+      idx.indisunique AS is_unique,
+      idx.indisvalid AS is_valid
+  FROM pg_index idx
+  JOIN pg_class t ON t.oid = idx.indrelid
+  JOIN pg_class i ON i.oid = idx.indexrelid
+  WHERE t.relname IN ('task_completions', 'worker_result_ownerships', 'studio_storage_object_retirements', 'backend_durability_schema')
+  ORDER BY t.relname, i.relname;
+"
+
+echo "==> Disposable rehearsal restore and migration dry run successfully completed!"
+# Automatic trap drops $REHEARSAL_DB on exit.
 ```
+
+### Step 2.2: Backup Access Control, Encryption, and Disposal Standards
+1. **Access Control:** The backup archive contains sensitive production records (user emails, studio job references). File permissions must be `0600` owned exclusively by the deploy operator. Unprivileged system users and shared processes must not have read access.
+2. **Encryption at Rest:** If the snapshot is backed up to off-cluster storage or retained beyond the immediate migration window, it must be encrypted with AES-256 (`gpg --symmetric --cipher-algo AES256`).
+3. **Restricted Handling:** Never upload unencrypted production dumps to public cloud buckets, shared team drives, or unmonitored storage volumes.
+4. **Disposal Lifecycle:** Once production post-condition validation (Phase 4) is confirmed and the new binary has operated successfully for the agreed retention window (e.g. 24–48 hours), securely shred the local dump file:
+   ```bash
+   shred -u "$BACKUP_FILE"
+   ```
+
+### Step 2.3: Pre-Migration Sign-Off & Approval Checklist
+
+Before proceeding to Phase 3 (Production Execution), confirm and check off every requirement:
+
+| Prerequisite | Verification Method | Status | Sign-Off |
+| :--- | :--- | :--- | :--- |
+| **Phase 1 Preflight Checks** | Read-only SQL queries in Step 1.1–1.4 executed; no locks > 10s, no unversioned tables, schema ledger verified | Required | [ ] |
+| **Production Snapshot Taken** | `pg_dump -Fc` completed with non-zero size, restricted `0600` permissions | Required | [ ] |
+| **TOC Integrity Confirmed** | `pg_restore --list` confirms valid archive structure and required table data | Required | [ ] |
+| **Isolated Target Confirmed** | `DISPOSABLE_REHEARSAL_PG_URL` confirmed distinct from production cluster | Required | [ ] |
+| **Rehearsal Restore Passed** | Snapshot restored into rehearsal target with 0 errors; row counts match production | Required | [ ] |
+| **Migration Dry-Run Passed** | `20261029_backend_durability.up.sql` applied cleanly to restored snapshot data | Required | [ ] |
+| **12 Indexes Validated** | All 12 durability indexes confirmed unique/valid in rehearsal database | Required | [ ] |
+| **Rehearsal Target Cleaned** | Rehearsal database dropped cleanly via automated trap | Required | [ ] |
+| **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
+| **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
+| **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
 
 ---
 

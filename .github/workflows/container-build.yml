@@ -108,6 +108,11 @@ jobs:
           echo "WORKER_PR13_PYTHON=$UV_PROJECT_ENVIRONMENT/bin/python" >> "$GITHUB_ENV"
           echo "WORKER_PR13_REVISION=18851c77fa9cd400096656f65495c58844f5a448" >> "$GITHUB_ENV"
 
+      - name: Fetch historical Backend baseline for durability rollback compatibility
+        run: |
+          git fetch --depth 1 origin 40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02
+          git cat-file -e 40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02
+
       - name: Verify backend durability with isolated PostgreSQL and Redis
         run: scripts/test-backend-durability.sh
 

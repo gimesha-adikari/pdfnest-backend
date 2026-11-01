@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -432,9 +433,7 @@ func TestPreflight_HistoricalBinaryRuntimeCompatibility(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	require.NoError(t, err)
 	checkCommit := exec.Command("git", "-C", repoRoot, "cat-file", "-e", historicalCommit)
-	if err := checkCommit.Run(); err != nil {
-		t.Skipf("historical commit %s not available in local git repository", historicalCommit)
-	}
+	require.NoError(t, checkCommit.Run(), "historical commit %s must be present in git repository (mandatory release preflight gate; fetch with 'git fetch --depth 1 origin %s')", historicalCommit, historicalCommit)
 
 	db, pool, dbName := preflightDisposableDB(t)
 	setupBaseManagedSchema(t, db)
@@ -457,9 +456,7 @@ func TestPreflight_HistoricalBinaryRuntimeCompatibility(t *testing.T) {
 	buildCmd := exec.Command("go", "build", "-o", binPath, "main.go", "request_limits.go")
 	buildCmd.Dir = tempDir
 	buildOut, err := buildCmd.CombinedOutput()
-	if err != nil {
-		t.Skipf("building historical binary failed: %s (%v)", string(buildOut), err)
-	}
+	require.NoError(t, err, "building historical binary failed: %s", string(buildOut))
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -541,7 +538,16 @@ func TestPreflight_HistoricalBinaryRuntimeCompatibility(t *testing.T) {
 	resp, err = http.Get(serverURL + "/api/ready")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var readyBody struct {
+		Ready        bool              `json:"ready"`
+		Status       string            `json:"status"`
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&readyBody))
 	resp.Body.Close()
+	require.True(t, readyBody.Ready, "historical binary reported not ready: %+v", readyBody)
+	require.Equal(t, "ready", readyBody.Dependencies["database"], "historical binary database dependency not ready")
+	require.Equal(t, "ready", readyBody.Dependencies["redis"], "historical binary redis dependency not ready")
 
 	// 3. Verify /healthz: historical binary does not expose root /healthz (returns 404),
 	// whereas modern binaries expose root /healthz. We verify it does not error at TCP layer.
