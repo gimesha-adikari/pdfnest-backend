@@ -90,8 +90,34 @@ jobs:
           echo "F15_WORKER_ROOT=$RUNNER_TEMP/backend-worker-compat" >> "$GITHUB_ENV"
           echo "F15_PYTHON=$UV_PROJECT_ENVIRONMENT/bin/python" >> "$GITHUB_ENV"
 
+      - name: Prepare Worker PR #13 candidate source for live isolation test
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/backend-worker-pr13-venv
+          UV_CONCURRENT_DOWNLOADS: '1'
+          UV_CONCURRENT_BUILDS: '1'
+          UV_CONCURRENT_INSTALLS: '1'
+        run: |
+          git init "$RUNNER_TEMP/backend-worker-pr13"
+          git -C "$RUNNER_TEMP/backend-worker-pr13" remote add origin https://github.com/gimesha-adikari/pdfnest-worker.git
+          git -C "$RUNNER_TEMP/backend-worker-pr13" fetch --depth 1 origin 18851c77fa9cd400096656f65495c58844f5a448
+          git -C "$RUNNER_TEMP/backend-worker-pr13" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/backend-worker-pr13" rev-parse HEAD)" = 18851c77fa9cd400096656f65495c58844f5a448
+          uv sync --project "$RUNNER_TEMP/backend-worker-pr13" --frozen --no-install-project
+          uv pip check --python "$UV_PROJECT_ENVIRONMENT/bin/python"
+          echo "WORKER_PR13_ROOT=$RUNNER_TEMP/backend-worker-pr13" >> "$GITHUB_ENV"
+          echo "WORKER_PR13_PYTHON=$UV_PROJECT_ENVIRONMENT/bin/python" >> "$GITHUB_ENV"
+          echo "WORKER_PR13_REVISION=18851c77fa9cd400096656f65495c58844f5a448" >> "$GITHUB_ENV"
+
+      - name: Fetch historical Backend baseline for durability rollback compatibility
+        run: |
+          git fetch --depth 1 origin 40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02
+          git cat-file -e 40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02
+
       - name: Verify backend durability with isolated PostgreSQL and Redis
         run: scripts/test-backend-durability.sh
+
+      - name: Verify durability migration rehearsal runbook safety and recoverability
+        run: scripts/test-runbook-rehearsal.sh
 
       - name: Verify Analyzer public failure boundaries
         run: scripts/test-analyzer-public-errors.sh

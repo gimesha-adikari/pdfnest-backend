@@ -33,7 +33,7 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 	if requesterID == "" {
 		requesterID = c.IP()
 	}
-	if task.OwnerIdentity != "" && !isAuthorizedOwner(c, task, requesterID) {
+	if !isAuthorizedOwner(c, task, requesterID) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"code":    "FORBIDDEN",
 			"message": "You are not authorized to download this task artifact.",
@@ -129,14 +129,13 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 }
 
 func isAuthorizedOwner(c *fiber.Ctx, task *TaskStatus, requesterID string) bool {
-	if task.OwnerIdentity == "" {
-		return true
-	}
-	if task.OwnerIdentity == requesterID {
+	if task.OwnerIdentity != "" && task.OwnerIdentity == requesterID {
 		return true
 	}
 
-	// Capability download token check for clients where session cookie was dropped/blocked
+	// The capability token is the only authorization for legacy task records
+	// without an owner identity, and remains a fallback for owned tasks when a
+	// client's identity cookie is unavailable.
 	token := strings.TrimSpace(c.Query("token"))
 	if token == "" {
 		token = strings.TrimSpace(c.Get("X-Download-Token"))

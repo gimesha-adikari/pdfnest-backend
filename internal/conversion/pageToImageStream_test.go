@@ -1,10 +1,36 @@
 package conversion
 
 import (
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestPreviewWorkerDedupScopeIsStableAndIdentityBound(t *testing.T) {
+	t.Setenv("WORKER_SHARED_SECRET", "synthetic-preview-worker-secret")
+
+	guestA := previewWorkerDedupScope(" guest:a ")
+	guestAAgain := previewWorkerDedupScope("guest:a")
+	guestB := previewWorkerDedupScope("guest:b")
+
+	if guestA != guestAAgain {
+		t.Fatal("the same normalized identity did not receive a stable worker deduplication scope")
+	}
+	if guestA == guestB {
+		t.Fatal("different identities received the same worker deduplication scope")
+	}
+	if len(guestA) != 64 {
+		t.Fatalf("worker deduplication scope has length %d, want 64 hexadecimal characters", len(guestA))
+	}
+	if _, err := hex.DecodeString(guestA); err != nil {
+		t.Fatalf("worker deduplication scope is not hexadecimal: %v", err)
+	}
+	if strings.Contains(guestA, "guest") {
+		t.Fatal("worker deduplication scope exposed identity text")
+	}
+}
 
 func TestPreviewSessionCacheScopesSessionsByOwner(t *testing.T) {
 	cache := &previewSessionCache{

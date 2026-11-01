@@ -25,9 +25,10 @@ export PDFNEST_WORKER_URL=http://127.0.0.1:1
 for package in config studio billing tasks ocr worker conversion; do
   "$bindir/createdb" -h "$durability_test_root" -p 55448 -U platen_test "durability_$package"
   export DATABASE_URL="host=$durability_test_root port=55448 user=platen_test dbname=durability_$package sslmode=disable"
+  export BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL"
   case "$package" in
     config)
-      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -race ./config -run '^TestBackendDurabilityDraft' -count=1 -timeout=3m ;;
+      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -v -race ./config -run '^(TestBackendDurabilityDraft|TestPreflight_)' -count=1 -timeout=5m ;;
     studio)
       # These are application/DB suites. Rendering benchmarks and stress suites
       # require a separately running native Worker and are qualified separately.
@@ -35,7 +36,7 @@ for package in config studio billing tasks ocr worker conversion; do
     worker)
       WORKER_DURABILITY_TEST_DSN="$DATABASE_URL" go test -race ./internal/worker -count=1 -timeout=3m ;;
     conversion)
-      go test -race ./internal/conversion -run 'Durab|Async|Billing|Reservation|PDFToMarkdown' -count=1 -timeout=3m ;;
+      go test -race ./internal/conversion -run 'Durab|Async|Billing|Reservation|PDFToMarkdown|LiveWorkerOwnerIsolation' -count=1 -timeout=5m ;;
     *) go test -race "./internal/$package" -count=1 -timeout=5m ;;
   esac
 done
