@@ -116,6 +116,9 @@ jobs:
       - name: Verify backend durability with isolated PostgreSQL and Redis
         run: scripts/test-backend-durability.sh
 
+      - name: Verify durability migration rehearsal runbook safety and recoverability
+        run: scripts/test-runbook-rehearsal.sh
+
       - name: Verify Analyzer public failure boundaries
         run: scripts/test-analyzer-public-errors.sh
 
