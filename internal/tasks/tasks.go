@@ -578,21 +578,19 @@ func (r *TaskRegistry) CancelTask(id string, ownerIdentity string, capabilityTok
 		token = strings.TrimSpace(capabilityToken[0])
 	}
 
-	row, changed, durableErr := transitionDurable(context.Background(), id, ownerIdentity, "cancelled", "Task processing cancelled by user.")
+	result, task, durableErr := cancelDurable(context.Background(), id, ownerIdentity, token)
 	if durableErr != nil {
 		return "ERROR", nil, durableErr
 	}
-	if row != nil {
-		task := durableStatus(row)
-		ownerMatches := row.OwnerIdentity != "" && ownerIdentity == row.OwnerIdentity
-		capabilityMatches := task.DownloadToken != "" && token != "" && task.DownloadToken == token
-		if !ownerMatches && !capabilityMatches {
-			return "UNAUTHORIZED", task, nil
+	if result != "" {
+		if result == "CANCELLED_SUCCESS" {
+			if client := r.getClient(); client != nil {
+				key := TaskKeyPrefix + strings.TrimSpace(id)
+				now := time.Now().Unix()
+				_, _ = client.Eval(context.Background(), atomicCancelTaskLua, []string{key}, ownerIdentity, token, now, int(TaskTTL.Seconds())).Result()
+			}
 		}
-		if changed {
-			return "CANCELLED_SUCCESS", task, nil
-		}
-		return "TERMINAL_ALREADY", task, nil
+		return result, task, nil
 	}
 
 	client := r.getClient()
