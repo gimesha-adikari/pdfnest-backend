@@ -67,11 +67,11 @@ echo "==> Verifying production and rehearsal infrastructure identity and isolati
 prod_info=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "
   SELECT 
     coalesce(inet_server_addr()::text, 'unix-socket'),
-    coalesce(inet_server_port()::text, current_setting('port')),
+    coalesce(inet_server_port()::text, coalesce((SELECT setting FROM pg_settings WHERE name = 'port'), '5432')),
     current_user,
     current_database(),
-    coalesce(current_setting('data_directory', true), ''),
-    coalesce(current_setting('unix_socket_directories', true), ''),
+    coalesce((SELECT setting FROM pg_settings WHERE name = 'data_directory'), ''),
+    coalesce((SELECT setting FROM pg_settings WHERE name = 'unix_socket_directories'), ''),
     coalesce((SELECT system_identifier::text FROM pg_control_system()), '')
 " 2>/dev/null || { echo "FATAL: Failed to connect to production database via DATABASE_URL." >&2; exit 4; })
 
@@ -87,11 +87,11 @@ prod_sysid=$(echo "$prod_info" | cut -d'|' -f7)
 rehearsal_info=$(psql -d "$REHEARSAL_MAINTENANCE_DSN" -t -A -v ON_ERROR_STOP=1 -c "
   SELECT 
     coalesce(inet_server_addr()::text, 'unix-socket'),
-    coalesce(inet_server_port()::text, current_setting('port')),
+    coalesce(inet_server_port()::text, coalesce((SELECT setting FROM pg_settings WHERE name = 'port'), '5432')),
     current_user,
     current_database(),
-    coalesce(current_setting('data_directory', true), ''),
-    coalesce(current_setting('unix_socket_directories', true), ''),
+    coalesce((SELECT setting FROM pg_settings WHERE name = 'data_directory'), ''),
+    coalesce((SELECT setting FROM pg_settings WHERE name = 'unix_socket_directories'), ''),
     coalesce((SELECT system_identifier::text FROM pg_control_system()), '')
 " 2>/dev/null || { echo "FATAL: Failed to connect to rehearsal maintenance instance via REHEARSAL_* parameters." >&2; exit 5; })
 
@@ -141,15 +141,64 @@ if [ -n "${prod_port:-}" ] && [ "$REHEARSAL_PGPORT" = "$prod_port" ]; then
   fi
 fi
 
-# 6. Privilege check: rehearsal user must have zero write/create privilege on production
-has_prod_create=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "
-  SELECT has_schema_privilege('$rehearsal_user', 'public', 'CREATE');
-" 2>/dev/null || echo "false")
+# 6. Privilege check: rehearsal user must have zero write/create privilege on production.
+# Evaluates superuser, database CREATE, schema CREATE, and table write capabilities.
+# Uses safe parameter passing (:'ruser') and strictly inspects PostgreSQL boolean results ('t' / 'f').
+# Fails closed on 't', query errors, malformed results, and unknown states without issuing writes.
+set +e
+if [ -n "${PRIVILEGE_QUERY_OVERRIDE:-}" ]; then
+  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << EOF 2>&1
+$PRIVILEGE_QUERY_OVERRIDE
+EOF
+)
+  priv_status=$?
+else
+  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
+SELECT CASE 
+  WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
+  WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = :'ruser') THEN 't'
+  WHEN has_database_privilege(:'ruser', current_database(), 'CREATE') THEN 't'
+  WHEN has_schema_privilege(:'ruser', 'public', 'CREATE') THEN 't'
+  WHEN EXISTS (
+    SELECT 1 
+    FROM pg_class c 
+    JOIN pg_namespace n ON n.oid = c.relnamespace 
+    WHERE n.nspname = 'public' 
+      AND c.relkind IN ('r', 'p') 
+      AND (
+        has_table_privilege(:'ruser', c.oid, 'INSERT') OR 
+        has_table_privilege(:'ruser', c.oid, 'UPDATE') OR 
+        has_table_privilege(:'ruser', c.oid, 'DELETE') OR 
+        has_table_privilege(:'ruser', c.oid, 'TRUNCATE')
+      )
+  ) THEN 't'
+  ELSE 'f'
+END;
+EOF
+)
+  priv_status=$?
+fi
+set -e
 
-if [ "$has_prod_create" = "true" ]; then
-  echo "FATAL: Rehearsal user '$rehearsal_user' has CREATE privilege on production schema!" >&2
+if [ "$priv_status" -ne 0 ]; then
+  echo "FATAL: Privilege query failed against production database (exit code $priv_status): $priv_output" >&2
+  echo "Query errors cannot be treated as evidence of safety; aborting rehearsal." >&2
   exit 11
 fi
+
+if [ "$priv_output" = "t" ]; then
+  echo "FATAL: Rehearsal user '$rehearsal_user' has write/create privileges on production database or cluster!" >&2
+  echo "Rehearsals must be strictly isolated with zero production write capability." >&2
+  exit 11
+fi
+
+if [ "$priv_output" != "f" ]; then
+  echo "FATAL: Privilege check returned unexpected/malformed result: '$priv_output'." >&2
+  echo "Unknown privilege state; aborting rehearsal." >&2
+  exit 11
+fi
+
+echo "Production privilege check confirmed: rehearsal user '$rehearsal_user' has zero write/create privileges on production."
 
 echo "Infrastructure isolation confirmed:"
 echo "  Production: [addr=$prod_addr, port=$prod_port, db=$prod_db, sysid=${prod_sysid:0:8}...]"
@@ -180,22 +229,30 @@ if [ -e "$ENCRYPTED_BACKUP" ]; then
   exit 12
 fi
 
-# Durable, Recoverable Encryption Key Material
-KEY_FILE_GENERATED=false
+# Recoverable Encryption Key Material (Separate Custody Required for Production)
 if [ -n "${BACKUP_PASSPHRASE_FILE:-}" ]; then
   if [ ! -f "$BACKUP_PASSPHRASE_FILE" ]; then
     echo "FATAL: Specified BACKUP_PASSPHRASE_FILE '$BACKUP_PASSPHRASE_FILE' does not exist." >&2
     exit 13
   fi
   chmod 600 "$BACKUP_PASSPHRASE_FILE"
-else
-  # Durably secure the generated passphrase into a protected file
-  BACKUP_PASSPHRASE_FILE="$BACKUP_DIR/${BACKUP_NAME}.key"
+elif [ "${ALLOW_SYNTHETIC_TEST_KEY:-false}" = "true" ]; then
+  # Synthetic test-only workflow with explicit boundaries
+  echo "WARNING: ALLOW_SYNTHETIC_TEST_KEY=true is set. Generating synthetic test key." >&2
+  echo "WARNING: This synthetic key workflow is strictly restricted to automated CI/test environments and is FORBIDDEN in production." >&2
+  SYNTHETIC_KEY_DIR="${SYNTHETIC_KEY_DIR:-$BACKUP_DIR/synthetic_test_keys}"
+  mkdir -p "$SYNTHETIC_KEY_DIR"
+  chmod 700 "$SYNTHETIC_KEY_DIR"
+  BACKUP_PASSPHRASE_FILE="$SYNTHETIC_KEY_DIR/${BACKUP_NAME}.key"
   touch "$BACKUP_PASSPHRASE_FILE"
   chmod 600 "$BACKUP_PASSPHRASE_FILE"
   head -c 32 /dev/urandom | base64 > "$BACKUP_PASSPHRASE_FILE"
-  KEY_FILE_GENERATED=true
-  echo "==> Durable recovery key generated and retained at: $BACKUP_PASSPHRASE_FILE"
+  echo "==> Synthetic test recovery key generated at: $BACKUP_PASSPHRASE_FILE"
+else
+  echo "FATAL: BACKUP_PASSPHRASE_FILE must be set to a pre-provisioned, independently protected recovery key file." >&2
+  echo "Production use requires separate backup and key custody. Silently generating recovery keys beside the backup is forbidden." >&2
+  echo "For automated CI/local testing only, set ALLOW_SYNTHETIC_TEST_KEY=true to permit synthetic key generation." >&2
+  exit 13
 fi
 
 if [ ! -s "$BACKUP_PASSPHRASE_FILE" ]; then
@@ -235,21 +292,14 @@ cleanup() {
     rm -f "$REHEARSAL_TOC_FILE" 2>/dev/null || true
   fi
 
-  # CRITICAL ASSET PRESERVATION:
+  # CRITICAL RECOVERY ASSET PRESERVATION:
   # The recovery backup ($ENCRYPTED_BACKUP) and key material ($BACKUP_PASSPHRASE_FILE)
-  # must NEVER be deleted on rehearsal failure or normal completion.
-  # They are preserved for disaster recovery.
+  # are NEVER deleted by this script, neither on failure nor on success.
+  # Recovery assets are retained for owner-approved verification, disaster recovery,
+  # or separate owner-approved disposal.
   if [ -f "$ENCRYPTED_BACKUP" ]; then
     echo "==> Production recovery backup preserved at: $ENCRYPTED_BACKUP"
     echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
-  fi
-
-  # Only purge managed directory if explicit PURGE_BACKUP_ON_SUCCESS is set AND execution succeeded
-  if [ "${PURGE_BACKUP_ON_SUCCESS:-false}" = "true" ] && [ $exit_code -eq 0 ]; then
-    rm -f "$ENCRYPTED_BACKUP" "$BACKUP_PASSPHRASE_FILE" 2>/dev/null || true
-    if [ "$BACKUP_DIR_MANAGED" = "true" ]; then
-      rmdir "$BACKUP_DIR" 2>/dev/null || true
-    fi
   fi
 
   if [ $exit_code -ne 0 ]; then
