@@ -1064,13 +1064,13 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 35. **Negative Test 35:** Malformed quoted credentials fail closed before client execution (unterminated quotes, unescaped characters after closing quote, unterminated escape sequences, and unescaped quotes in unquoted values fail closed with exit code 1; managed `.pgpass` cleaned up).
 36. **Test 36:** Direct regression qualification: regex parsing truncation vs libpq parser (confirms that previous HEAD regex `r"(?:^|\s)password\s*=\s*([^\s'"]+|'[^']*'|"[^"]*")"` truncated at escaped apostrophe and leaked `CanaryFragment` into sanitized DSN command arguments, while canonical executable with libpq parser completely removes password without fragments, passing `TEST_ASSERT_NO_SECRETS=1`, exit `0`).
 
-### Step 2.5: Automated Migration Operator Helper Qualification Suite (23 Checks)
+### Step 2.5: Automated Migration Operator Helper Qualification Suite (26 Checks)
 
-The credential safety, libpq parsing boundaries, target verification, and signal handling of [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh) are continuously qualified in CI via [`scripts/test-migration-operator.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-migration-operator.sh) against isolated disposable PostgreSQL fixtures on private Unix sockets:
+The credential safety, libpq parsing boundaries, target verification, signal handling, and execution integrity of [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh) are continuously qualified in CI via [`scripts/test-migration-operator.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-migration-operator.sh) against isolated disposable PostgreSQL fixtures on private Unix sockets:
 
 1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
 2. **Negative Test 2:** Rejection of missing affirmative confirmation (`CONFIRM_PRODUCTION_MIGRATION="yes"`, exit code 2).
-3. **Negative Test 3:** Rejection of missing or unreadable migration DDL file (exit code 3).
+3. **Negative Test 3:** Rejection of arbitrary/unreviewed `MIGRATION_FILE` overrides (strictly bound to canonical migration SQL, exit code 3).
 4. **Positive Test 4:** Valid URI connection with canary password authenticated cleanly via `PGPASSFILE`; zero passwords in arguments or child environment (`TEST_ASSERT_NO_SECRETS=1`, exit code 0).
 5. **Positive Test 5:** Valid keyword/value connection with canary password authenticated cleanly (exit code 0).
 6. **Positive Test 6:** Keyword/value password containing escaped apostrophe (`\'`) parsed without truncation (exit code 0).
@@ -1082,15 +1082,18 @@ The credential safety, libpq parsing boundaries, target verification, and signal
 12. **Negative Test 12:** Unexpected quotes inside unquoted connection values fail closed (exit code 1).
 13. **Negative Test 13:** Ambiguous credentials (password in both userinfo and query string) fail closed (exit code 1).
 14. **Negative Test 14:** Strict target-specific isolation: missing `host`, `user`, `dbname`, or `port` fails closed (zero wildcard fallback allowed, exit code 1).
-15. **Positive Test 15:** Deterministic target matching: `.pgpass` entry confirmed to contain zero wildcard fields (`*`).
+15. **Positive Test 15:** Empirical inspection of actual generated `.pgpass` file: mode `0600`, exact target-specific fields, and zero wildcard tokens (`*`).
 16. **Negative Test 16:** Wrong password rejected with exit code 4; zero secrets leaked in stderr/logs; temporary `.pgpass` purged.
 17. **Negative Test 17:** Target database identity verification: mismatch between actual database and `EXPECTED_DATABASE` fails closed before executing DDL (exit code 5).
-18. **Negative Test 18:** Standby database protection: connection to read-only replica (`pg_is_in_recovery() = true`) fails closed (exit code 5).
+18. **Negative Test 18:** Standby database protection: connection to read-only replica (`pg_is_in_recovery() = true`) fails closed with controlled test response (exit code 5); independently verified zero DDL executed.
 19. **Positive Test 19:** Inspection wrappers verify zero credentials in process command-line arguments (exit 99 assertion) and child environment (`DATABASE_URL` and `PGPASSWORD` scrubbed, exit 98 assertion).
 20. **Negative Test 20:** Unreadable or nonexistent ambient `PGPASSFILE` fails closed (exit code 1).
 21. **Positive Test 21:** Valid ambient `PGPASSFILE` entries preserved by appending with fallback precedence.
-22. **Positive Test 22:** Signal trap handlers confirmed for `INT` (exit 130) and `TERM` (exit 143) with guaranteed temporary file cleanup.
-23. **Positive Test 23:** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1`, durability tables, and column `pending_object_keys`.
+22. **Positive Test 22:** Genuine signal termination: SIGTERM (exit 143) and SIGINT (exit 130) delivered to live processes; independently verified temporary files unlinked.
+23. **Positive Test 23:** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1`, 4 durability tables, `pending_object_keys` jsonb column, and all 12 valid indexes.
+24. **Negative Test 24:** Unreviewed SQL file substitution rejection: tampered SQL file is rejected (exit code 3); independently verified zero DDL executed.
+25. **Negative Test 25:** Wrong PostgreSQL cluster rejection: cluster `system_identifier` mismatch is rejected (exit code 5) even when target database name and operator username match.
+26. **Negative Test 26:** Operator role identity mismatch rejection: unexpected connected role fails closed before DDL execution (exit code 5).
 
 ---
 
@@ -1105,20 +1108,25 @@ Execute the verified idempotent script `config/migrations/20261029_backend_durab
 > 1. Dedicated permission-restricted `PGPASSFILE` (mode `0600`) with automatic cleanup across both normal exits and signal terminations (`SIGINT`, `SIGTERM`).
 > 2. Deterministic, target-specific credential matching with **zero wildcard fallback** (`host`, `port`, `dbname`, and `user` must all be explicitly defined in connection parameters).
 > 3. State-machine libpq lexing rejecting unterminated quotes, malformed escapes, and extraneous characters.
-> 4. Positive, fail-closed pre-execution target database identity verification (`EXPECTED_DATABASE=railway` and primary node verification `pg_is_in_recovery() = false`).
-> 5. Subprocess environment scrubbing (`unset DATABASE_URL`, `unset PGPASSWORD`).
-> 6. Fail-closed ambient credential preservation (rejects unreadable or missing ambient `PGPASSFILE`).
+> 4. Immutable binding to the reviewed migration SQL file (`config/migrations/20261029_backend_durability.up.sql`, SHA-256 `5800307ef280515a4a8edb5dac5c65b62b3c497213d2947afae5043d09e55b6b`), strictly rejecting arbitrary `MIGRATION_FILE` substitution in the production path.
+> 5. Positive, fail-closed pre-execution target cluster, database, and operator identity verification (`EXPECTED_DATABASE=railway`, optional `EXPECTED_USER`, optional `EXPECTED_CLUSTER_SYSTEM_IDENTIFIER`, and primary node verification `pg_is_in_recovery() = false`).
+> 6. Atomic within-session target verification: re-asserts database, operator, cluster system identifier, and primary status inside the execution transaction itself before applying DDL, eliminating target-shift / TOCTOU boundaries.
+> 7. Subprocess environment scrubbing (`unset DATABASE_URL`, `unset PGPASSWORD`).
+> 8. Fail-closed ambient credential preservation (rejects unreadable or missing ambient `PGPASSFILE`).
 
 ```bash
 # Set affirmative production confirmation and expected production database name
 export CONFIRM_PRODUCTION_MIGRATION="yes"
 export EXPECTED_DATABASE="railway"
+# Optional positive identity pins:
+# export EXPECTED_USER="postgres"
+# export EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="<production_system_identifier>"
 
 # Execute canonical migration operator helper (DATABASE_URL is scrubbed from child process)
 ./scripts/apply-durability-migration.sh
 ```
 
-*(Note: The migration operator helper is version-controlled and qualified with 23 automated tests in `scripts/test-migration-operator.sh`.)*
+*(Note: The migration operator helper is version-controlled and qualified with 26 automated tests in `scripts/test-migration-operator.sh`.)*
 
 *Raw SQL equivalent (for execution in an admin SQL console):*
 ```sql
