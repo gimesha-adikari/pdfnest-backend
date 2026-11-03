@@ -136,9 +136,62 @@ set -euo pipefail
 if command -v pg_config >/dev/null 2>&1; then
   pg_bindir="$(pg_config --bindir 2>/dev/null || true)"
   if [ -n "$pg_bindir" ] && [ -d "$pg_bindir" ]; then
-    export PATH="$pg_bindir:$PATH"
+    export PATH="$PATH:$pg_bindir"
   fi
 fi
+
+# -----------------------------------------------------------------------------
+# Safe Automated Cleanup Trap & Lifecycle State
+# -----------------------------------------------------------------------------
+MANAGED_PGPASSFILE=""
+REHEARSAL_DB_CREATED_BY_US=false
+REHEARSAL_MAINTENANCE_DSN=""
+REHEARSAL_DB="${REHEARSAL_DB:-}"
+TOC_FILE_CREATED=false
+REHEARSAL_TOC_FILE=""
+ENCRYPTED_BACKUP=""
+BACKUP_PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-}"
+
+cleanup() {
+  local exit_code=$?
+  echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
+
+  # POSITIVE OWNERSHIP SAFETY:
+  # Only drop the rehearsal database if this specific execution positively created it!
+  # Preexisting databases are NEVER dropped.
+  if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ] && [ -n "$REHEARSAL_MAINTENANCE_DSN" ] && [ -n "$REHEARSAL_DB" ]; then
+    echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
+    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
+    REHEARSAL_DB_CREATED_BY_US=false
+  fi
+
+  # Clean up dedicated managed PGPASSFILE if created by this execution
+  if [ -n "$MANAGED_PGPASSFILE" ] && [ -f "$MANAGED_PGPASSFILE" ]; then
+    rm -f "$MANAGED_PGPASSFILE" 2>/dev/null || true
+  fi
+
+  # Clean up ephemeral TOC list file if created by us
+  if [ "$TOC_FILE_CREATED" = "true" ] && [ -n "$REHEARSAL_TOC_FILE" ] && [ -f "$REHEARSAL_TOC_FILE" ]; then
+    rm -f "$REHEARSAL_TOC_FILE" 2>/dev/null || true
+  fi
+
+  # CRITICAL RECOVERY ASSET PRESERVATION:
+  # The recovery backup ($ENCRYPTED_BACKUP) and key material ($BACKUP_PASSPHRASE_FILE)
+  # are NEVER deleted by this script, neither on failure nor on success.
+  # Recovery assets are retained for owner-approved verification, disaster recovery,
+  # or separate owner-approved disposal.
+  if [ -n "$ENCRYPTED_BACKUP" ] && [ -f "$ENCRYPTED_BACKUP" ]; then
+    echo "==> Production recovery backup preserved at: $ENCRYPTED_BACKUP"
+    echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
+  fi
+
+  if [ $exit_code -ne 0 ]; then
+    echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
+  fi
+
+  exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
 
 # -----------------------------------------------------------------------------
 # 1. Parameter Validation & Safeguards
@@ -166,11 +219,19 @@ REHEARSAL_PGPORT="${REHEARSAL_PGPORT:-5432}"
 REHEARSAL_MAINTENANCE_DB="${REHEARSAL_MAINTENANCE_DB:-postgres}"
 REHEARSAL_PGPASSWORD="${REHEARSAL_PGPASSWORD:-}"
 
-# Explicit maintenance DSN using structured parameters (never string concatenation)
-REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
+# Credential safety: Never pass passwords in command line arguments (DSN parameters).
+# Use a dedicated, permission-restricted PGPASSFILE without altering unrelated operator credentials.
 if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  REHEARSAL_MAINTENANCE_DSN="$REHEARSAL_MAINTENANCE_DSN password=$REHEARSAL_PGPASSWORD"
+  MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
+  touch "$MANAGED_PGPASSFILE"
+  chmod 600 "$MANAGED_PGPASSFILE"
+  echo "$REHEARSAL_PGHOST:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
+  echo "*:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
+  export PGPASSFILE="$MANAGED_PGPASSFILE"
 fi
+
+# Explicit maintenance DSN using structured parameters (passwords omitted from CLI arguments)
+REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
 
 # -----------------------------------------------------------------------------
 # 2. Infrastructure Identity & Isolation Verification
@@ -261,14 +322,7 @@ fi
 # Uses safe parameter passing (:'ruser') and strictly inspects PostgreSQL boolean results ('t' / 'f').
 # Fails closed on 't', query errors, malformed results, and unknown states without issuing writes.
 set +e
-if [ -n "${PRIVILEGE_QUERY_OVERRIDE:-}" ]; then
-  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << EOF 2>&1
-$PRIVILEGE_QUERY_OVERRIDE
-EOF
-)
-  priv_status=$?
-else
-  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
+priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
   WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = :'ruser') THEN 't'
@@ -291,8 +345,7 @@ SELECT CASE
 END;
 EOF
 )
-  priv_status=$?
-fi
+priv_status=$?
 set -e
 
 if [ "$priv_status" -ne 0 ]; then
@@ -344,31 +397,19 @@ if [ -e "$ENCRYPTED_BACKUP" ]; then
   exit 12
 fi
 
-# Recoverable Encryption Key Material (Separate Custody Required for Production)
-if [ -n "${BACKUP_PASSPHRASE_FILE:-}" ]; then
-  if [ ! -f "$BACKUP_PASSPHRASE_FILE" ]; then
-    echo "FATAL: Specified BACKUP_PASSPHRASE_FILE '$BACKUP_PASSPHRASE_FILE' does not exist." >&2
-    exit 13
-  fi
-  chmod 600 "$BACKUP_PASSPHRASE_FILE"
-elif [ "${ALLOW_SYNTHETIC_TEST_KEY:-false}" = "true" ]; then
-  # Synthetic test-only workflow with explicit boundaries
-  echo "WARNING: ALLOW_SYNTHETIC_TEST_KEY=true is set. Generating synthetic test key." >&2
-  echo "WARNING: This synthetic key workflow is strictly restricted to automated CI/test environments and is FORBIDDEN in production." >&2
-  SYNTHETIC_KEY_DIR="${SYNTHETIC_KEY_DIR:-$BACKUP_DIR/synthetic_test_keys}"
-  mkdir -p "$SYNTHETIC_KEY_DIR"
-  chmod 700 "$SYNTHETIC_KEY_DIR"
-  BACKUP_PASSPHRASE_FILE="$SYNTHETIC_KEY_DIR/${BACKUP_NAME}.key"
-  touch "$BACKUP_PASSPHRASE_FILE"
-  chmod 600 "$BACKUP_PASSPHRASE_FILE"
-  head -c 32 /dev/urandom | base64 > "$BACKUP_PASSPHRASE_FILE"
-  echo "==> Synthetic test recovery key generated at: $BACKUP_PASSPHRASE_FILE"
-else
+# Recoverable Encryption Key Material (Separate Custody Required)
+if [ -z "${BACKUP_PASSPHRASE_FILE:-}" ]; then
   echo "FATAL: BACKUP_PASSPHRASE_FILE must be set to a pre-provisioned, independently protected recovery key file." >&2
-  echo "Production use requires separate backup and key custody. Silently generating recovery keys beside the backup is forbidden." >&2
-  echo "For automated CI/local testing only, set ALLOW_SYNTHETIC_TEST_KEY=true to permit synthetic key generation." >&2
+  echo "Production use requires separate backup and key custody. Generating recovery keys beside the backup is forbidden." >&2
   exit 13
 fi
+
+if [ ! -f "$BACKUP_PASSPHRASE_FILE" ]; then
+  echo "FATAL: Specified BACKUP_PASSPHRASE_FILE '$BACKUP_PASSPHRASE_FILE' does not exist." >&2
+  exit 13
+fi
+
+chmod 600 "$BACKUP_PASSPHRASE_FILE"
 
 if [ ! -s "$BACKUP_PASSPHRASE_FILE" ]; then
   echo "FATAL: BACKUP_PASSPHRASE_FILE is empty." >&2
@@ -382,51 +423,9 @@ REHEARSAL_TOC_FILE="$BACKUP_DIR/toc_${BACKUP_TS}_${RANDOM}.list"
 TOC_FILE_CREATED=false
 
 REHEARSAL_DB_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_DB"
-if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  REHEARSAL_DB_DSN="$REHEARSAL_DB_DSN password=$REHEARSAL_PGPASSWORD"
-fi
 
 # -----------------------------------------------------------------------------
-# 4. Safe Automated Cleanup Trap
-# -----------------------------------------------------------------------------
-cleanup() {
-  local exit_code=$?
-  echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
-
-  # POSITIVE OWNERSHIP SAFETY:
-  # Only drop the rehearsal database if this specific execution positively created it!
-  # Preexisting databases are NEVER dropped.
-  if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ]; then
-    echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
-    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
-    REHEARSAL_DB_CREATED_BY_US=false
-  fi
-
-  # Clean up ephemeral TOC list file if created by us
-  if [ "$TOC_FILE_CREATED" = "true" ] && [ -f "$REHEARSAL_TOC_FILE" ]; then
-    rm -f "$REHEARSAL_TOC_FILE" 2>/dev/null || true
-  fi
-
-  # CRITICAL RECOVERY ASSET PRESERVATION:
-  # The recovery backup ($ENCRYPTED_BACKUP) and key material ($BACKUP_PASSPHRASE_FILE)
-  # are NEVER deleted by this script, neither on failure nor on success.
-  # Recovery assets are retained for owner-approved verification, disaster recovery,
-  # or separate owner-approved disposal.
-  if [ -f "$ENCRYPTED_BACKUP" ]; then
-    echo "==> Production recovery backup preserved at: $ENCRYPTED_BACKUP"
-    echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
-  fi
-
-  if [ $exit_code -ne 0 ]; then
-    echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
-  fi
-
-  exit "$exit_code"
-}
-trap cleanup EXIT INT TERM
-
-# -----------------------------------------------------------------------------
-# 5. Record Production Baseline Metrics
+# 4. Record Production Baseline Metrics
 # -----------------------------------------------------------------------------
 echo "==> 1. Recording baseline production row counts..."
 baseline_users=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")
@@ -593,10 +592,12 @@ echo "==> Disposable rehearsal restore and migration dry run successfully comple
 
 ### Step 2.2: Backup Access Control, Separate Key Custody, and Owner-Approved Disposal Standards
 1. **Access Control & File Mode:** The backup archive contains sensitive production records (user identities, studio job parameters, file keys). Process permissions enforce `umask 077` and `chmod 600`. File ownership belongs strictly to the migration operator role with zero permissions granted to other users or group members.
-2. **Durable Key Material, Separate Key Custody & Zero Command-Line Secrets:** Never pass encryption keys as command-line arguments (which are visible in process tables and audit logs). The procedure strictly requires a pre-provisioned, independently protected `BACKUP_PASSPHRASE_FILE` with permissions `0600` (e.g. from an owner-approved secret store or key management service). Storing or silently generating the recovery key beside the encrypted backup is forbidden in production to maintain strict separation of backup and key custody. Decryption is verified in a separate, isolated process using solely this pre-provisioned key material. For automated CI/test environments only, an explicit `ALLOW_SYNTHETIC_TEST_KEY=true` flag may be used with clear synthetic boundaries.
-3. **Elimination of Plaintext Dumps:** Plaintext database dumps must never touch physical or virtual disk storage. The snapshot is piped directly from `pg_dump -Fc` into `gpg --batch --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file ...`. Rehearsal restore streams decrypted bytes directly from `gpg --decrypt` pipe into `pg_restore --exit-on-error`.
-4. **Permanent Recovery Asset Retention (No Automated Purge):** The rehearsal script **never** deletes the encrypted recovery backup or its key file under any circumstance (neither on failure nor on success). Automatic asset purging (`PURGE_BACKUP_ON_SUCCESS`) has been completely eliminated. The backup file is the ultimate disaster recovery asset; only ephemeral rehearsal database objects and temporary files are cleaned up on exit.
-5. **Separate Owner-Approved Retention and Disposal Procedure:**
+2. **Durable Key Material, Separate Key Custody & Zero Command-Line Secrets:** Never pass encryption keys as command-line arguments (which are visible in process tables and audit logs). The procedure strictly requires a pre-provisioned, independently protected `BACKUP_PASSPHRASE_FILE` with permissions `0600` (e.g. from an owner-approved secret store or key management service). Storing or silently generating the recovery key beside the encrypted backup is strictly forbidden in production and staging to maintain absolute separation of backup and key custody. Synthetic key bypass flags (`ALLOW_SYNTHETIC_TEST_KEY`) are completely absent from the production executable. Decryption is verified in a separate, isolated process using solely this pre-provisioned key material.
+3. **Database Credential Protection via Dedicated PGPASSFILE:** Database credentials (e.g. `REHEARSAL_PGPASSWORD`) are never passed as command-line arguments or appended to connection strings (`password=...`), preventing password exposure in process listings (`ps`, `/proc/*/cmdline`) or execution traces. When passwords are required, a temporary, permission-restricted (`0600`) `PGPASSFILE` is initialized and scoped to the rehearsal process, and guaranteed to be deleted on exit across both success and failure exit paths.
+4. **Immutable Fail-Closed Production Privilege Check:** The production rehearsal executable enforces an immutable privilege query that rejects any rehearsal role possessing write or creation privileges on production. Arbitrary query overrides (`PRIVILEGE_QUERY_OVERRIDE`) have been completely removed from the production script to eliminate SQL injection risks. Negative failure testing is handled via isolated test harness wrappers.
+5. **Elimination of Plaintext Dumps:** Plaintext database dumps must never touch physical or virtual disk storage. The snapshot is piped directly from `pg_dump -Fc` into `gpg --batch --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file ...`. Rehearsal restore streams decrypted bytes directly from `gpg --decrypt` pipe into `pg_restore --exit-on-error`.
+6. **Permanent Recovery Asset Retention (No Automated Purge):** The rehearsal script **never** deletes the encrypted recovery backup or its key file under any circumstance (neither on failure nor on success). Automatic asset purging (`PURGE_BACKUP_ON_SUCCESS`) has been completely eliminated. The backup file is the ultimate disaster recovery asset; only ephemeral rehearsal database objects and temporary files are cleaned up on exit.
+7. **Separate Owner-Approved Retention and Disposal Procedure:**
    - *Physical Limitations of Overwrite on SSDs/Cloud Volumes:* Modern solid-state drives (SSDs, NVMe) and virtualized cloud block devices (e.g. AWS EBS, GCP Persistent Disk, Railway volume mounts) utilize flash translation layers (FTL), wear-leveling algorithms, over-provisioning pools, and copy-on-write sparse remapping. Standard file overwriting tools (`shred`, `rm -P`) overwrite only the currently mapped logical blocks; residual physical flash cells or underlying storage snapshots retain historical data blocks until low-level garbage collection occurs.
    - *Crypto-Shredding as the Authoritative Standard:* Immediate symmetric encryption with AES-256 provides absolute confidentiality. Recovery assets (`$ENCRYPTED_BACKUP` and `$BACKUP_PASSPHRASE_FILE`) must be preserved throughout the migration maintenance window and retained according to the organization's data retention policy.
    - *Independent Disposal Execution:* Automatic purging by the rehearsal script is strictly forbidden. When the snapshot reaches the end of its owner-approved retention window (typically 24–48 hours post-migration following production verification):
@@ -618,6 +619,7 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Fail-Closed Privilege Verification** | Production privilege check proves rehearsal role has zero write/create privileges on production | Required | [ ] |
 | **Streaming Encrypted Snapshot** | `pg_dump -Fc` streamed directly into AES-256 encryption (`.dump.gpg`); 0 bytes plaintext on disk | Required | [ ] |
 | **Separate Key Custody Confirmed** | Pre-provisioned recovery key via `BACKUP_PASSPHRASE_FILE` (0600) separate from backup; no silent colocation | Required | [ ] |
+| **Zero Credential Process Leakage** | `REHEARSAL_PGPASSWORD` managed via temporary `PGPASSFILE` (0600); no `password=` parameters in DSN / arguments | Required | [ ] |
 | **TOC Integrity Confirmed** | `pg_restore --list` from decrypted stream confirms required table structures | Required | [ ] |
 | **Collision-Safe DB Creation** | `createdb` executed only after verifying database does not preexist; preexisting DBs never dropped | Required | [ ] |
 | **Streaming Rehearsal Restore Passed** | Decrypted stream restored to disposable DB with `--exit-on-error`; 0 errors | Required | [ ] |
@@ -626,9 +628,32 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **12 Indexes Programmatically Validated** | Exactly 12 indexes verified: 5 unique, 4 primary key, 7 secondary, all 12 valid (`is_valid = true`) | Required | [ ] |
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
+| **Full 17-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 17/17 negative and positive tests in CI | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
+
+### Step 2.4: Automated Rehearsal Qualification Suite (17 Comprehensive Checks)
+
+The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 17 rigorous negative and positive checks:
+
+1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
+2. **Negative Test 2:** Rejection of missing `REHEARSAL_PGHOST` / `REHEARSAL_PGUSER` (exit code 2).
+3. **Negative Test 3:** Rejection of missing affirmative non-production confirmation (exit code 3).
+4. **Negative Test 4:** Enforce separate key custody; missing `BACKUP_PASSPHRASE_FILE` fails fast (exit code 13).
+5. **Negative Test 5:** Verify synthetic-key bypass is completely unavailable in the production executable (exit code 13).
+6. **Negative Test 6:** Infrastructure collision detection when rehearsal target matches production cluster (exit code 6).
+7. **Negative Test 7:** Real privilege rejection for role with production write/create permissions before creating backup or DB (exit code 11).
+8. **Negative Test 8:** Neutralize malicious inherited privilege overrides (`PRIVILEGE_QUERY_OVERRIDE` ignored, zero arbitrary SQL executed on production, rejected with exit code 11).
+9. **Negative Test 9:** Rejection on privilege query error (fail-closed via harness failure injection, exit code 11).
+10. **Negative Test 10:** Rejection on malformed or unexpected privilege query result (fail-closed, exit code 11).
+11. **Test 11:** Positive verification of valid unprivileged roles (nonexistent role and read-only role evaluate cleanly to `'f'`).
+12. **Negative Test 12:** Database name collision safety (preexisting database survives collision without deletion or corruption).
+13. **Negative Test 13:** Asset preservation on rehearsal failure (external directory contents, encrypted backup, and recovery key intact).
+14. **Positive Test 14:** Full end-to-end rehearsal execution using password-authenticated role via `PGPASSFILE`.
+15. **Positive Test 15:** Credential safety verification (0 passwords in process args or logs, managed `PGPASSFILE` cleaned up on exit on success and failure, wrong password rejected).
+16. **Positive Test 16:** Recovery asset retention on rehearsal success (no automatic purging).
+17. **Positive Test 17:** Independent separate-process decryption proof using retained recovery key in a scrubbed environment.
 
 ---
 

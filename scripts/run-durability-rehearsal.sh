@@ -21,9 +21,62 @@ set -euo pipefail
 if command -v pg_config >/dev/null 2>&1; then
   pg_bindir="$(pg_config --bindir 2>/dev/null || true)"
   if [ -n "$pg_bindir" ] && [ -d "$pg_bindir" ]; then
-    export PATH="$pg_bindir:$PATH"
+    export PATH="$PATH:$pg_bindir"
   fi
 fi
+
+# -----------------------------------------------------------------------------
+# Safe Automated Cleanup Trap & Lifecycle State
+# -----------------------------------------------------------------------------
+MANAGED_PGPASSFILE=""
+REHEARSAL_DB_CREATED_BY_US=false
+REHEARSAL_MAINTENANCE_DSN=""
+REHEARSAL_DB="${REHEARSAL_DB:-}"
+TOC_FILE_CREATED=false
+REHEARSAL_TOC_FILE=""
+ENCRYPTED_BACKUP=""
+BACKUP_PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-}"
+
+cleanup() {
+  local exit_code=$?
+  echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
+
+  # POSITIVE OWNERSHIP SAFETY:
+  # Only drop the rehearsal database if this specific execution positively created it!
+  # Preexisting databases are NEVER dropped.
+  if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ] && [ -n "$REHEARSAL_MAINTENANCE_DSN" ] && [ -n "$REHEARSAL_DB" ]; then
+    echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
+    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
+    REHEARSAL_DB_CREATED_BY_US=false
+  fi
+
+  # Clean up dedicated managed PGPASSFILE if created by this execution
+  if [ -n "$MANAGED_PGPASSFILE" ] && [ -f "$MANAGED_PGPASSFILE" ]; then
+    rm -f "$MANAGED_PGPASSFILE" 2>/dev/null || true
+  fi
+
+  # Clean up ephemeral TOC list file if created by us
+  if [ "$TOC_FILE_CREATED" = "true" ] && [ -n "$REHEARSAL_TOC_FILE" ] && [ -f "$REHEARSAL_TOC_FILE" ]; then
+    rm -f "$REHEARSAL_TOC_FILE" 2>/dev/null || true
+  fi
+
+  # CRITICAL RECOVERY ASSET PRESERVATION:
+  # The recovery backup ($ENCRYPTED_BACKUP) and key material ($BACKUP_PASSPHRASE_FILE)
+  # are NEVER deleted by this script, neither on failure nor on success.
+  # Recovery assets are retained for owner-approved verification, disaster recovery,
+  # or separate owner-approved disposal.
+  if [ -n "$ENCRYPTED_BACKUP" ] && [ -f "$ENCRYPTED_BACKUP" ]; then
+    echo "==> Production recovery backup preserved at: $ENCRYPTED_BACKUP"
+    echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
+  fi
+
+  if [ $exit_code -ne 0 ]; then
+    echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
+  fi
+
+  exit "$exit_code"
+}
+trap cleanup EXIT INT TERM
 
 # -----------------------------------------------------------------------------
 # 1. Parameter Validation & Safeguards
@@ -51,11 +104,19 @@ REHEARSAL_PGPORT="${REHEARSAL_PGPORT:-5432}"
 REHEARSAL_MAINTENANCE_DB="${REHEARSAL_MAINTENANCE_DB:-postgres}"
 REHEARSAL_PGPASSWORD="${REHEARSAL_PGPASSWORD:-}"
 
-# Explicit maintenance DSN using structured parameters (never string concatenation)
-REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
+# Credential safety: Never pass passwords in command line arguments (DSN parameters).
+# Use a dedicated, permission-restricted PGPASSFILE without altering unrelated operator credentials.
 if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  REHEARSAL_MAINTENANCE_DSN="$REHEARSAL_MAINTENANCE_DSN password=$REHEARSAL_PGPASSWORD"
+  MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
+  touch "$MANAGED_PGPASSFILE"
+  chmod 600 "$MANAGED_PGPASSFILE"
+  echo "$REHEARSAL_PGHOST:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
+  echo "*:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
+  export PGPASSFILE="$MANAGED_PGPASSFILE"
 fi
+
+# Explicit maintenance DSN using structured parameters (passwords omitted from CLI arguments)
+REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
 
 # -----------------------------------------------------------------------------
 # 2. Infrastructure Identity & Isolation Verification
@@ -146,14 +207,7 @@ fi
 # Uses safe parameter passing (:'ruser') and strictly inspects PostgreSQL boolean results ('t' / 'f').
 # Fails closed on 't', query errors, malformed results, and unknown states without issuing writes.
 set +e
-if [ -n "${PRIVILEGE_QUERY_OVERRIDE:-}" ]; then
-  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << EOF 2>&1
-$PRIVILEGE_QUERY_OVERRIDE
-EOF
-)
-  priv_status=$?
-else
-  priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
+priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
   WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = :'ruser') THEN 't'
@@ -176,8 +230,7 @@ SELECT CASE
 END;
 EOF
 )
-  priv_status=$?
-fi
+priv_status=$?
 set -e
 
 if [ "$priv_status" -ne 0 ]; then
@@ -229,31 +282,19 @@ if [ -e "$ENCRYPTED_BACKUP" ]; then
   exit 12
 fi
 
-# Recoverable Encryption Key Material (Separate Custody Required for Production)
-if [ -n "${BACKUP_PASSPHRASE_FILE:-}" ]; then
-  if [ ! -f "$BACKUP_PASSPHRASE_FILE" ]; then
-    echo "FATAL: Specified BACKUP_PASSPHRASE_FILE '$BACKUP_PASSPHRASE_FILE' does not exist." >&2
-    exit 13
-  fi
-  chmod 600 "$BACKUP_PASSPHRASE_FILE"
-elif [ "${ALLOW_SYNTHETIC_TEST_KEY:-false}" = "true" ]; then
-  # Synthetic test-only workflow with explicit boundaries
-  echo "WARNING: ALLOW_SYNTHETIC_TEST_KEY=true is set. Generating synthetic test key." >&2
-  echo "WARNING: This synthetic key workflow is strictly restricted to automated CI/test environments and is FORBIDDEN in production." >&2
-  SYNTHETIC_KEY_DIR="${SYNTHETIC_KEY_DIR:-$BACKUP_DIR/synthetic_test_keys}"
-  mkdir -p "$SYNTHETIC_KEY_DIR"
-  chmod 700 "$SYNTHETIC_KEY_DIR"
-  BACKUP_PASSPHRASE_FILE="$SYNTHETIC_KEY_DIR/${BACKUP_NAME}.key"
-  touch "$BACKUP_PASSPHRASE_FILE"
-  chmod 600 "$BACKUP_PASSPHRASE_FILE"
-  head -c 32 /dev/urandom | base64 > "$BACKUP_PASSPHRASE_FILE"
-  echo "==> Synthetic test recovery key generated at: $BACKUP_PASSPHRASE_FILE"
-else
+# Recoverable Encryption Key Material (Separate Custody Required)
+if [ -z "${BACKUP_PASSPHRASE_FILE:-}" ]; then
   echo "FATAL: BACKUP_PASSPHRASE_FILE must be set to a pre-provisioned, independently protected recovery key file." >&2
-  echo "Production use requires separate backup and key custody. Silently generating recovery keys beside the backup is forbidden." >&2
-  echo "For automated CI/local testing only, set ALLOW_SYNTHETIC_TEST_KEY=true to permit synthetic key generation." >&2
+  echo "Production use requires separate backup and key custody. Generating recovery keys beside the backup is forbidden." >&2
   exit 13
 fi
+
+if [ ! -f "$BACKUP_PASSPHRASE_FILE" ]; then
+  echo "FATAL: Specified BACKUP_PASSPHRASE_FILE '$BACKUP_PASSPHRASE_FILE' does not exist." >&2
+  exit 13
+fi
+
+chmod 600 "$BACKUP_PASSPHRASE_FILE"
 
 if [ ! -s "$BACKUP_PASSPHRASE_FILE" ]; then
   echo "FATAL: BACKUP_PASSPHRASE_FILE is empty." >&2
@@ -267,51 +308,9 @@ REHEARSAL_TOC_FILE="$BACKUP_DIR/toc_${BACKUP_TS}_${RANDOM}.list"
 TOC_FILE_CREATED=false
 
 REHEARSAL_DB_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_DB"
-if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  REHEARSAL_DB_DSN="$REHEARSAL_DB_DSN password=$REHEARSAL_PGPASSWORD"
-fi
 
 # -----------------------------------------------------------------------------
-# 4. Safe Automated Cleanup Trap
-# -----------------------------------------------------------------------------
-cleanup() {
-  local exit_code=$?
-  echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
-
-  # POSITIVE OWNERSHIP SAFETY:
-  # Only drop the rehearsal database if this specific execution positively created it!
-  # Preexisting databases are NEVER dropped.
-  if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ]; then
-    echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
-    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
-    REHEARSAL_DB_CREATED_BY_US=false
-  fi
-
-  # Clean up ephemeral TOC list file if created by us
-  if [ "$TOC_FILE_CREATED" = "true" ] && [ -f "$REHEARSAL_TOC_FILE" ]; then
-    rm -f "$REHEARSAL_TOC_FILE" 2>/dev/null || true
-  fi
-
-  # CRITICAL RECOVERY ASSET PRESERVATION:
-  # The recovery backup ($ENCRYPTED_BACKUP) and key material ($BACKUP_PASSPHRASE_FILE)
-  # are NEVER deleted by this script, neither on failure nor on success.
-  # Recovery assets are retained for owner-approved verification, disaster recovery,
-  # or separate owner-approved disposal.
-  if [ -f "$ENCRYPTED_BACKUP" ]; then
-    echo "==> Production recovery backup preserved at: $ENCRYPTED_BACKUP"
-    echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
-  fi
-
-  if [ $exit_code -ne 0 ]; then
-    echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
-  fi
-
-  exit "$exit_code"
-}
-trap cleanup EXIT INT TERM
-
-# -----------------------------------------------------------------------------
-# 5. Record Production Baseline Metrics
+# 4. Record Production Baseline Metrics
 # -----------------------------------------------------------------------------
 echo "==> 1. Recording baseline production row counts..."
 baseline_users=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")

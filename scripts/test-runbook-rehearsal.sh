@@ -11,19 +11,21 @@
 #   1. Missing DATABASE_URL fails fast
 #   2. Missing REHEARSAL_PGHOST fails fast
 #   3. Missing affirmative nonproduction confirmation fails fast
-#   4. Separate key custody: missing BACKUP_PASSPHRASE_FILE without synthetic flag fails fast
-#   5. Infrastructure identity collision detection refuses execution
-#   6. Real privilege rejection: role with production write privileges is rejected
+#   4. Separate key custody: missing BACKUP_PASSPHRASE_FILE fails fast
+#   5. Synthetic-key bypass unavailable: ALLOW_SYNTHETIC_TEST_KEY is ignored
+#   6. Infrastructure identity collision detection refuses execution
+#   7. Real privilege rejection: role with production write privileges is rejected
 #      before creating any rehearsal database or backup
-#   7. Privilege query error rejection: query errors fail closed
-#   8. Malformed privilege result rejection: unknown states fail closed
-#   9. Valid nonprivileged cases: nonexistent role and read-only role evaluate to 'f'
-#  10. Database name collision: preexisting database is NEVER dropped on failure
-#  11. Rehearsal failure preserves encrypted recovery asset and key material
-#  12. Full positive rehearsal execution via scripts/run-durability-rehearsal.sh
-#  13. Asset preservation on success: approved backup and key are NEVER purged
-#  14. Independent separate-process decryption proof using retained recovery key
-#  15. Synthetic key workflow with explicit test boundaries
+#   8. Malicious inherited privilege override cannot bypass enforcement or execute arbitrary SQL
+#   9. Privilege query error rejection: query errors fail closed via test-harness injection
+#  10. Malformed privilege result rejection: unknown states fail closed via test-harness injection
+#  11. Valid nonprivileged cases: nonexistent role and read-only role evaluate to 'f'
+#  12. Database name collision: preexisting database is NEVER dropped on failure
+#  13. Rehearsal failure preserves encrypted recovery asset and key material
+#  14. Full positive rehearsal execution with authenticated rehearsal credentials
+#  15. Credentials safety: passwords never appear in command arguments, logs, or persistent files
+#  16. Asset preservation on success: approved backup and key are NEVER purged
+#  17. Independent separate-process decryption proof using retained recovery key
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -89,7 +91,7 @@ CREATE TABLE public.studio_jobs (
 );
 INSERT INTO public.studio_jobs VALUES ('33333333-3333-3333-3333-333333333333', 'completed', now());
 
--- Roles for privilege boundary qualification:
+-- Roles for privilege boundary qualification on production:
 -- 1. Role with write/create permissions on public schema
 CREATE ROLE prod_write_operator LOGIN;
 GRANT CREATE ON SCHEMA public TO prod_write_operator;
@@ -102,6 +104,11 @@ EOF
 
 echo "==> Initializing separate disposable rehearsal PostgreSQL instance (port 55471)..."
 "$bindir/initdb" -D "$test_root/rehearsal_data" -A trust -U platen_rehearsal_operator --encoding=UTF8 >"$test_root/rehearsal_init.log" 2>&1
+
+# Require password authentication specifically for platen_auth_rehearsal_operator
+echo "local all platen_auth_rehearsal_operator md5" | cat - "$test_root/rehearsal_data/pg_hba.conf" > "$test_root/rehearsal_data/pg_hba.conf.tmp"
+mv "$test_root/rehearsal_data/pg_hba.conf.tmp" "$test_root/rehearsal_data/pg_hba.conf"
+
 "$bindir/pg_ctl" -D "$test_root/rehearsal_data" -l "$test_root/rehearsal.log" -o "-h '' -k $test_root -p 55471 -F" -w start >/dev/null
 
 REHEARSAL_MAINT_DSN="host=$test_root port=55471 user=platen_rehearsal_operator dbname=postgres sslmode=disable"
@@ -110,6 +117,8 @@ REHEARSAL_MAINT_DSN="host=$test_root port=55471 user=platen_rehearsal_operator d
 psql -d "$REHEARSAL_MAINT_DSN" -v ON_ERROR_STOP=1 << 'EOF' >/dev/null
 CREATE ROLE prod_write_operator LOGIN CREATEDB;
 CREATE ROLE prod_read_only LOGIN;
+-- Authenticated role with password for credential safety verification
+CREATE ROLE platen_auth_rehearsal_operator LOGIN PASSWORD 'SecretRehearsalPass_12345!' CREATEDB;
 EOF
 
 # Pre-provision independent recovery key file (Separate Custody)
@@ -119,6 +128,30 @@ chmod 700 "$KEYS_DIR"
 PROD_RECOVERY_KEY="$KEYS_DIR/pre_provisioned_recovery.key"
 head -c 32 /dev/urandom | base64 > "$PROD_RECOVERY_KEY"
 chmod 600 "$PROD_RECOVERY_KEY"
+
+# Setup harness-controlled psql failure injection wrapper
+harness_bin="$test_root/harness_bin"
+mkdir -p "$harness_bin"
+real_psql="$bindir/psql"
+cat > "$harness_bin/psql" << 'EOF'
+#!/usr/bin/env bash
+if [ -n "${TEST_INJECT_PSQL_FAILURE:-}" ]; then
+  # Detect if this invocation is the privilege check (inspects parameters)
+  if [[ "$*" == *"-v ruser="* ]]; then
+    if [ "$TEST_INJECT_PSQL_FAILURE" = "query_error" ]; then
+      echo "psql: error: connection reset by peer during privilege introspection" >&2
+      exit 2
+    elif [ "$TEST_INJECT_PSQL_FAILURE" = "malformed" ]; then
+      echo "malformed_unknown_state"
+      exit 0
+    fi
+  fi
+fi
+real_bin="$(cat "$0.real_bin")"
+exec "$real_bin" "$@"
+EOF
+echo "$real_psql" > "$harness_bin/psql.real_bin"
+chmod +x "$harness_bin/psql"
 
 # -----------------------------------------------------------------------------
 # NEGATIVE TEST 1: Fail fast if DATABASE_URL is unset
@@ -188,7 +221,7 @@ echo "PASSED: Missing affirmative confirmation rejected with code $rc."
 # -----------------------------------------------------------------------------
 # NEGATIVE TEST 4: Separate Key Custody - Fail fast if BACKUP_PASSPHRASE_FILE is missing
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 4] Separate Key Custody (missing BACKUP_PASSPHRASE_FILE without synthetic flag)..."
+echo "==> [Negative Test 4] Separate Key Custody (missing BACKUP_PASSPHRASE_FILE fails fast)..."
 set +e
 output=$(env -i PATH="$PATH" \
   DATABASE_URL="$PROD_DSN" \
@@ -199,18 +232,46 @@ output=$(env -i PATH="$PATH" \
   "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
 rc=$?
 set -e
-if [ "$rc" -eq 0 ]; then
-  echo "FAILED: Expected error on missing BACKUP_PASSPHRASE_FILE" >&2; exit 1
+if [ "$rc" -ne 13 ]; then
+  echo "FAILED: Expected exit code 13 on missing BACKUP_PASSPHRASE_FILE, got $rc" >&2; exit 1
 fi
 echo "$output" | grep -q "BACKUP_PASSPHRASE_FILE must be set to a pre-provisioned, independently protected recovery key file" || {
   echo "FAILED: Output did not contain expected key custody error. Got: $output" >&2; exit 1
 }
-echo "PASSED: Missing BACKUP_PASSPHRASE_FILE rejected with code $rc."
+echo "PASSED: Missing BACKUP_PASSPHRASE_FILE rejected with code 13."
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 5: Infrastructure identity collision detection
+# NEGATIVE TEST 5: Synthetic-Key Bypass Unavailable in Production Executable
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 5] Infrastructure collision detection (targeting production cluster)..."
+echo "==> [Negative Test 5] Verifying synthetic-key bypass is completely unavailable..."
+set +e
+output=$(env -i PATH="$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_rehearsal_operator" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  ALLOW_SYNTHETIC_TEST_KEY="true" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+if [ "$rc" -ne 13 ]; then
+  echo "FAILED: Expected exit code 13 when trying to bypass key custody with ALLOW_SYNTHETIC_TEST_KEY, got $rc" >&2
+  exit 1
+fi
+echo "$output" | grep -q "BACKUP_PASSPHRASE_FILE must be set to a pre-provisioned, independently protected recovery key file" || {
+  echo "FAILED: Script did not fail closed on key custody. Got: $output" >&2; exit 1
+}
+# Confirm no synthetic keys were generated
+if [ -d "$test_root/synthetic_test_keys" ]; then
+  echo "FAILED: Synthetic keys folder was created!" >&2; exit 1
+fi
+echo "PASSED: Synthetic-key bypass rejected with code 13; key custody remains strictly enforced."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 6: Infrastructure identity collision detection
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 6] Infrastructure collision detection (targeting production cluster)..."
 set +e
 output=$(env -i PATH="$PATH" \
   DATABASE_URL="$PROD_DSN" \
@@ -231,9 +292,9 @@ echo "$output" | grep -q -E "(system_identifier.*matches production|data_directo
 echo "PASSED: Infrastructure collision rejected with code $rc."
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 6: Real Privilege Rejection (Role with Production Write Permissions)
+# NEGATIVE TEST 7: Real Privilege Rejection (Role with Production Write Permissions)
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 6] Real privilege rejection: role with production write permissions..."
+echo "==> [Negative Test 7] Real privilege rejection: role with production write permissions..."
 canary_priv_dir="$test_root/canary_priv_backup_dir"
 mkdir -p "$canary_priv_dir"
 
@@ -291,18 +352,62 @@ fi
 echo "PASSED: Privileged user rejected with code 11 before creating any backup or rehearsal database."
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 7: Privilege Rejection on Query Error (Never Fail Open)
+# NEGATIVE TEST 8: Malicious Inherited Privilege Override Blocked & No Arbitrary SQL
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 7] Privilege query error rejection (fail-closed check)..."
+echo "==> [Negative Test 8] Malicious inherited privilege override cannot bypass enforcement or execute arbitrary SQL..."
 set +e
-output=$(env -i PATH="$PATH" \
+# Attempt 8A: Attempting to bypass enforcement by setting PRIVILEGE_QUERY_OVERRIDE="SELECT 'f';"
+output_8a=$(env -i PATH="$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="prod_write_operator" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  PRIVILEGE_QUERY_OVERRIDE="SELECT 'f';" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_8a=$?
+set -e
+if [ "$rc_8a" -ne 11 ]; then
+  echo "FAILED: PRIVILEGE_QUERY_OVERRIDE bypassed privilege enforcement! Code: $rc_8a. Output: $output_8a" >&2
+  exit 1
+fi
+echo "Verified 8A: Inherited override was ignored; privileged role was strictly rejected with code 11."
+
+set +e
+# Attempt 8B: Attempting arbitrary write SQL injection via PRIVILEGE_QUERY_OVERRIDE
+output_8b=$(env -i PATH="$PATH" \
   DATABASE_URL="$PROD_DSN" \
   REHEARSAL_PGHOST="$test_root" \
   REHEARSAL_PGPORT="55471" \
   REHEARSAL_PGUSER="platen_rehearsal_operator" \
   REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
   BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
-  PRIVILEGE_QUERY_OVERRIDE="SELECT 1/0;" \
+  PRIVILEGE_QUERY_OVERRIDE="CREATE TABLE public.injected_by_override (id int);" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+set -e
+# Check that injected table was NOT created on production
+table_exists=$(psql --dbname="$PROD_DSN" -t -A -c "SELECT to_regclass('public.injected_by_override')::text;")
+if [ -n "$table_exists" ]; then
+  echo "FAILED: Arbitrary SQL injection executed on production cluster! Table created: $table_exists" >&2
+  exit 1
+fi
+echo "Verified 8B: Inherited override was not executed; zero arbitrary SQL executed on production."
+echo "PASSED: Privilege override completely neutralized."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 9: Privilege Query Error Rejection (Fail-Closed via Harness Injection)
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 9] Privilege query error rejection (fail-closed via harness injection)..."
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_rehearsal_operator" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  TEST_INJECT_PSQL_FAILURE="query_error" \
   "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
 rc=$?
 set -e
@@ -321,18 +426,18 @@ echo "$output" | grep -q "Query errors cannot be treated as evidence of safety; 
 echo "PASSED: Privilege query error cleanly rejected with code 11 (fail-closed verified)."
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 8: Privilege Rejection on Malformed Result (Unknown States Rejected)
+# NEGATIVE TEST 10: Privilege Check Malformed Result Rejection (Harness Injection)
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 8] Privilege check malformed / unknown result rejection..."
+echo "==> [Negative Test 10] Privilege check malformed / unknown result rejection..."
 set +e
-output=$(env -i PATH="$PATH" \
+output=$(env -i PATH="$harness_bin:$PATH" \
   DATABASE_URL="$PROD_DSN" \
   REHEARSAL_PGHOST="$test_root" \
   REHEARSAL_PGPORT="55471" \
   REHEARSAL_PGUSER="platen_rehearsal_operator" \
   REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
   BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
-  PRIVILEGE_QUERY_OVERRIDE="SELECT 'malformed_state';" \
+  TEST_INJECT_PSQL_FAILURE="malformed" \
   "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
 rc=$?
 set -e
@@ -340,17 +445,17 @@ if [ "$rc" -ne 11 ]; then
   echo "FAILED: Expected exit code 11 on malformed privilege result, got $rc. Output: $output" >&2
   exit 1
 fi
-echo "$output" | grep -q "FATAL: Privilege check returned unexpected/malformed result: 'malformed_state'" || {
+echo "$output" | grep -q "FATAL: Privilege check returned unexpected/malformed result: 'malformed_unknown_state'" || {
   echo "FAILED: Output did not contain expected malformed result message. Got: $output" >&2
   exit 1
 }
 echo "PASSED: Malformed privilege state cleanly rejected with code 11."
 
 # -----------------------------------------------------------------------------
-# TEST 9: Valid Nonprivileged Cases Direct Verification
+# TEST 11: Valid Nonprivileged Cases Direct Verification
 # -----------------------------------------------------------------------------
-echo "==> [Test 9] Valid nonprivileged cases direct verification..."
-# Case 9A: Nonexistent role on production
+echo "==> [Test 11] Valid nonprivileged cases direct verification..."
+# Case 11A: Nonexistent role on production
 nonexistent_val=$(psql --dbname="$PROD_DSN" -t -A -v ON_ERROR_STOP=1 -v ruser="platen_rehearsal_operator" << 'EOF'
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
@@ -365,9 +470,9 @@ if [ "$nonexistent_val" != "f" ]; then
   echo "FAILED: Nonexistent role must return 'f'! Got: $nonexistent_val" >&2
   exit 1
 fi
-echo "Verified Case 9A: Nonexistent role on production returns exact value: '$nonexistent_val'."
+echo "Verified Case 11A: Nonexistent role on production returns exact value: '$nonexistent_val'."
 
-# Case 9B: Existing role with read-only privileges on production
+# Case 11B: Existing role with read-only privileges on production
 readonly_val=$(psql --dbname="$PROD_DSN" -t -A -v ON_ERROR_STOP=1 -v ruser="prod_read_only" << 'EOF'
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
@@ -382,13 +487,13 @@ if [ "$readonly_val" != "f" ]; then
   echo "FAILED: Read-only role must return 'f'! Got: $readonly_val" >&2
   exit 1
 fi
-echo "Verified Case 9B: Read-only role on production returns exact value: '$readonly_val'."
+echo "Verified Case 11B: Read-only role on production returns exact value: '$readonly_val'."
 echo "PASSED: Valid nonprivileged cases confirmed."
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 10: Database Name Collision & Preexisting Database Preservation
+# NEGATIVE TEST 12: Database Name Collision & Preexisting Database Preservation
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 10] Preexisting database collision safety..."
+echo "==> [Negative Test 12] Preexisting database collision safety..."
 "$bindir/createdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator preexisting_canary_db
 psql -h "$test_root" -p 55471 -U platen_rehearsal_operator -d preexisting_canary_db -v ON_ERROR_STOP=1 << 'EOF' >/dev/null
 CREATE TABLE canary_data (val text PRIMARY KEY);
@@ -424,9 +529,9 @@ echo "PASSED: Preexisting database survived collision without deletion."
 "$bindir/dropdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator preexisting_canary_db
 
 # -----------------------------------------------------------------------------
-# NEGATIVE TEST 11: External BACKUP_DIR & Backup Preservation on Rehearsal Failure
+# NEGATIVE TEST 13: External BACKUP_DIR & Backup Preservation on Rehearsal Failure
 # -----------------------------------------------------------------------------
-echo "==> [Negative Test 11] External BACKUP_DIR and backup asset preservation across failure..."
+echo "==> [Negative Test 13] External BACKUP_DIR and backup asset preservation across failure..."
 external_dir="$test_root/external_operator_dir"
 mkdir -p "$external_dir"
 echo "unrelated_operator_file_contents" > "$external_dir/unrelated_operator_note.txt"
@@ -472,34 +577,83 @@ fi
 echo "PASSED: External directory and recovery assets ($preserved_dump, $PROD_RECOVERY_KEY) preserved on rehearsal failure."
 
 # -----------------------------------------------------------------------------
-# POSITIVE TEST 12: Full End-to-End Rehearsal Execution via run-durability-rehearsal.sh
+# POSITIVE TEST 14: Full Rehearsal Execution with Authenticated Credentials
 # -----------------------------------------------------------------------------
-echo "==> [Positive Test 12] Full end-to-end execution of canonical rehearsal script..."
+echo "==> [Positive Test 14] Full end-to-end rehearsal execution with authenticated credentials..."
 positive_backup_dir="$test_root/positive_backups"
 
 output=$(env -i PATH="$PATH" \
   DATABASE_URL="$PROD_DSN" \
   REHEARSAL_PGHOST="$test_root" \
   REHEARSAL_PGPORT="55471" \
-  REHEARSAL_PGUSER="platen_rehearsal_operator" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
   REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
   BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
   BACKUP_DIR="$positive_backup_dir" \
-  "$repo_root/scripts/run-durability-rehearsal.sh")
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
 
 echo "$output" | grep -q "All 12 durability indexes verified with exact table, name, uniqueness, primary-key, and validity properties." || {
-  echo "FAILED: Positive rehearsal output missing index verification confirmation." >&2
+  echo "FAILED: Positive rehearsal output missing index verification confirmation. Got: $output" >&2
   exit 1
 }
 echo "$output" | grep -q "Disposable rehearsal restore and migration dry run successfully completed!" || {
   echo "FAILED: Positive rehearsal output missing completion confirmation." >&2
   exit 1
 }
+echo "PASSED: Rehearsal executed cleanly using password-authenticated role via PGPASSFILE."
 
 # -----------------------------------------------------------------------------
-# POSITIVE TEST 13: Recovery Asset Retention on Success (No Automatic Purging)
+# POSITIVE TEST 15: Credential Safety (Zero Password Leakage in Output or Commands)
 # -----------------------------------------------------------------------------
-echo "==> [Positive Test 13] Verifying recovery assets are retained on success (no automated purge)..."
+echo "==> [Positive Test 15] Verifying database credentials never appear in command arguments or logs..."
+# 1. Assert plain password never leaked in output
+if echo "$output" | grep -q "SecretRehearsalPass_12345!"; then
+  echo "FAILED: Password string was leaked in script output!" >&2
+  exit 1
+fi
+# 2. Assert password= never leaked in output
+if echo "$output" | grep -q "password="; then
+  echo "FAILED: DSN password parameter was printed in script output!" >&2
+  exit 1
+fi
+# 3. Assert temporary managed PGPASSFILE was cleaned up on exit
+leaked_pgpass=$(ls /tmp/platen-rehearsal-pgpass-* 2>/dev/null || true)
+if [ -n "$leaked_pgpass" ]; then
+  echo "FAILED: Managed PGPASSFILE was not cleaned up after execution! Found: $leaked_pgpass" >&2
+  exit 1
+fi
+# 4. Assert wrong password fails authentication
+set +e
+wrong_pw_output=$(env -i PATH="$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="WrongPassword_Invalid!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+wrong_pw_rc=$?
+set -e
+if [ "$wrong_pw_rc" -eq 0 ]; then
+  echo "FAILED: Execution succeeded with wrong password!" >&2; exit 1
+fi
+echo "$wrong_pw_output" | grep -q "Failed to connect to rehearsal maintenance instance" || {
+  echo "FAILED: Wrong password did not fail connection as expected. Got: $wrong_pw_output" >&2; exit 1
+}
+# 5. Assert managed PGPASSFILE was cleaned up on exit even on failure
+leaked_pgpass_after_err=$(ls /tmp/platen-rehearsal-pgpass-* 2>/dev/null || true)
+if [ -n "$leaked_pgpass_after_err" ]; then
+  echo "FAILED: Managed PGPASSFILE was not cleaned up after failed execution! Found: $leaked_pgpass_after_err" >&2
+  exit 1
+fi
+echo "PASSED: Credentials safety verified (0 secrets leaked, PGPASSFILE cleaned on success and failure, wrong credentials rejected)."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 16: Recovery Asset Retention on Success (No Automatic Purging)
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 16] Verifying recovery assets are retained on success (no automated purge)..."
 prod_dump_gpg=$(find "$positive_backup_dir" -name "*.dump.gpg" | head -n 1)
 
 if [ -z "$prod_dump_gpg" ] || [ ! -s "$prod_dump_gpg" ]; then
@@ -513,9 +667,9 @@ fi
 echo "PASSED: Recovery assets ($prod_dump_gpg and $PROD_RECOVERY_KEY) preserved on successful rehearsal."
 
 # -----------------------------------------------------------------------------
-# POSITIVE TEST 14: Independent Separate-Process Decryption Proof
+# POSITIVE TEST 17: Independent Separate-Process Decryption Proof
 # -----------------------------------------------------------------------------
-echo "==> [Positive Test 14] Verifying decryption in an independent process using retained recovery key..."
+echo "==> [Positive Test 17] Verifying decryption in an independent process using retained recovery key..."
 fresh_toc="$test_root/fresh_process_decrypted.toc"
 
 # Run in scrubbed environment with zero ambient secrets
@@ -532,44 +686,7 @@ grep -q "TABLE DATA public studio_jobs" "$fresh_toc" || {
 }
 echo "PASSED: Retained recovery key cleanly decrypted backup in independent fresh process."
 
-# -----------------------------------------------------------------------------
-# POSITIVE TEST 15: Synthetic Test Key Workflow with Explicit Boundaries
-# -----------------------------------------------------------------------------
-echo "==> [Positive Test 15] Synthetic test key workflow with explicit test boundaries..."
-synthetic_backup_dir="$test_root/synthetic_key_backups"
-
-output=$(env -i PATH="$PATH" \
-  DATABASE_URL="$PROD_DSN" \
-  REHEARSAL_PGHOST="$test_root" \
-  REHEARSAL_PGPORT="55471" \
-  REHEARSAL_PGUSER="platen_rehearsal_operator" \
-  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
-  ALLOW_SYNTHETIC_TEST_KEY="true" \
-  BACKUP_DIR="$synthetic_backup_dir" \
-  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
-
-echo "$output" | grep -q "WARNING: ALLOW_SYNTHETIC_TEST_KEY=true is set. Generating synthetic test key." || {
-  echo "FAILED: Output missing synthetic test key warning. Got: $output" >&2
-  exit 1
-}
-echo "$output" | grep -q "WARNING: This synthetic key workflow is strictly restricted to automated CI/test environments and is FORBIDDEN in production." || {
-  echo "FAILED: Output missing production prohibition warning. Got: $output" >&2
-  exit 1
-}
-echo "$output" | grep -q "Disposable rehearsal restore and migration dry run successfully completed!" || {
-  echo "FAILED: Synthetic key rehearsal did not complete successfully. Got: $output" >&2
-  exit 1
-}
-
-# Verify synthetic key was generated into synthetic_test_keys subfolder
-synth_key=$(find "$synthetic_backup_dir/synthetic_test_keys" -name "*.key" | head -n 1)
-if [ -z "$synth_key" ] || [ ! -s "$synth_key" ]; then
-  echo "FAILED: Synthetic key was not generated in synthetic_test_keys subfolder!" >&2
-  exit 1
-fi
-echo "PASSED: Synthetic key workflow operates cleanly with explicit boundaries and warnings."
-
 echo ""
 echo "================================================================================"
-echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (15/15) PASSED SUCCESSFULLY!"
+echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (17/17) PASSED SUCCESSFULLY!"
 echo "================================================================================"
