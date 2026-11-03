@@ -290,49 +290,130 @@ if raw_url.startswith(("postgres://", "postgresql://")):
     clean_prod_dsn = urllib.parse.urlunsplit((parsed.scheme, clean_netloc, parsed.path, clean_query, ""))
 
 else:
-    # Keyword / value format
-    pw_matches = re.findall(r"(?:^|\s)password\s*=", raw_url)
-    if len(pw_matches) > 1:
+    # Keyword / value format according to PostgreSQL libpq connection-string grammar
+    def parse_libpq_dsn(dsn):
+        i = 0
+        n = len(dsn)
+        tokens = []  # list of (key, value, raw_param_str)
+
+        while i < n:
+            while i < n and dsn[i].isspace():
+                i += 1
+            if i >= n:
+                break
+
+            key_start = i
+            while i < n and not dsn[i].isspace() and dsn[i] != '=':
+                if dsn[i] in ("'", '"', '\\'):
+                    raise ValueError(f"Invalid character {dsn[i]!r} in parameter keyword")
+                i += 1
+            key = dsn[key_start:i]
+            if not key:
+                raise ValueError("Empty keyword in connection string")
+
+            while i < n and dsn[i].isspace():
+                i += 1
+
+            if i >= n or dsn[i] != '=':
+                raise ValueError(f"Missing '=' after {key!r} in connection string")
+            i += 1  # skip '='
+
+            while i < n and dsn[i].isspace():
+                i += 1
+
+            val_start = i
+            if i < n and dsn[i] == "'":
+                # Quoted value: handles escaped quotes (\') and escaped backslashes (\\)
+                i += 1
+                val_chars = []
+                while i < n:
+                    c = dsn[i]
+                    if c == '\\':
+                        i += 1
+                        if i >= n:
+                            raise ValueError("Unterminated escape sequence in quoted value")
+                        val_chars.append(dsn[i])
+                        i += 1
+                    elif c == "'":
+                        i += 1
+                        break
+                    else:
+                        val_chars.append(c)
+                        i += 1
+                else:
+                    raise ValueError("Unterminated quoted string in connection string")
+
+                if i < n and not dsn[i].isspace():
+                    raise ValueError(f"Unexpected character {dsn[i]!r} after closing quote in connection string")
+                val = ''.join(val_chars)
+                raw_token = dsn[key_start:i]
+            else:
+                # Unquoted value: sequence of characters up to next whitespace
+                val_chars = []
+                while i < n and not dsn[i].isspace():
+                    if dsn[i] == "'":
+                        raise ValueError("Unescaped single quote in unquoted value in connection string")
+                    val_chars.append(dsn[i])
+                    i += 1
+                val = ''.join(val_chars)
+                raw_token = dsn[key_start:i]
+
+            tokens.append((key, val, raw_token))
+
+        return tokens
+
+    try:
+        dsn_tokens = parse_libpq_dsn(raw_url)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Unsupported or ambiguous DATABASE_URL format: {e}\n")
+        sys.exit(1)
+
+    pw_tokens = [tok for tok in dsn_tokens if tok[0].lower() in ("password", "passwd")]
+    if len(pw_tokens) > 1:
         sys.stderr.write("FATAL: Ambiguous credentials: multiple password parameters in DSN\n")
         sys.exit(1)
 
-    m = re.search(r"(?:^|\s)password\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
-    if m:
-        raw_val = m.group(1)
-        if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
-            prod_password = raw_val[1:-1]
-        else:
-            prod_password = raw_val
-        clean_prod_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
-        clean_prod_dsn = re.sub(r"\s+", " ", clean_prod_dsn)
+    if pw_tokens:
+        prod_password = pw_tokens[0][1]
     else:
-        clean_prod_dsn = raw_url
+        prod_password = None
 
-    def get_k(k):
-        km = re.search(r"(?:^|\s)" + k + r"\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_prod_dsn)
-        if km:
-            v = km.group(1)
-            if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                return v[1:-1]
-            return v
-        return None
+    clean_tokens = [tok for tok in dsn_tokens if tok[0].lower() not in ("password", "passwd")]
+    clean_prod_dsn = " ".join(tok[2] for tok in clean_tokens)
 
-    prod_host = get_k("host")
-    port_val = get_k("port")
+    def get_dsn_val(k):
+        matches = [tok[1] for tok in dsn_tokens if tok[0].lower() == k.lower()]
+        if len(matches) > 1:
+            sys.stderr.write(f"FATAL: Ambiguous parameters: multiple {k} parameters in DSN\n")
+            sys.exit(1)
+        return matches[0] if matches else None
+
+    prod_host = get_dsn_val("host")
+    port_val = get_dsn_val("port")
     if port_val is not None:
         try:
             prod_port = int(port_val)
         except ValueError:
             sys.stderr.write("FATAL: Invalid port parameter in DSN\n")
             sys.exit(1)
-    prod_user = get_k("user")
-    prod_dbname = get_k("dbname")
+    prod_user = get_dsn_val("user")
+    prod_dbname = get_dsn_val("dbname")
 
     if not (prod_host or prod_user or prod_dbname):
         sys.stderr.write("FATAL: Unsupported or ambiguous DATABASE_URL format\n")
         sys.exit(1)
 
 # Fail closed if password appears anywhere in clean_prod_dsn
+if not clean_prod_dsn.startswith(("postgres://", "postgresql://")):
+    try:
+        check_tokens = parse_libpq_dsn(clean_prod_dsn)
+        if any(tok[0].lower() in ("password", "passwd") for tok in check_tokens):
+            sys.stderr.write("FATAL: Failed to sanitize password from production connection parameters\n")
+            sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Failed to validate sanitized production connection parameters: {e}\n")
+        sys.exit(1)
+
 if re.search(r"(?:^|[\s?&])password\s*=", clean_prod_dsn, re.IGNORECASE):
     sys.stderr.write("FATAL: Failed to sanitize password from production connection parameters\n")
     sys.exit(1)

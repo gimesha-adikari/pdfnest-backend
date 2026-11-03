@@ -405,49 +405,130 @@ if raw_url.startswith(("postgres://", "postgresql://")):
     clean_prod_dsn = urllib.parse.urlunsplit((parsed.scheme, clean_netloc, parsed.path, clean_query, ""))
 
 else:
-    # Keyword / value format
-    pw_matches = re.findall(r"(?:^|\s)password\s*=", raw_url)
-    if len(pw_matches) > 1:
+    # Keyword / value format according to PostgreSQL libpq connection-string grammar
+    def parse_libpq_dsn(dsn):
+        i = 0
+        n = len(dsn)
+        tokens = []  # list of (key, value, raw_param_str)
+
+        while i < n:
+            while i < n and dsn[i].isspace():
+                i += 1
+            if i >= n:
+                break
+
+            key_start = i
+            while i < n and not dsn[i].isspace() and dsn[i] != '=':
+                if dsn[i] in ("'", '"', '\\'):
+                    raise ValueError(f"Invalid character {dsn[i]!r} in parameter keyword")
+                i += 1
+            key = dsn[key_start:i]
+            if not key:
+                raise ValueError("Empty keyword in connection string")
+
+            while i < n and dsn[i].isspace():
+                i += 1
+
+            if i >= n or dsn[i] != '=':
+                raise ValueError(f"Missing '=' after {key!r} in connection string")
+            i += 1  # skip '='
+
+            while i < n and dsn[i].isspace():
+                i += 1
+
+            val_start = i
+            if i < n and dsn[i] == "'":
+                # Quoted value: handles escaped quotes (\') and escaped backslashes (\\)
+                i += 1
+                val_chars = []
+                while i < n:
+                    c = dsn[i]
+                    if c == '\\':
+                        i += 1
+                        if i >= n:
+                            raise ValueError("Unterminated escape sequence in quoted value")
+                        val_chars.append(dsn[i])
+                        i += 1
+                    elif c == "'":
+                        i += 1
+                        break
+                    else:
+                        val_chars.append(c)
+                        i += 1
+                else:
+                    raise ValueError("Unterminated quoted string in connection string")
+
+                if i < n and not dsn[i].isspace():
+                    raise ValueError(f"Unexpected character {dsn[i]!r} after closing quote in connection string")
+                val = ''.join(val_chars)
+                raw_token = dsn[key_start:i]
+            else:
+                # Unquoted value: sequence of characters up to next whitespace
+                val_chars = []
+                while i < n and not dsn[i].isspace():
+                    if dsn[i] == "'":
+                        raise ValueError("Unescaped single quote in unquoted value in connection string")
+                    val_chars.append(dsn[i])
+                    i += 1
+                val = ''.join(val_chars)
+                raw_token = dsn[key_start:i]
+
+            tokens.append((key, val, raw_token))
+
+        return tokens
+
+    try:
+        dsn_tokens = parse_libpq_dsn(raw_url)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Unsupported or ambiguous DATABASE_URL format: {e}\n")
+        sys.exit(1)
+
+    pw_tokens = [tok for tok in dsn_tokens if tok[0].lower() in ("password", "passwd")]
+    if len(pw_tokens) > 1:
         sys.stderr.write("FATAL: Ambiguous credentials: multiple password parameters in DSN\n")
         sys.exit(1)
 
-    m = re.search(r"(?:^|\s)password\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
-    if m:
-        raw_val = m.group(1)
-        if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
-            prod_password = raw_val[1:-1]
-        else:
-            prod_password = raw_val
-        clean_prod_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
-        clean_prod_dsn = re.sub(r"\s+", " ", clean_prod_dsn)
+    if pw_tokens:
+        prod_password = pw_tokens[0][1]
     else:
-        clean_prod_dsn = raw_url
+        prod_password = None
 
-    def get_k(k):
-        km = re.search(r"(?:^|\s)" + k + r"\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_prod_dsn)
-        if km:
-            v = km.group(1)
-            if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                return v[1:-1]
-            return v
-        return None
+    clean_tokens = [tok for tok in dsn_tokens if tok[0].lower() not in ("password", "passwd")]
+    clean_prod_dsn = " ".join(tok[2] for tok in clean_tokens)
 
-    prod_host = get_k("host")
-    port_val = get_k("port")
+    def get_dsn_val(k):
+        matches = [tok[1] for tok in dsn_tokens if tok[0].lower() == k.lower()]
+        if len(matches) > 1:
+            sys.stderr.write(f"FATAL: Ambiguous parameters: multiple {k} parameters in DSN\n")
+            sys.exit(1)
+        return matches[0] if matches else None
+
+    prod_host = get_dsn_val("host")
+    port_val = get_dsn_val("port")
     if port_val is not None:
         try:
             prod_port = int(port_val)
         except ValueError:
             sys.stderr.write("FATAL: Invalid port parameter in DSN\n")
             sys.exit(1)
-    prod_user = get_k("user")
-    prod_dbname = get_k("dbname")
+    prod_user = get_dsn_val("user")
+    prod_dbname = get_dsn_val("dbname")
 
     if not (prod_host or prod_user or prod_dbname):
         sys.stderr.write("FATAL: Unsupported or ambiguous DATABASE_URL format\n")
         sys.exit(1)
 
 # Fail closed if password appears anywhere in clean_prod_dsn
+if not clean_prod_dsn.startswith(("postgres://", "postgresql://")):
+    try:
+        check_tokens = parse_libpq_dsn(clean_prod_dsn)
+        if any(tok[0].lower() in ("password", "passwd") for tok in check_tokens):
+            sys.stderr.write("FATAL: Failed to sanitize password from production connection parameters\n")
+            sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Failed to validate sanitized production connection parameters: {e}\n")
+        sys.exit(1)
+
 if re.search(r"(?:^|[\s?&])password\s*=", clean_prod_dsn, re.IGNORECASE):
     sys.stderr.write("FATAL: Failed to sanitize password from production connection parameters\n")
     sys.exit(1)
@@ -891,10 +972,11 @@ echo "==> Disposable rehearsal restore and migration dry run successfully comple
 3. **Deterministic Target-Specific Credentials & PGPASSFILE Isolation:** Passwords must never appear in command-line arguments (`psql`, `pg_dump`), environment variables of child processes, or execution traces (`ps`, `/proc/*/cmdline`). Both production and rehearsal credentials are managed via a dedicated, permission-restricted (`0600`) `MANAGED_PGPASSFILE`:
    - *Cross-Target Wildcard Elimination:* Production and rehearsal entries use deterministic, target-specific matching with zero host or port wildcards (`*`). Entries for production match exact production host and port; entries for rehearsal match exact rehearsal host and port. Even if production and rehearsal share identical usernames, credentials never match across targets.
    - *Sanitization of All URI Credential Locations:* The parser inspects both userinfo credentials (`user:password@`) and query parameters (`?password=...`). Extracted passwords are removed from the query string and userinfo, producing a sanitized connection string containing zero password parameters for CLI tool invocations (`psql`, `pg_dump`).
+   - *Libpq Keyword/Value Connection String Lexer:* In addition to standard URIs, keyword/value connection strings (e.g. `host=... password=...`) are parsed with a deterministic character-level tokenizer strictly compliant with PostgreSQL libpq connection grammar (`fe-connect.c`). The parser handles unquoted values, single-quoted values (`'...'`), escaped single quotes (`'`), escaped backslashes (`\\`), and intervening whitespace. The password parameter is extracted in its entirety and completely removed from the clean connection string, preventing credential fragments from leaking into command-line arguments (`psql`, `pg_dump`). Malformed quotes, unescaped characters, or ambiguous multiple password specifications fail closed before any client execution.
    - *Fail-Closed Boundary Enforcement:* Ambiguous or conflicting credential formats (such as passwords specified in both userinfo and query parameters, multiple password query parameters, multiple DSN password options, or unsupported formats) fail closed with exit status `1`.
    - *Original PGPASSFILE Safe Preservation:* The operator's ambient `PGPASSFILE` setting is captured before assigning the managed file. Preexisting entries are preserved by appending them after the rehearsal target-specific entries (providing explicit target precedence with ambient fallback). Nonexistent or unreadable `PGPASSFILE` paths fail closed.
    - *Subprocess Environment Scrubbing:* Raw credential variables (`DATABASE_URL`, `REHEARSAL_PGPASSWORD`, and ambient `PGPASSWORD`) are explicitly scrubbed via `unset` prior to spawning client subprocesses, neutralizing ambient `PGPASSWORD` precedence and preventing environment leakage in `/proc/$PID/environ`.
-   - *Special-Character Handling:* Colons (`:`) and backslashes (`\`) in passwords, usernames, and database names are escaped with backslashes (`\:` and `\\`) in `.pgpass`, guaranteeing that valid complex values remain usable and cannot alter or split adjacent fields.
+   - *Special-Character Handling:* Colons (`:`) and backslashes (`\\`) in passwords, usernames, and database names are escaped with backslashes (`\:` and `\\\\`) in `.pgpass`, guaranteeing that valid complex values remain usable and cannot alter or split adjacent fields.
    - *Guaranteed Cleanup:* The managed `PGPASSFILE` is guaranteed to be deleted on exit across all paths (success, validation failure, teardown containment failure, and interrupt).
 4. **Immutable Fail-Closed Production Privilege Check:** The production rehearsal executable enforces an immutable privilege query that rejects any rehearsal role possessing write or creation privileges on production. Arbitrary query overrides (`PRIVILEGE_QUERY_OVERRIDE`) have been completely removed from the production script to eliminate SQL injection risks. Negative failure testing is handled via isolated test harness wrappers.
 5. **Elimination of Plaintext Dumps:** Plaintext database dumps must never touch physical or virtual disk storage. The snapshot is piped directly from `pg_dump -Fc` into `gpg --batch --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file ...`. Rehearsal restore streams decrypted bytes directly from `gpg --decrypt` pipe into `pg_restore --exit-on-error`.
@@ -925,6 +1007,7 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Zero Credential Process Leakage** | `DATABASE_URL` and `REHEARSAL_PGPASSWORD` managed via temporary `PGPASSFILE` (0600); 0 passwords in `psql`/`pg_dump` CLI args, DSN strings, child environment, or logs | Required | [ ] |
 | **Deterministic Credential Selection** | Target-specific matching (0 host/port wildcards); distinct canaries for production and rehearsal verified | Required | [ ] |
 | **URI Credential Sanitization** | Passwords in userinfo and query parameters extracted and stripped; ambiguous formats fail closed | Required | [ ] |
+| **Libpq DSN Grammar Quoting** | Connection strings in keyword/value format parsed via libpq lexer with full support for `'` and `\\` escapes; 0 credential fragments in sanitized DSN | Required | [ ] |
 | **TOC Integrity Confirmed** | `pg_restore --list` from decrypted stream confirms required table structures | Required | [ ] |
 | **Collision-Safe DB Creation** | `createdb` executed only after verifying database does not preexist; preexisting DBs never dropped | Required | [ ] |
 | **Streaming Rehearsal Restore Passed** | Decrypted stream restored to disposable DB with `--exit-on-error`; 0 errors | Required | [ ] |
@@ -934,14 +1017,14 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Verified Rehearsal Teardown** | Script exit status `0` with `Teardown verified` and `REHEARSAL SUCCEEDED`; any exit `21` / `CONTAINMENT REQUIRED` is contained and re-run before sign-off | Required | [ ] |
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
-| **Full 31-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 31/31 negative and positive tests in CI | Required | [ ] |
+| **Full 36-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 36/36 negative and positive tests in CI | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
 
-### Step 2.4: Automated Rehearsal Qualification Suite (31 Comprehensive Checks)
+### Step 2.4: Automated Rehearsal Qualification Suite (36 Comprehensive Checks)
 
-The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 31 negative and positive checks:
+The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 36 negative and positive checks:
 
 1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
 2. **Negative Test 2:** Rejection of missing `REHEARSAL_PGHOST` / `REHEARSAL_PGUSER` (exit code 2).
@@ -974,6 +1057,11 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 29. **Test 29:** Preexisting ambient `PGPASSFILE` safe preservation (ambient file unmodified on exit) and invalid/nonexistent `PGPASSFILE` path rejection (fails closed).
 30. **Positive Test 30:** Subprocess environment scrubbing and ambient `PGPASSWORD` neutralization (ambient `PGPASSWORD` cannot hijack or fail authentication; child process environment verified clean).
 31. **Positive Test 31:** Special characters in passwords and usernames (passwords containing colons, backslashes, quotes, and symbols properly escaped in `.pgpass` and authenticated cleanly).
+32. **Positive Test 32:** Valid keyword/value password containing escaped apostrophe (`'`) (e.g. `password='Canary'Quote#88!'` parsed completely via libpq connection grammar; full password extracted without truncation, clean DSN constructed with zero credential fragments, rehearsal succeeded with exit `0`, PGPASSFILE cleaned up).
+33. **Positive Test 33:** Valid keyword/value password containing escaped backslashes (`\\`) (e.g. `password='Canary\Backslash\\Double#88!'` parsed completely; escaped backslashes properly unescaped for `.pgpass` and authenticated cleanly).
+34. **Positive Test 34:** Quoted password containing whitespace and punctuation (e.g. `password='Canary Secret With Spaces & Punctuation! #99'` parsed completely without truncation; zero secrets in arguments or environment).
+35. **Negative Test 35:** Malformed quoted credentials fail closed before client execution (unterminated quotes, unescaped characters after closing quote, unterminated escape sequences, and unescaped quotes in unquoted values fail closed with exit code 1; managed `.pgpass` cleaned up).
+36. **Test 36:** Direct regression qualification: regex parsing truncation vs libpq parser (confirms that previous HEAD regex `r"(?:^|\s)password\s*=\s*([^\s'"]+|'[^']*'|"[^"]*")"` truncated at escaped apostrophe and leaked `CanaryFragment` into sanitized DSN command arguments, while canonical executable with libpq parser completely removes password without fragments, passing `TEST_ASSERT_NO_SECRETS=1`, exit `0`).
 
 ---
 

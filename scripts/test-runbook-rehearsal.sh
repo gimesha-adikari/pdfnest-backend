@@ -42,6 +42,11 @@
 #  29. Preexisting PGPASSFILE safe preservation & invalid file path rejection
 #  30. Subprocess environment scrubbing & ambient PGPASSWORD neutralization
 #  31. Special-character handling: passwords containing colons, backslashes, and symbols
+#  32. Valid keyword/value password containing escaped apostrophe (\')
+#  33. Valid keyword/value password containing escaped backslashes (\\)
+#  34. Quoted password containing whitespace and punctuation
+#  35. Malformed quoted credentials that fail closed before client execution
+#  36. Direct regression qualification: regex parsing truncation & leakage prevention
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -83,6 +88,10 @@ cat << 'EOF' | cat - "$test_root/prod_data/pg_hba.conf" > "$test_root/prod_data/
 local all platen_auth_prod_operator md5
 local all platen_shared_operator md5
 local all platen_special_operator md5
+local all platen_quote_operator md5
+local all platen_slash_operator md5
+local all platen_punct_operator md5
+local all platen_regex_leak_operator md5
 EOF
 mv "$test_root/prod_data/pg_hba.conf.tmp" "$test_root/prod_data/pg_hba.conf"
 
@@ -138,6 +147,14 @@ GRANT USAGE ON SCHEMA public TO platen_shared_operator;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO platen_shared_operator;
 -- 5. Special-character operator with colons and backslashes in password
 CREATE ROLE platen_special_operator LOGIN PASSWORD $tag$Canary:Spec\ial:Pass\\88412!#@$tag$ SUPERUSER;
+-- 6. Escaped quote operator with \' in keyword/value DSN
+CREATE ROLE platen_quote_operator LOGIN PASSWORD $tag$Canary'Quote#88!$tag$ SUPERUSER;
+-- 7. Escaped backslash operator with \\ in keyword/value DSN
+CREATE ROLE platen_slash_operator LOGIN PASSWORD $tag$Canary\Backslash\\Double#88!$tag$ SUPERUSER;
+-- 8. Quoted punctuation and spaces operator in keyword/value DSN
+CREATE ROLE platen_punct_operator LOGIN PASSWORD $tag$Canary Secret With Spaces & Punctuation! #99$tag$ SUPERUSER;
+-- 9. Regex leakage regression operator with \' in keyword/value DSN
+CREATE ROLE platen_regex_leak_operator LOGIN PASSWORD $tag$Prefix'CanaryFragment#88!$tag$ SUPERUSER;
 EOF
 
 CANARY_PROD_PASSWORD="CanaryProdSecret_88412!"
@@ -1562,7 +1579,249 @@ assert_no_managed_pgpassfile
 assert_recovery_assets_protected "$prod_special_backup_dir"
 echo "PASSED: Special-character password (colons, backslashes) properly escaped in .pgpass; authenticated successfully."
 
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 32: Valid Keyword/Value Password with Escaped Apostrophe (\')
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 32] Keyword/value DSN with escaped apostrophe (\\')..."
+prod_quote_backup_dir="$test_root/prod_quote_backups"
+CANARY_QUOTE_PASSWORD="Canary'Quote#88!"
+# In DSN, the apostrophe inside single quotes is escaped as \'
+prod_quote_dsn="host=$test_root port=55470 user=platen_quote_operator password='Canary\'Quote#88!' dbname=pdfnest_production sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_quote_dsn" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_quote_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Keyword/value DSN with escaped apostrophe failed, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "Canary'Quote#88!"; then
+  echo "FAILED: Password with apostrophe leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_quote_backup_dir"
+echo "PASSED: Keyword/value DSN with escaped apostrophe (\\') parsed completely; 0 secrets leaked; rehearsal succeeded."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 33: Valid Keyword/Value Password with Escaped Backslashes (\\)
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 33] Keyword/value DSN with escaped backslashes (\\\\)..."
+prod_slash_backup_dir="$test_root/prod_slash_backups"
+CANARY_SLASH_PASSWORD='Canary\Backslash\\Double#88!'
+# In DSN, backslashes inside single quotes are escaped as \\ and \\\\
+slash_val="'Canary\\\\Backslash\\\\\\\\Double#88!'"
+prod_slash_dsn="host=$test_root port=55470 user=platen_slash_operator password=$slash_val dbname=pdfnest_production sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_slash_dsn" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_slash_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Keyword/value DSN with escaped backslashes failed, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "Backslash"; then
+  echo "FAILED: Password with backslashes leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_slash_backup_dir"
+echo "PASSED: Keyword/value DSN with escaped backslashes (\\\\) parsed completely; 0 secrets leaked; rehearsal succeeded."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 34: Quoted Password with Whitespace and Punctuation
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 34] Quoted password with whitespace and punctuation..."
+prod_punct_backup_dir="$test_root/prod_punct_backups"
+CANARY_PUNCT_PASSWORD="Canary Secret With Spaces & Punctuation! #99"
+prod_punct_dsn="host=$test_root port=55470 user=platen_punct_operator password='Canary Secret With Spaces & Punctuation! #99' dbname=pdfnest_production sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_punct_dsn" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_punct_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Quoted password with spaces and punctuation failed, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "With Spaces"; then
+  echo "FAILED: Quoted password with spaces leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_punct_backup_dir"
+echo "PASSED: Quoted password with whitespace and punctuation parsed completely; 0 secrets leaked; rehearsal succeeded."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 35: Malformed Quoted Credentials Fail Closed Before Client Execution
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 35] Malformed quoted credentials fail closed before client execution..."
+# 35a: Unterminated quoted string
+set +e
+out_35a=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="host=$test_root port=55470 user=platen_auth_prod_operator password='CanaryUnclosed dbname=pdfnest_production" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_35a=$?
+set -e
+if [ "$rc_35a" -eq 0 ]; then
+  echo "FAILED: Unterminated quoted string was accepted!" >&2; exit 1
+fi
+echo "$out_35a" | grep -q "Unterminated quoted string" || {
+  echo "FAILED: Missing unterminated quoted string error. Got: $out_35a" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+
+# 35b: Unexpected character after closing quote
+set +e
+out_35b=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="host=$test_root port=55470 user=platen_auth_prod_operator password='Canary'Unescaped' dbname=pdfnest_production" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_35b=$?
+set -e
+if [ "$rc_35b" -eq 0 ]; then
+  echo "FAILED: Malformed quote was accepted!" >&2; exit 1
+fi
+echo "$out_35b" | grep -q "Unexpected character" || {
+  echo "FAILED: Missing unexpected character error. Got: $out_35b" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+
+# 35c: Unterminated escape sequence
+set +e
+out_35c=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="host=$test_root port=55470 user=platen_auth_prod_operator password='CanaryEscapedEnd\\" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_35c=$?
+set -e
+if [ "$rc_35c" -eq 0 ]; then
+  echo "FAILED: Unterminated escape was accepted!" >&2; exit 1
+fi
+echo "$out_35c" | grep -q "Unterminated escape sequence" || {
+  echo "FAILED: Missing unterminated escape error. Got: $out_35c" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+
+# 35d: Single quote inside unquoted value
+set +e
+out_35d=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="host=$test_root port=55470 user=platen_auth_prod_operator password=Canary'Unquoted dbname=pdfnest_production" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_35d=$?
+set -e
+if [ "$rc_35d" -eq 0 ]; then
+  echo "FAILED: Unquoted single quote was accepted!" >&2; exit 1
+fi
+echo "$out_35d" | grep -q "Unescaped single quote in unquoted value" || {
+  echo "FAILED: Missing unescaped single quote error. Got: $out_35d" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+echo "PASSED: Malformed quoted credentials cleanly failed closed (exit 1) before client execution; PGPASSFILE cleaned."
+
+# -----------------------------------------------------------------------------
+# TEST 36: Direct Regression Qualification: Regex Parsing Truncation & Leakage Prevention
+# -----------------------------------------------------------------------------
+echo "==> [Test 36] Direct regression qualification: regex parsing truncation vs libpq parser..."
+prod_regex_backup_dir="$test_root/prod_regex_backups"
+leak_candidate_dsn="host=$test_root port=55470 user=platen_regex_leak_operator password='Prefix\'CanaryFragment#88!' dbname=pdfnest_production sslmode=disable"
+
+# 36a: Direct proof of previous HEAD regex defect:
+# The regex r"(?:^|\s)password\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")" matches only up to the first unescaped apostrophe,
+# leaving "CanaryFragment#88!'" in the sanitized DSN string, leaking secret fragments into CLI arguments.
+regex_leak_detected=$(python3 - << 'PY'
+import re, sys
+dsn = "host=localhost port=5432 user=test password='Prefix\'CanaryFragment#88!' dbname=test"
+m = re.search(r"(?:^|\s)password\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", dsn)
+if m:
+    sanitized = (dsn[:m.start()] + " " + dsn[m.end():]).strip()
+    if "CanaryFragment" in sanitized:
+        sys.stdout.write("VULNERABLE_REGEX_LEAK_CONFIRMED")
+PY
+)
+if [ "$regex_leak_detected" != "VULNERABLE_REGEX_LEAK_CONFIRMED" ]; then
+  echo "FAILED: Did not confirm expected vulnerability in previous HEAD regex logic!" >&2
+  exit 1
+fi
+echo "Verified 36A: Confirmed that previous HEAD regex parser truncated at escaped quote and leaked CanaryFragment into sanitized DSN."
+
+# 36b: Direct execution through canonical rehearsal implementation with the new libpq parser:
+# Asserts that the new parser cleanly sanitizes the entire password token, passes TEST_ASSERT_NO_SECRETS=1 (exit 99 check),
+# connects using .pgpass, verifies 12 indexes, and tears down cleanly with exit 0.
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$leak_candidate_dsn" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_regex_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Rehearsal with regression candidate failed, got exit $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "CanaryFragment"; then
+  echo "FAILED: CanaryFragment leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_regex_backup_dir"
+echo "Verified 36B: Canonical rehearsal script with libpq parser extracted complete password, zero secret fragments in args (exit 99 passed) or env (exit 98 passed)."
+echo "PASSED: Direct regression qualification confirmed: old regex truncation vulnerability eliminated, libpq parser verified."
+
 echo ""
 echo "================================================================================"
-echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (31/31) PASSED SUCCESSFULLY!"
+echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (36/36) PASSED SUCCESSFULLY!"
 echo "================================================================================"
