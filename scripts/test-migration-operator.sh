@@ -131,7 +131,9 @@ GRANT ALL ON ALL TABLES IN SCHEMA public TO platen_op_special;
 GRANT ALL ON SCHEMA public TO platen_op_special;
 EOF
 
-SCRIPT_PATH="/home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_PATH="$REPO_ROOT/scripts/apply-durability-migration.sh"
 DUMMY_MIGRATION="$test_root/dummy_migration.sql"
 cat << 'EOF' > "$DUMMY_MIGRATION"
 -- No-op idempotent test transaction
@@ -416,7 +418,7 @@ echo "PASSED: Signal trap handlers verified for INT (exit 130) and TERM (exit 14
 
 # Test 23: Full end-to-end migration execution & catalog durability postcondition verification
 echo "==> [Test 23] Full end-to-end durability migration application on disposable fixture..."
-REAL_MIGRATION_FILE="/home/gimesha/My_Projects/platen/pdfnest-backend/config/migrations/20261029_backend_durability.up.sql"
+REAL_MIGRATION_FILE="$REPO_ROOT/config/migrations/20261029_backend_durability.up.sql"
 set +e
 DATABASE_URL="$KV_DSN" CONFIRM_PRODUCTION_MIGRATION="yes" EXPECTED_DATABASE="$TARGET_DB" MIGRATION_FILE="$REAL_MIGRATION_FILE" "$SCRIPT_PATH" >"$test_root/t23.log" 2>&1
 rc=$?
