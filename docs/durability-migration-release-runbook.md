@@ -152,17 +152,72 @@ REHEARSAL_TOC_FILE=""
 ENCRYPTED_BACKUP=""
 BACKUP_PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-}"
 
+# Exit status reserved for a rehearsal whose checks may have passed but whose
+# restored-production-data database could not be positively removed.
+TEARDOWN_FAILURE_EXIT_CODE=21
+
+# Independently confirms, via the rehearsal catalog, that the rehearsal database
+# no longer exists. Returns 0 ONLY when pg_database positively reports zero
+# matching rows; query errors, connection failures and any other output fail closed.
+verify_rehearsal_db_absent() {
+  local remaining
+  remaining=$(psql -d "$REHEARSAL_MAINTENANCE_DSN" -X -t -A -v ON_ERROR_STOP=1 \
+    -v target_db="$REHEARSAL_DB" 2>&1 << 'EOF'
+SELECT count(*) FROM pg_catalog.pg_database WHERE datname = :'target_db';
+EOF
+) || { echo "ERROR: Could not query rehearsal catalog to verify teardown: $remaining" >&2; return 1; }
+  [ "$remaining" = "0" ]
+}
+
 cleanup() {
   local exit_code=$?
+  # Prevent re-entry (INT/TERM handler followed by EXIT) and never let a failing
+  # teardown command abort the remaining cleanup and reporting steps.
+  trap - EXIT INT TERM
+  set +e
+  local teardown_failed=false
+  local drop_output drop_rc
   echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
 
   # POSITIVE OWNERSHIP SAFETY:
   # Only drop the rehearsal database if this specific execution positively created it!
-  # Preexisting databases are NEVER dropped.
+  # Preexisting databases are NEVER dropped. No --force / session termination is used,
+  # so cleanup never requires privileges beyond ownership of the rehearsal database.
   if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ] && [ -n "$REHEARSAL_MAINTENANCE_DSN" ] && [ -n "$REHEARSAL_DB" ]; then
     echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
-    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
-    REHEARSAL_DB_CREATED_BY_US=false
+    drop_output=$(dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>&1)
+    drop_rc=$?
+    if [ "$drop_rc" -ne 0 ]; then
+      echo "ERROR: dropdb failed for rehearsal database '$REHEARSAL_DB' (exit $drop_rc): $drop_output" >&2
+      teardown_failed=true
+    fi
+
+    # FAIL-CLOSED TEARDOWN VERIFICATION:
+    # Independently confirm absence regardless of what dropdb reported.
+    if verify_rehearsal_db_absent; then
+      echo "==> Teardown verified: rehearsal database '$REHEARSAL_DB' no longer exists on the rehearsal target."
+      REHEARSAL_DB_CREATED_BY_US=false
+    else
+      teardown_failed=true
+    fi
+
+    if [ "$teardown_failed" = "true" ]; then
+      {
+        echo "================================================================================"
+        echo "CONTAINMENT REQUIRED: REHEARSAL DATABASE TEARDOWN FAILED"
+        echo "  The rehearsal database may still contain restored PRODUCTION data that is"
+        echo "  NOT encrypted at rest by this procedure."
+        echo "  Remaining database : $REHEARSAL_DB"
+        echo "  Rehearsal target   : host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER"
+        echo "  Cluster identity   : system_identifier=${rehearsal_sysid:-unknown} data_directory=${rehearsal_data_dir:-unknown}"
+        echo "  Remediation        : terminate remaining sessions connected to '$REHEARSAL_DB', drop it"
+        echo "                       on the rehearsal target only, and confirm that"
+        echo "                       SELECT count(*) FROM pg_database WHERE datname = '$REHEARSAL_DB';"
+        echo "                       returns 0 before treating this rehearsal as contained."
+        echo "  The rehearsal result is FAILED even if restore and migration checks passed."
+        echo "================================================================================"
+      } >&2
+    fi
   fi
 
   # Clean up dedicated managed PGPASSFILE if created by this execution
@@ -185,8 +240,17 @@ cleanup() {
     echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
   fi
 
-  if [ $exit_code -ne 0 ]; then
+  # A teardown failure always forces a nonzero overall result.
+  if [ "$teardown_failed" = "true" ] && [ "$exit_code" -eq 0 ]; then
+    exit_code=$TEARDOWN_FAILURE_EXIT_CODE
+  fi
+
+  if [ "$teardown_failed" = "true" ]; then
+    echo "==> REHEARSAL FAILED (exit $exit_code): rehearsal database teardown could not be verified. Backup and recovery key are retained. CONTAINMENT REQUIRED on the rehearsal target." >&2
+  elif [ "$exit_code" -ne 0 ]; then
     echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
+  else
+    echo "==> REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified."
   fi
 
   exit "$exit_code"
@@ -587,7 +651,8 @@ fi
 
 echo "==> All 12 durability indexes verified with exact table, name, uniqueness, primary-key, and validity properties."
 echo "==> Disposable rehearsal restore and migration dry run successfully completed!"
-# Automatic trap drops $REHEARSAL_DB on exit.
+# Automatic trap drops $REHEARSAL_DB on exit, independently verifies its absence,
+# and forces a nonzero exit (21) if teardown cannot be verified.
 ```
 
 ### Step 2.2: Backup Access Control, Separate Key Custody, and Owner-Approved Disposal Standards
@@ -596,8 +661,9 @@ echo "==> Disposable rehearsal restore and migration dry run successfully comple
 3. **Database Credential Protection via Dedicated PGPASSFILE:** Database credentials (e.g. `REHEARSAL_PGPASSWORD`) are never passed as command-line arguments or appended to connection strings (`password=...`), preventing password exposure in process listings (`ps`, `/proc/*/cmdline`) or execution traces. When passwords are required, a temporary, permission-restricted (`0600`) `PGPASSFILE` is initialized and scoped to the rehearsal process, and guaranteed to be deleted on exit across both success and failure exit paths.
 4. **Immutable Fail-Closed Production Privilege Check:** The production rehearsal executable enforces an immutable privilege query that rejects any rehearsal role possessing write or creation privileges on production. Arbitrary query overrides (`PRIVILEGE_QUERY_OVERRIDE`) have been completely removed from the production script to eliminate SQL injection risks. Negative failure testing is handled via isolated test harness wrappers.
 5. **Elimination of Plaintext Dumps:** Plaintext database dumps must never touch physical or virtual disk storage. The snapshot is piped directly from `pg_dump -Fc` into `gpg --batch --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file ...`. Rehearsal restore streams decrypted bytes directly from `gpg --decrypt` pipe into `pg_restore --exit-on-error`.
-6. **Permanent Recovery Asset Retention (No Automated Purge):** The rehearsal script **never** deletes the encrypted recovery backup or its key file under any circumstance (neither on failure nor on success). Automatic asset purging (`PURGE_BACKUP_ON_SUCCESS`) has been completely eliminated. The backup file is the ultimate disaster recovery asset; only ephemeral rehearsal database objects and temporary files are cleaned up on exit.
-7. **Separate Owner-Approved Retention and Disposal Procedure:**
+6. **Fail-Closed Rehearsal Database Teardown:** The rehearsal database contains restored production data that is not encrypted at rest by this procedure. On exit, the script drops only a database positively created by the same execution (never `--force`, never session termination, never a preexisting database), then independently confirms absence with a parameterized `pg_database` catalog query regardless of what `dropdb` reported. If deletion or verification fails, the script prints a `CONTAINMENT REQUIRED` block naming the remaining database and rehearsal target identity (host, port, user, system identifier; no secrets) and exits with status `21` even when all restore and migration checks passed. The encrypted backup and recovery key are preserved, and the managed `PGPASSFILE` is still removed. A rehearsal is only successful when the output ends with `REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified.` and the exit status is `0`.
+7. **Permanent Recovery Asset Retention (No Automated Purge):** The rehearsal script **never** deletes the encrypted recovery backup or its key file under any circumstance (neither on failure nor on success). Automatic asset purging (`PURGE_BACKUP_ON_SUCCESS`) has been completely eliminated. The backup file is the ultimate disaster recovery asset; only ephemeral rehearsal database objects and temporary files are cleaned up on exit.
+8. **Separate Owner-Approved Retention and Disposal Procedure:**
    - *Physical Limitations of Overwrite on SSDs/Cloud Volumes:* Modern solid-state drives (SSDs, NVMe) and virtualized cloud block devices (e.g. AWS EBS, GCP Persistent Disk, Railway volume mounts) utilize flash translation layers (FTL), wear-leveling algorithms, over-provisioning pools, and copy-on-write sparse remapping. Standard file overwriting tools (`shred`, `rm -P`) overwrite only the currently mapped logical blocks; residual physical flash cells or underlying storage snapshots retain historical data blocks until low-level garbage collection occurs.
    - *Crypto-Shredding as the Authoritative Standard:* Immediate symmetric encryption with AES-256 provides absolute confidentiality. Recovery assets (`$ENCRYPTED_BACKUP` and `$BACKUP_PASSPHRASE_FILE`) must be preserved throughout the migration maintenance window and retained according to the organization's data retention policy.
    - *Independent Disposal Execution:* Automatic purging by the rehearsal script is strictly forbidden. When the snapshot reaches the end of its owner-approved retention window (typically 24–48 hours post-migration following production verification):
@@ -626,16 +692,17 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Row Count Integrity Matched** | Restored row counts (`users`, `studio_jobs`, `schema_migrations`) match production 100% | Required | [ ] |
 | **Migration Dry-Run Passed** | `20261029_backend_durability.up.sql` applied cleanly to restored snapshot data | Required | [ ] |
 | **12 Indexes Programmatically Validated** | Exactly 12 indexes verified: 5 unique, 4 primary key, 7 secondary, all 12 valid (`is_valid = true`) | Required | [ ] |
+| **Verified Rehearsal Teardown** | Script exit status `0` with `Teardown verified` and `REHEARSAL SUCCEEDED`; any exit `21` / `CONTAINMENT REQUIRED` is contained and re-run before sign-off | Required | [ ] |
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
-| **Full 17-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 17/17 negative and positive tests in CI | Required | [ ] |
+| **Full 20-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 20/20 negative and positive tests in CI | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
 
-### Step 2.4: Automated Rehearsal Qualification Suite (17 Comprehensive Checks)
+### Step 2.4: Automated Rehearsal Qualification Suite (20 Comprehensive Checks)
 
-The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 17 rigorous negative and positive checks:
+The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 20 negative and positive checks:
 
 1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
 2. **Negative Test 2:** Rejection of missing `REHEARSAL_PGHOST` / `REHEARSAL_PGUSER` (exit code 2).
@@ -654,6 +721,9 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 15. **Positive Test 15:** Credential safety verification (0 passwords in process args or logs, managed `PGPASSFILE` cleaned up on exit on success and failure, wrong password rejected).
 16. **Positive Test 16:** Recovery asset retention on rehearsal success (no automatic purging).
 17. **Positive Test 17:** Independent separate-process decryption proof using retained recovery key in a scrubbed environment.
+18. **Negative Test 18:** Fail-closed teardown: a real active session blocks `dropdb`; the script reports the PostgreSQL refusal, prints the containment warning, exits `21` despite passing restore/migration checks, removes the managed `PGPASSFILE`, preserves the encrypted backup and key, and deletes no unrelated database. The harness independently confirms the database remained, then contains the fixture.
+19. **Negative Test 19:** Fail-closed teardown: a harness `dropdb` that falsely reports success is caught by the script's independent catalog verification (exit `21`).
+20. **Positive Test 20:** Successful teardown: exit `0` only after `Teardown verified`, independently confirmed absent by the harness.
 
 ---
 

@@ -26,6 +26,11 @@
 #  15. Credentials safety: passwords never appear in command arguments, logs, or persistent files
 #  16. Asset preservation on success: approved backup and key are NEVER purged
 #  17. Independent separate-process decryption proof using retained recovery key
+#  18. Fail-closed teardown: dropdb blocked by an active session forces a nonzero
+#      result, containment warning, PGPASSFILE removal and asset preservation
+#  19. Fail-closed teardown: dropdb falsely reporting success is caught by the
+#      executable's independent absence verification
+#  20. Successful teardown confirms database absence and exits successfully
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -45,6 +50,10 @@ install -m 600 /dev/null "$PGPASSFILE"
 
 cleanup_all() {
   local exit_code=$?
+  # Terminate any harness-owned teardown connection holder before stopping clusters
+  if [ -f "$test_root/teardown_holder.pid" ]; then
+    kill "$(cat "$test_root/teardown_holder.pid")" 2>/dev/null || true
+  fi
   "$bindir/pg_ctl" -D "$test_root/prod_data" -m fast -w stop >/dev/null 2>&1 || true
   "$bindir/pg_ctl" -D "$test_root/rehearsal_data" -m fast -w stop >/dev/null 2>&1 || true
   rm -rf "$test_root"
@@ -152,6 +161,47 @@ exec "$real_bin" "$@"
 EOF
 echo "$real_psql" > "$harness_bin/psql.real_bin"
 chmod +x "$harness_bin/psql"
+
+# Setup harness-controlled dropdb teardown fault-injection wrapper.
+# Passthrough unless TEST_INJECT_DROPDB is set; only placed on PATH by teardown tests.
+#   hold_connection: opens a real session on the target database and waits until
+#                    PostgreSQL reports it active, then runs the real dropdb (which
+#                    genuinely fails because the database is being accessed).
+#   false_success:   reports success without removing anything, proving that the
+#                    canonical executable independently verifies database absence.
+cat > "$harness_bin/dropdb" << 'EOF'
+#!/usr/bin/env bash
+real_bin="$(cat "$0.real_bin")"
+real_psql="$(cat "$(dirname "$0")/psql.real_bin")"
+target_db="${*: -1}"
+case "${TEST_INJECT_DROPDB:-}" in
+  hold_connection)
+    "$real_psql" -X -h "$TEST_HOLDER_HOST" -p "$TEST_HOLDER_PORT" -U "$TEST_HOLDER_USER" -d "$target_db" \
+      -c "SELECT pg_sleep(600);" < /dev/null > "$TEST_HOLDER_LOG" 2>&1 &
+    echo "$!" > "$TEST_HOLDER_PID_FILE"
+    for _ in $(seq 1 100); do
+      held=$("$real_psql" -X -h "$TEST_HOLDER_HOST" -p "$TEST_HOLDER_PORT" -U "$TEST_HOLDER_USER" -d postgres -At \
+        -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$target_db' AND query LIKE 'SELECT pg_sleep(600)%';" 2>/dev/null)
+      [ "$held" = "1" ] && break
+      sleep 0.1
+    done
+    ;;
+  false_success)
+    exit 0
+    ;;
+esac
+exec "$real_bin" "$@"
+EOF
+echo "$bindir/dropdb" > "$harness_bin/dropdb.real_bin"
+chmod +x "$harness_bin/dropdb"
+
+# Independent (harness-side) catalog check on the rehearsal cluster
+rehearsal_db_count() {
+  "$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d postgres -At \
+    -v target_db="$1" << 'EOF'
+SELECT count(*) FROM pg_database WHERE datname = :'target_db';
+EOF
+}
 
 # -----------------------------------------------------------------------------
 # NEGATIVE TEST 1: Fail fast if DATABASE_URL is unset
@@ -601,6 +651,10 @@ echo "$output" | grep -q "Disposable rehearsal restore and migration dry run suc
   echo "FAILED: Positive rehearsal output missing completion confirmation." >&2
   exit 1
 }
+echo "$output" | grep -q "Teardown verified: rehearsal database '.*' no longer exists on the rehearsal target." || {
+  echo "FAILED: Positive rehearsal output missing verified teardown confirmation. Got: $output" >&2
+  exit 1
+}
 echo "PASSED: Rehearsal executed cleanly using password-authenticated role via PGPASSFILE."
 
 # -----------------------------------------------------------------------------
@@ -686,7 +740,239 @@ grep -q "TABLE DATA public studio_jobs" "$fresh_toc" || {
 }
 echo "PASSED: Retained recovery key cleanly decrypted backup in independent fresh process."
 
+# -----------------------------------------------------------------------------
+# Shared fixtures for teardown tests 18-20
+# -----------------------------------------------------------------------------
+# Unrelated operator database on the rehearsal cluster that must survive every teardown path
+"$bindir/createdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator unrelated_operator_canary_db
+psql -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d unrelated_operator_canary_db -v ON_ERROR_STOP=1 \
+  -c "CREATE TABLE canary_data (val text PRIMARY KEY); INSERT INTO canary_data VALUES ('unrelated_operator_record');" >/dev/null
+
+assert_unrelated_databases_intact() {
+  local canary
+  canary=$("$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d unrelated_operator_canary_db -At \
+    -c "SELECT val FROM canary_data;" 2>/dev/null || echo "MISSING")
+  if [ "$canary" != "unrelated_operator_record" ]; then
+    echo "FAILED: Unrelated operator database was deleted or modified during teardown! Value: $canary" >&2
+    exit 1
+  fi
+  if [ "$(rehearsal_db_count postgres)" != "1" ]; then
+    echo "FAILED: Maintenance database 'postgres' is missing on the rehearsal cluster!" >&2
+    exit 1
+  fi
+}
+
+assert_no_managed_pgpassfile() {
+  local leaked
+  leaked=$(ls /tmp/platen-rehearsal-pgpass-* 2>/dev/null || true)
+  if [ -n "$leaked" ]; then
+    echo "FAILED: Managed PGPASSFILE was not removed after teardown failure! Found: $leaked" >&2
+    exit 1
+  fi
+}
+
+assert_recovery_assets_protected() {
+  local backup_dir="$1" dump
+  dump=$(find "$backup_dir" -name "*.dump.gpg" | head -n 1)
+  if [ -z "$dump" ] || [ ! -s "$dump" ] || [ "$(stat -c %a "$dump")" != "600" ]; then
+    echo "FAILED: Encrypted recovery backup missing, empty, or not mode 0600 in $backup_dir!" >&2
+    exit 1
+  fi
+  if [ ! -s "$PROD_RECOVERY_KEY" ] || [ "$(stat -c %a "$PROD_RECOVERY_KEY")" != "600" ]; then
+    echo "FAILED: Recovery key missing, empty, or not mode 0600!" >&2
+    exit 1
+  fi
+  env -i PATH="$PATH" gpg --batch --quiet --pinentry-mode loopback --decrypt \
+    --passphrase-file "$PROD_RECOVERY_KEY" "$dump" | pg_restore --list | grep -q "TABLE DATA public users" || {
+    echo "FAILED: Retained recovery backup in $backup_dir could not be decrypted with retained key!" >&2
+    exit 1
+  }
+}
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 18: Teardown blocked by an active session fails closed
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 18] Fail-closed teardown: rehearsal database removal blocked by an active session..."
+teardown_db="teardown_failure_probe_db"
+teardown_backup_dir="$test_root/teardown_failure_backups"
+holder_pid_file="$test_root/teardown_holder.pid"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$teardown_backup_dir" \
+  REHEARSAL_DB="$teardown_db" \
+  TEST_INJECT_DROPDB="hold_connection" \
+  TEST_HOLDER_HOST="$test_root" \
+  TEST_HOLDER_PORT="55471" \
+  TEST_HOLDER_USER="platen_rehearsal_operator" \
+  TEST_HOLDER_PID_FILE="$holder_pid_file" \
+  TEST_HOLDER_LOG="$test_root/teardown_holder.log" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+echo "---- Test 18 evidence: canonical executable teardown output (exit $rc) ----"
+echo "$output" | sed -n '/Rehearsal cleanup initiated/,$p'
+echo "---- end Test 18 evidence ----"
+
+# 1. Restore and migration checks passed before teardown (failure is purely teardown)
+echo "$output" | grep -q "Disposable rehearsal restore and migration dry run successfully completed!" || {
+  echo "FAILED: Test 18 precondition: restore/migration checks did not pass. Got: $output" >&2; exit 1
+}
+# 2. Overall result is nonzero with the dedicated teardown failure status
+if [ "$rc" -ne 21 ]; then
+  echo "FAILED: Expected exit code 21 on teardown failure, got $rc. Output: $output" >&2; exit 1
+fi
+# 3. Canonical executable detected the real PostgreSQL failure
+echo "$output" | grep -q "ERROR: dropdb failed for rehearsal database '$teardown_db'" || {
+  echo "FAILED: dropdb failure was not reported. Got: $output" >&2; exit 1
+}
+echo "$output" | grep -q "is being accessed by other users" || {
+  echo "FAILED: Expected genuine PostgreSQL active-session refusal. Got: $output" >&2; exit 1
+}
+# 4. Clear containment/remediation warning with remaining database and target identity
+for expected in "CONTAINMENT REQUIRED: REHEARSAL DATABASE TEARDOWN FAILED" \
+                "Remaining database : $teardown_db" \
+                "Rehearsal target   : host=$test_root port=55471 user=platen_auth_rehearsal_operator" \
+                "Cluster identity   : system_identifier=" \
+                "REHEARSAL FAILED (exit 21)"; do
+  echo "$output" | grep -qF "$expected" || {
+    echo "FAILED: Containment warning missing '$expected'. Got: $output" >&2; exit 1
+  }
+done
+if echo "$output" | grep -qE "Teardown verified|REHEARSAL SUCCEEDED"; then
+  echo "FAILED: Teardown failure was misreported as success! Got: $output" >&2; exit 1
+fi
+# 5. Harness independently confirms the reported database really remains
+if [ "$(rehearsal_db_count "$teardown_db")" != "1" ]; then
+  echo "FAILED: Harness could not independently confirm the remaining rehearsal database." >&2; exit 1
+fi
+# 6. No unrelated database deleted; recovery assets protected; PGPASSFILE removed
+assert_unrelated_databases_intact
+assert_recovery_assets_protected "$teardown_backup_dir"
+assert_no_managed_pgpassfile
+if echo "$output" | grep -q "SecretRehearsalPass_12345!"; then
+  echo "FAILED: Rehearsal password appeared in captured teardown-failure output!" >&2; exit 1
+fi
+# 7. Harness containment of the synthetic fixture (harness-only superuser termination;
+#    the canonical executable never terminates sessions or uses --force)
+"$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d postgres -At \
+  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$teardown_db';" >/dev/null
+kill "$(cat "$holder_pid_file")" 2>/dev/null || true
+for _ in $(seq 1 50); do
+  active=$("$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d postgres -At \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$teardown_db';")
+  [ "$active" = "0" ] && break
+  sleep 0.1
+done
+rm -f "$holder_pid_file"
+"$bindir/dropdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator "$teardown_db"
+if [ "$(rehearsal_db_count "$teardown_db")" != "0" ]; then
+  echo "FAILED: Harness could not contain synthetic teardown-failure database." >&2; exit 1
+fi
+echo "PASSED: Blocked teardown exited 21 with containment warning; unrelated DBs, recovery assets intact; PGPASSFILE removed; fixture contained."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 19: dropdb falsely reporting success is caught by verification
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 19] Fail-closed teardown: independent absence verification catches false dropdb success..."
+false_db="teardown_false_success_probe_db"
+false_backup_dir="$test_root/teardown_false_success_backups"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$false_backup_dir" \
+  REHEARSAL_DB="$false_db" \
+  TEST_INJECT_DROPDB="false_success" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 21 ]; then
+  echo "FAILED: Expected exit code 21 when dropdb falsely reports success, got $rc. Output: $output" >&2; exit 1
+fi
+if echo "$output" | grep -q "ERROR: dropdb failed"; then
+  echo "FAILED: Test 19 precondition: dropdb should have reported success. Got: $output" >&2; exit 1
+fi
+echo "$output" | grep -qF "Remaining database : $false_db" || {
+  echo "FAILED: Independent verification did not report remaining database. Got: $output" >&2; exit 1
+}
+if echo "$output" | grep -qE "Teardown verified|REHEARSAL SUCCEEDED"; then
+  echo "FAILED: False dropdb success was accepted! Got: $output" >&2; exit 1
+fi
+if [ "$(rehearsal_db_count "$false_db")" != "1" ]; then
+  echo "FAILED: Harness could not independently confirm the remaining rehearsal database." >&2; exit 1
+fi
+assert_unrelated_databases_intact
+assert_recovery_assets_protected "$false_backup_dir"
+assert_no_managed_pgpassfile
+"$bindir/dropdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator "$false_db"
+if [ "$(rehearsal_db_count "$false_db")" != "0" ]; then
+  echo "FAILED: Harness could not contain synthetic false-success database." >&2; exit 1
+fi
+echo "PASSED: False dropdb success caught by independent catalog verification (exit 21); fixture contained."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 20: Successful teardown confirms absence and exits successfully
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 20] Successful teardown confirms database absence and exits 0..."
+success_db="teardown_success_probe_db"
+success_backup_dir="$test_root/teardown_success_backups"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="$PROD_DSN" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$success_backup_dir" \
+  REHEARSAL_DB="$success_db" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+echo "---- Test 20 evidence: canonical executable teardown output (exit $rc) ----"
+echo "$output" | sed -n '/Rehearsal cleanup initiated/,$p'
+echo "---- end Test 20 evidence ----"
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Expected exit 0 on verified teardown, got $rc. Output: $output" >&2; exit 1
+fi
+echo "$output" | grep -qF "Teardown verified: rehearsal database '$success_db' no longer exists on the rehearsal target." || {
+  echo "FAILED: Missing verified-teardown confirmation. Got: $output" >&2; exit 1
+}
+echo "$output" | grep -qF "REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified." || {
+  echo "FAILED: Missing success summary. Got: $output" >&2; exit 1
+}
+if echo "$output" | grep -q "CONTAINMENT REQUIRED"; then
+  echo "FAILED: Containment warning emitted on successful teardown. Got: $output" >&2; exit 1
+fi
+if [ "$(rehearsal_db_count "$success_db")" != "0" ]; then
+  echo "FAILED: Harness found rehearsal database remaining after reported successful teardown!" >&2; exit 1
+fi
+assert_unrelated_databases_intact
+assert_recovery_assets_protected "$success_backup_dir"
+assert_no_managed_pgpassfile
+echo "PASSED: Successful teardown verified database absence (independently confirmed) and exited 0."
+
 echo ""
 echo "================================================================================"
-echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (17/17) PASSED SUCCESSFULLY!"
+echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (20/20) PASSED SUCCESSFULLY!"
 echo "================================================================================"

@@ -37,17 +37,72 @@ REHEARSAL_TOC_FILE=""
 ENCRYPTED_BACKUP=""
 BACKUP_PASSPHRASE_FILE="${BACKUP_PASSPHRASE_FILE:-}"
 
+# Exit status reserved for a rehearsal whose checks may have passed but whose
+# restored-production-data database could not be positively removed.
+TEARDOWN_FAILURE_EXIT_CODE=21
+
+# Independently confirms, via the rehearsal catalog, that the rehearsal database
+# no longer exists. Returns 0 ONLY when pg_database positively reports zero
+# matching rows; query errors, connection failures and any other output fail closed.
+verify_rehearsal_db_absent() {
+  local remaining
+  remaining=$(psql -d "$REHEARSAL_MAINTENANCE_DSN" -X -t -A -v ON_ERROR_STOP=1 \
+    -v target_db="$REHEARSAL_DB" 2>&1 << 'EOF'
+SELECT count(*) FROM pg_catalog.pg_database WHERE datname = :'target_db';
+EOF
+) || { echo "ERROR: Could not query rehearsal catalog to verify teardown: $remaining" >&2; return 1; }
+  [ "$remaining" = "0" ]
+}
+
 cleanup() {
   local exit_code=$?
+  # Prevent re-entry (INT/TERM handler followed by EXIT) and never let a failing
+  # teardown command abort the remaining cleanup and reporting steps.
+  trap - EXIT INT TERM
+  set +e
+  local teardown_failed=false
+  local drop_output drop_rc
   echo "==> Rehearsal cleanup initiated (exit code: $exit_code)..."
 
   # POSITIVE OWNERSHIP SAFETY:
   # Only drop the rehearsal database if this specific execution positively created it!
-  # Preexisting databases are NEVER dropped.
+  # Preexisting databases are NEVER dropped. No --force / session termination is used,
+  # so cleanup never requires privileges beyond ownership of the rehearsal database.
   if [ "$REHEARSAL_DB_CREATED_BY_US" = "true" ] && [ -n "$REHEARSAL_MAINTENANCE_DSN" ] && [ -n "$REHEARSAL_DB" ]; then
     echo "==> Dropping rehearsal database '$REHEARSAL_DB' created by this execution..."
-    dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>/dev/null || true
-    REHEARSAL_DB_CREATED_BY_US=false
+    drop_output=$(dropdb --maintenance-db="$REHEARSAL_MAINTENANCE_DSN" --if-exists "$REHEARSAL_DB" 2>&1)
+    drop_rc=$?
+    if [ "$drop_rc" -ne 0 ]; then
+      echo "ERROR: dropdb failed for rehearsal database '$REHEARSAL_DB' (exit $drop_rc): $drop_output" >&2
+      teardown_failed=true
+    fi
+
+    # FAIL-CLOSED TEARDOWN VERIFICATION:
+    # Independently confirm absence regardless of what dropdb reported.
+    if verify_rehearsal_db_absent; then
+      echo "==> Teardown verified: rehearsal database '$REHEARSAL_DB' no longer exists on the rehearsal target."
+      REHEARSAL_DB_CREATED_BY_US=false
+    else
+      teardown_failed=true
+    fi
+
+    if [ "$teardown_failed" = "true" ]; then
+      {
+        echo "================================================================================"
+        echo "CONTAINMENT REQUIRED: REHEARSAL DATABASE TEARDOWN FAILED"
+        echo "  The rehearsal database may still contain restored PRODUCTION data that is"
+        echo "  NOT encrypted at rest by this procedure."
+        echo "  Remaining database : $REHEARSAL_DB"
+        echo "  Rehearsal target   : host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER"
+        echo "  Cluster identity   : system_identifier=${rehearsal_sysid:-unknown} data_directory=${rehearsal_data_dir:-unknown}"
+        echo "  Remediation        : terminate remaining sessions connected to '$REHEARSAL_DB', drop it"
+        echo "                       on the rehearsal target only, and confirm that"
+        echo "                       SELECT count(*) FROM pg_database WHERE datname = '$REHEARSAL_DB';"
+        echo "                       returns 0 before treating this rehearsal as contained."
+        echo "  The rehearsal result is FAILED even if restore and migration checks passed."
+        echo "================================================================================"
+      } >&2
+    fi
   fi
 
   # Clean up dedicated managed PGPASSFILE if created by this execution
@@ -70,8 +125,17 @@ cleanup() {
     echo "==> Recovery encryption key preserved at:   $BACKUP_PASSPHRASE_FILE"
   fi
 
-  if [ $exit_code -ne 0 ]; then
+  # A teardown failure always forces a nonzero overall result.
+  if [ "$teardown_failed" = "true" ] && [ "$exit_code" -eq 0 ]; then
+    exit_code=$TEARDOWN_FAILURE_EXIT_CODE
+  fi
+
+  if [ "$teardown_failed" = "true" ]; then
+    echo "==> REHEARSAL FAILED (exit $exit_code): rehearsal database teardown could not be verified. Backup and recovery key are retained. CONTAINMENT REQUIRED on the rehearsal target." >&2
+  elif [ "$exit_code" -ne 0 ]; then
     echo "==> REHEARSAL FAILED. Backup and recovery key are retained. Ephemeral rehearsal target cleaned up." >&2
+  else
+    echo "==> REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified."
   fi
 
   exit "$exit_code"
@@ -472,4 +536,5 @@ fi
 
 echo "==> All 12 durability indexes verified with exact table, name, uniqueness, primary-key, and validity properties."
 echo "==> Disposable rehearsal restore and migration dry run successfully completed!"
-# Automatic trap drops $REHEARSAL_DB on exit.
+# Automatic trap drops $REHEARSAL_DB on exit, independently verifies its absence,
+# and forces a nonzero exit (21) if teardown cannot be verified.
