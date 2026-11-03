@@ -168,16 +168,140 @@ REHEARSAL_PGPORT="${REHEARSAL_PGPORT:-5432}"
 REHEARSAL_MAINTENANCE_DB="${REHEARSAL_MAINTENANCE_DB:-postgres}"
 REHEARSAL_PGPASSWORD="${REHEARSAL_PGPASSWORD:-}"
 
-# Credential safety: Never pass passwords in command line arguments (DSN parameters).
-# Use a dedicated, permission-restricted PGPASSFILE without altering unrelated operator credentials.
+# -----------------------------------------------------------------------------
+# Credential Safety: Production Source & Rehearsal libpq PGPASSFILE Management
+# -----------------------------------------------------------------------------
+# Passwords must NEVER be passed in command line arguments (DSN parameters or URIs).
+# Both production and rehearsal credentials are managed via a dedicated, permission-
+# restricted PGPASSFILE (mode 0600) scoped to this rehearsal execution.
+MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
+touch "$MANAGED_PGPASSFILE"
+chmod 600 "$MANAGED_PGPASSFILE"
+export MANAGED_PGPASSFILE
+export PGPASSFILE="$MANAGED_PGPASSFILE"
+
+# Preserve any preexisting ambient PGPASSFILE entries if present
+if [ -n "${PGPASSFILE:-}" ] && [ -f "$PGPASSFILE" ] && [ "$PGPASSFILE" != "$MANAGED_PGPASSFILE" ]; then
+  cat "$PGPASSFILE" >> "$MANAGED_PGPASSFILE"
+fi
+
+# Sanitize DATABASE_URL: extract production password into MANAGED_PGPASSFILE,
+# preserving all connection options (host, port, dbname, TLS/sslmode parameters).
+PROD_CLEAN_DSN="$(python3 - << 'PY'
+import os, urllib.parse, re, sys
+
+raw_url = os.environ.get("DATABASE_URL", "").strip()
+pgpass_path = os.environ.get("MANAGED_PGPASSFILE", "")
+
+def escape_pgpass(s):
+    return s.replace("\\", "\\\\").replace(":", "\\:")
+
+if raw_url.startswith(("postgres://", "postgresql://")):
+    parsed = urllib.parse.urlsplit(raw_url)
+    password = parsed.password
+    user = parsed.username or "*"
+    host = parsed.hostname or "*"
+    port = str(parsed.port) if parsed.port is not None else "*"
+    dbname = parsed.path.lstrip("/") if parsed.path else "*"
+    if not dbname:
+        dbname = "*"
+
+    host_port = parsed.hostname or ""
+    if parsed.port is not None:
+        host_port = f"{host_port}:{parsed.port}"
+    if parsed.username:
+        new_user = urllib.parse.quote(parsed.username)
+        new_netloc = f"{new_user}@{host_port}"
+    else:
+        new_netloc = host_port
+
+    clean_url = urllib.parse.urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
+
+    if password is not None and pgpass_path:
+        unescaped_user = urllib.parse.unquote(parsed.username) if parsed.username else "*"
+        unescaped_pass = urllib.parse.unquote(password)
+        esc_u = escape_pgpass(unescaped_user)
+        esc_p = escape_pgpass(unescaped_pass)
+
+        q_params = urllib.parse.parse_qs(parsed.query)
+        q_host = q_params.get("host", [None])[0]
+        q_port = q_params.get("port", [None])[0]
+
+        lines = []
+        lines.append(f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
+        if q_host:
+            lines.append(f"{q_host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"{q_host}:*:*:{esc_u}:{esc_p}\n")
+        if host != "*":
+            lines.append(f"{host}:*:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"{host}:*:*:{esc_u}:{esc_p}\n")
+        if port != "*":
+            lines.append(f"*:{port}:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"*:{port}:*:{esc_u}:{esc_p}\n")
+        lines.append(f"*:*:*:{esc_u}:{esc_p}\n")
+
+        with open(pgpass_path, "a", encoding="utf-8") as f:
+            f.writelines(lines)
+
+    sys.stdout.write(clean_url)
+
+else:
+    m = re.search(r"(?:^|\s)password=([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
+    if m:
+        raw_val = m.group(1)
+        if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
+            password = raw_val[1:-1]
+        else:
+            password = raw_val
+        clean_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
+        clean_dsn = re.sub(r"\s+", " ", clean_dsn)
+
+        def get_k(k):
+            km = re.search(r"(?:^|\s)" + k + r"=([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_dsn)
+            if km:
+                v = km.group(1)
+                if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                    return v[1:-1]
+                return v
+            return "*"
+
+        host = get_k("host")
+        port = get_k("port")
+        user = get_k("user")
+        dbname = get_k("dbname")
+
+        if pgpass_path:
+            esc_u = escape_pgpass(user)
+            esc_p = escape_pgpass(password)
+            lines = [
+                f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n",
+                f"*:{port}:{dbname}:{esc_u}:{esc_p}\n",
+                f"*:*:*:{esc_u}:{esc_p}\n"
+            ]
+            with open(pgpass_path, "a", encoding="utf-8") as f:
+                f.writelines(lines)
+
+        sys.stdout.write(clean_dsn)
+    else:
+        sys.stdout.write(raw_url)
+PY
+)"
+
+if [ -z "$PROD_CLEAN_DSN" ]; then
+  echo "FATAL: Failed to parse production database connection parameters from DATABASE_URL." >&2
+  exit 1
+fi
+
+# Scrub raw DATABASE_URL from process environment to prevent subprocess inheritance
+unset DATABASE_URL
+
+# Append rehearsal target credentials to MANAGED_PGPASSFILE if provided
 if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
-  touch "$MANAGED_PGPASSFILE"
-  chmod 600 "$MANAGED_PGPASSFILE"
   echo "$REHEARSAL_PGHOST:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
   echo "*:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
-  export PGPASSFILE="$MANAGED_PGPASSFILE"
 fi
+
+export PGPASSFILE="$MANAGED_PGPASSFILE"
 
 # Explicit maintenance DSN using structured parameters (passwords omitted from CLI arguments)
 REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
@@ -189,7 +313,7 @@ echo "==> Verifying production and rehearsal infrastructure identity and isolati
 
 # Query production cluster identity
 # Explicitly handles Unix sockets where inet_server_addr() is NULL
-prod_info=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "
+prod_info=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "
   SELECT 
     coalesce(inet_server_addr()::text, 'unix-socket'),
     coalesce(inet_server_port()::text, coalesce((SELECT setting FROM pg_settings WHERE name = 'port'), '5432')),
@@ -271,7 +395,7 @@ fi
 # Uses safe parameter passing (:'ruser') and strictly inspects PostgreSQL boolean results ('t' / 'f').
 # Fails closed on 't', query errors, malformed results, and unknown states without issuing writes.
 set +e
-priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
+priv_output=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
   WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = :'ruser') THEN 't'
@@ -377,9 +501,9 @@ REHEARSAL_DB_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_
 # 4. Record Production Baseline Metrics
 # -----------------------------------------------------------------------------
 echo "==> 1. Recording baseline production row counts..."
-baseline_users=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")
-baseline_jobs=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.studio_jobs;")
-baseline_migrations=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.schema_migrations;")
+baseline_users=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")
+baseline_jobs=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.studio_jobs;")
+baseline_migrations=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.schema_migrations;")
 echo "Production baseline: users=$baseline_users, studio_jobs=$baseline_jobs, schema_migrations=$baseline_migrations"
 
 # -----------------------------------------------------------------------------
@@ -387,7 +511,7 @@ echo "Production baseline: users=$baseline_users, studio_jobs=$baseline_jobs, sc
 # -----------------------------------------------------------------------------
 echo "==> 2. Streaming custom-format snapshot directly into AES-256 encryption..."
 # Zero plaintext dump touches the filesystem: stream pg_dump directly into gpg
-pg_dump "$DATABASE_URL" --format=custom --schema=public | \
+pg_dump "$PROD_CLEAN_DSN" --format=custom --schema=public | \
   gpg --batch --yes --pinentry-mode loopback --symmetric --cipher-algo AES256 \
       --passphrase-file "$BACKUP_PASSPHRASE_FILE" \
       --output "$ENCRYPTED_BACKUP"

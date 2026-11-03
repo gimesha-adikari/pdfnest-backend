@@ -31,6 +31,10 @@
 #  19. Fail-closed teardown: dropdb falsely reporting success is caught by the
 #      executable's independent absence verification
 #  20. Successful teardown confirms database absence and exits successfully
+#  21. Production credential safety: authenticated connection with canary password (URI format)
+#  22. Production wrong-password rejection & credential-file cleanup
+#  23. Production credential boundary across failed rehearsal teardown (exit 21 + containment)
+#  24. Production credential safety with keyword/value DSN format
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -66,6 +70,11 @@ trap cleanup_all EXIT INT TERM
 # -----------------------------------------------------------------------------
 echo "==> Initializing simulated production PostgreSQL instance (port 55470)..."
 "$bindir/initdb" -D "$test_root/prod_data" -A trust -U platen_prod --encoding=UTF8 >"$test_root/prod_init.log" 2>&1
+
+# Require password authentication specifically for platen_auth_prod_operator
+echo "local all platen_auth_prod_operator md5" | cat - "$test_root/prod_data/pg_hba.conf" > "$test_root/prod_data/pg_hba.conf.tmp"
+mv "$test_root/prod_data/pg_hba.conf.tmp" "$test_root/prod_data/pg_hba.conf"
+
 "$bindir/pg_ctl" -D "$test_root/prod_data" -l "$test_root/prod.log" -o "-h '' -k $test_root -p 55470 -F" -w start >/dev/null
 "$bindir/createdb" -h "$test_root" -p 55470 -U platen_prod pdfnest_production
 
@@ -109,7 +118,13 @@ GRANT CREATE ON SCHEMA public TO prod_write_operator;
 CREATE ROLE prod_read_only LOGIN;
 GRANT USAGE ON SCHEMA public TO prod_read_only;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO prod_read_only;
+
+-- 3. Authenticated production operator with distinct canary password
+CREATE ROLE platen_auth_prod_operator LOGIN PASSWORD 'CanaryProdSecret_88412!' SUPERUSER;
 EOF
+
+CANARY_PROD_PASSWORD="CanaryProdSecret_88412!"
+PROD_AUTH_URL="postgresql://platen_auth_prod_operator:${CANARY_PROD_PASSWORD}@/pdfnest_production?host=$test_root&port=55470&sslmode=disable"
 
 echo "==> Initializing separate disposable rehearsal PostgreSQL instance (port 55471)..."
 "$bindir/initdb" -D "$test_root/rehearsal_data" -A trust -U platen_rehearsal_operator --encoding=UTF8 >"$test_root/rehearsal_init.log" 2>&1
@@ -138,12 +153,20 @@ PROD_RECOVERY_KEY="$KEYS_DIR/pre_provisioned_recovery.key"
 head -c 32 /dev/urandom | base64 > "$PROD_RECOVERY_KEY"
 chmod 600 "$PROD_RECOVERY_KEY"
 
-# Setup harness-controlled psql failure injection wrapper
+# Setup harness-controlled psql failure injection & argument assertion wrapper
 harness_bin="$test_root/harness_bin"
 mkdir -p "$harness_bin"
 real_psql="$bindir/psql"
 cat > "$harness_bin/psql" << 'EOF'
 #!/usr/bin/env bash
+if [ -n "${TEST_ASSERT_NO_SECRETS:-}" ]; then
+  for arg in "$@"; do
+    if [[ "$arg" == *"CanaryProdSecret"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
+      echo "FATAL HARNESS ERROR: Secret leaked in psql argument: $arg" >&2
+      exit 99
+    fi
+  done
+fi
 if [ -n "${TEST_INJECT_PSQL_FAILURE:-}" ]; then
   # Detect if this invocation is the privilege check (inspects parameters)
   if [[ "$*" == *"-v ruser="* ]]; then
@@ -161,6 +184,23 @@ exec "$real_bin" "$@"
 EOF
 echo "$real_psql" > "$harness_bin/psql.real_bin"
 chmod +x "$harness_bin/psql"
+
+# Setup harness-controlled pg_dump argument assertion wrapper
+cat > "$harness_bin/pg_dump" << 'EOF'
+#!/usr/bin/env bash
+if [ -n "${TEST_ASSERT_NO_SECRETS:-}" ]; then
+  for arg in "$@"; do
+    if [[ "$arg" == *"CanaryProdSecret"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
+      echo "FATAL HARNESS ERROR: Secret leaked in pg_dump argument: $arg" >&2
+      exit 99
+    fi
+  done
+fi
+real_bin="$(cat "$0.real_bin")"
+exec "$real_bin" "$@"
+EOF
+echo "$bindir/pg_dump" > "$harness_bin/pg_dump.real_bin"
+chmod +x "$harness_bin/pg_dump"
 
 # Setup harness-controlled dropdb teardown fault-injection wrapper.
 # Passthrough unless TEST_INJECT_DROPDB is set; only placed on PATH by teardown tests.
@@ -972,7 +1012,212 @@ assert_recovery_assets_protected "$success_backup_dir"
 assert_no_managed_pgpassfile
 echo "PASSED: Successful teardown verified database absence (independently confirmed) and exited 0."
 
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 21: Production Credential Safety with Canary Password (URI Format)
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 21] Production credential safety: authenticated connection with canary password (URI)..."
+prod_cred_backup_dir="$test_root/prod_cred_backups"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$PROD_AUTH_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_cred_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Expected exit 0 with authenticated production credentials, got $rc. Output: $output" >&2
+  exit 1
+fi
+
+# 1. Assert production canary password never leaked in output
+if echo "$output" | grep -q "$CANARY_PROD_PASSWORD"; then
+  echo "FAILED: Production canary password was leaked in script output!" >&2
+  exit 1
+fi
+# 2. Assert rehearsal password never leaked in output
+if echo "$output" | grep -q "SecretRehearsalPass_12345!"; then
+  echo "FAILED: Rehearsal password was leaked in script output!" >&2
+  exit 1
+fi
+# 3. Assert password= never leaked in output
+if echo "$output" | grep -q "password="; then
+  echo "FAILED: Password parameter was printed in script output!" >&2
+  exit 1
+fi
+# 4. Assert full rehearsal lifecycle passed
+echo "$output" | grep -q "All 12 durability indexes verified with exact table, name, uniqueness, primary-key, and validity properties." || {
+  echo "FAILED: Output missing index verification confirmation. Got: $output" >&2
+  exit 1
+}
+echo "$output" | grep -q "REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified." || {
+  echo "FAILED: Output missing success confirmation. Got: $output" >&2
+  exit 1
+}
+# 5. Assert managed PGPASSFILE was cleaned up on exit
+assert_no_managed_pgpassfile
+# 6. Assert recovery assets preserved and cleanly decryptable
+assert_recovery_assets_protected "$prod_cred_backup_dir"
+echo "PASSED: Authenticated production connection with canary password succeeded; 0 secrets leaked; PGPASSFILE cleaned."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 22: Production Wrong-Password Rejection & Credential Cleanup
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 22] Production source-database wrong password rejection & credential cleanup..."
+prod_wrong_url="postgresql://platen_auth_prod_operator:WrongCanarySecret_99999!@/pdfnest_production?host=$test_root&port=55470&sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_wrong_url" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -eq 0 ]; then
+  echo "FAILED: Execution succeeded despite wrong production password!" >&2
+  exit 1
+fi
+if [ "$rc" -ne 4 ]; then
+  echo "FAILED: Expected exit code 4 on production connection failure, got $rc. Output: $output" >&2
+  exit 1
+fi
+echo "$output" | grep -q "Failed to connect to production database via DATABASE_URL." || {
+  echo "FAILED: Output missing expected production connection failure message. Got: $output" >&2
+  exit 1
+}
+# Assert zero password leakage in error output
+if echo "$output" | grep -q -E "$CANARY_PROD_PASSWORD|WrongCanarySecret_99999!|SecretRehearsalPass_12345!"; then
+  echo "FAILED: Password leaked in connection failure output! Got: $output" >&2
+  exit 1
+fi
+# Assert managed PGPASSFILE was cleaned up on failure
+assert_no_managed_pgpassfile
+echo "PASSED: Production wrong-password rejected (exit code 4); 0 secrets leaked; PGPASSFILE cleaned."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 23: Production Credential Boundary Across Failed Rehearsal Teardown
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 23] Production credentials across failed rehearsal teardown..."
+teardown_prod_db="teardown_prod_cred_probe_db"
+teardown_prod_backup_dir="$test_root/teardown_prod_cred_backups"
+holder_pid_file="$test_root/teardown_holder.pid"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$PROD_AUTH_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$teardown_prod_backup_dir" \
+  REHEARSAL_DB="$teardown_prod_db" \
+  TEST_INJECT_DROPDB="hold_connection" \
+  TEST_HOLDER_HOST="$test_root" \
+  TEST_HOLDER_PORT="55471" \
+  TEST_HOLDER_USER="platen_rehearsal_operator" \
+  TEST_HOLDER_PID_FILE="$holder_pid_file" \
+  TEST_HOLDER_LOG="$test_root/teardown_holder.log" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+echo "---- Test 23 evidence: teardown failure with authenticated production source (exit $rc) ----"
+echo "$output" | sed -n '/Rehearsal cleanup initiated/,$p'
+echo "---- end Test 23 evidence ----"
+
+if [ "$rc" -ne 21 ]; then
+  echo "FAILED: Expected exit code 21 on teardown failure with authenticated production source, got $rc. Output: $output" >&2
+  exit 1
+fi
+echo "$output" | grep -q "Disposable rehearsal restore and migration dry run successfully completed!" || {
+  echo "FAILED: Restore and migration dry run did not succeed before teardown. Got: $output" >&2
+  exit 1
+}
+echo "$output" | grep -q "CONTAINMENT REQUIRED: REHEARSAL DATABASE TEARDOWN FAILED" || {
+  echo "FAILED: Output missing containment alert. Got: $output" >&2
+  exit 1
+}
+# Assert zero password leakage in teardown failure output
+if echo "$output" | grep -q -E "$CANARY_PROD_PASSWORD|SecretRehearsalPass_12345!"; then
+  echo "FAILED: Secret leaked in teardown failure output! Got: $output" >&2
+  exit 1
+fi
+# Assert managed PGPASSFILE cleaned up on exit
+assert_no_managed_pgpassfile
+# Assert recovery assets preserved
+assert_recovery_assets_protected "$teardown_prod_backup_dir"
+assert_unrelated_databases_intact
+
+# Clean up synthetic teardown fixture
+"$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d postgres -At \
+  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$teardown_prod_db';" >/dev/null
+kill "$(cat "$holder_pid_file")" 2>/dev/null || true
+for _ in $(seq 1 50); do
+  active=$("$bindir/psql" -X -h "$test_root" -p 55471 -U platen_rehearsal_operator -d postgres -At \
+    -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '$teardown_prod_db';")
+  [ "$active" = "0" ] && break
+  sleep 0.1
+done
+rm -f "$holder_pid_file"
+"$bindir/dropdb" -h "$test_root" -p 55471 -U platen_rehearsal_operator "$teardown_prod_db"
+if [ "$(rehearsal_db_count "$teardown_prod_db")" != "0" ]; then
+  echo "FAILED: Harness could not contain synthetic teardown-failure database." >&2; exit 1
+fi
+echo "PASSED: Authenticated production credentials preserved boundary across teardown failure (exit 21); PGPASSFILE cleaned; fixture contained."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 24: Production Credential Safety with Keyword/Value DSN Format
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 24] Production credential safety: keyword/value DSN format with canary password..."
+prod_dsn_backup_dir="$test_root/prod_dsn_backups"
+prod_auth_dsn="host=$test_root port=55470 user=platen_auth_prod_operator password='$CANARY_PROD_PASSWORD' dbname=pdfnest_production sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_auth_dsn" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_dsn_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Expected exit 0 with keyword/value DSN production credentials, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "$CANARY_PROD_PASSWORD"; then
+  echo "FAILED: Canary password leaked in output with keyword/value DSN!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_dsn_backup_dir"
+echo "PASSED: Keyword/value production DSN with canary password succeeded; 0 secrets leaked; PGPASSFILE cleaned."
+
 echo ""
 echo "================================================================================"
-echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (20/20) PASSED SUCCESSFULLY!"
+echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (24/24) PASSED SUCCESSFULLY!"
 echo "================================================================================"

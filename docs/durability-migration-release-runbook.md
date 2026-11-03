@@ -283,16 +283,140 @@ REHEARSAL_PGPORT="${REHEARSAL_PGPORT:-5432}"
 REHEARSAL_MAINTENANCE_DB="${REHEARSAL_MAINTENANCE_DB:-postgres}"
 REHEARSAL_PGPASSWORD="${REHEARSAL_PGPASSWORD:-}"
 
-# Credential safety: Never pass passwords in command line arguments (DSN parameters).
-# Use a dedicated, permission-restricted PGPASSFILE without altering unrelated operator credentials.
+# -----------------------------------------------------------------------------
+# Credential Safety: Production Source & Rehearsal libpq PGPASSFILE Management
+# -----------------------------------------------------------------------------
+# Passwords must NEVER be passed in command line arguments (DSN parameters or URIs).
+# Both production and rehearsal credentials are managed via a dedicated, permission-
+# restricted PGPASSFILE (mode 0600) scoped to this rehearsal execution.
+MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
+touch "$MANAGED_PGPASSFILE"
+chmod 600 "$MANAGED_PGPASSFILE"
+export MANAGED_PGPASSFILE
+export PGPASSFILE="$MANAGED_PGPASSFILE"
+
+# Preserve any preexisting ambient PGPASSFILE entries if present
+if [ -n "${PGPASSFILE:-}" ] && [ -f "$PGPASSFILE" ] && [ "$PGPASSFILE" != "$MANAGED_PGPASSFILE" ]; then
+  cat "$PGPASSFILE" >> "$MANAGED_PGPASSFILE"
+fi
+
+# Sanitize DATABASE_URL: extract production password into MANAGED_PGPASSFILE,
+# preserving all connection options (host, port, dbname, TLS/sslmode parameters).
+PROD_CLEAN_DSN="$(python3 - << 'PY'
+import os, urllib.parse, re, sys
+
+raw_url = os.environ.get("DATABASE_URL", "").strip()
+pgpass_path = os.environ.get("MANAGED_PGPASSFILE", "")
+
+def escape_pgpass(s):
+    return s.replace("\\", "\\\\").replace(":", "\\:")
+
+if raw_url.startswith(("postgres://", "postgresql://")):
+    parsed = urllib.parse.urlsplit(raw_url)
+    password = parsed.password
+    user = parsed.username or "*"
+    host = parsed.hostname or "*"
+    port = str(parsed.port) if parsed.port is not None else "*"
+    dbname = parsed.path.lstrip("/") if parsed.path else "*"
+    if not dbname:
+        dbname = "*"
+
+    host_port = parsed.hostname or ""
+    if parsed.port is not None:
+        host_port = f"{host_port}:{parsed.port}"
+    if parsed.username:
+        new_user = urllib.parse.quote(parsed.username)
+        new_netloc = f"{new_user}@{host_port}"
+    else:
+        new_netloc = host_port
+
+    clean_url = urllib.parse.urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
+
+    if password is not None and pgpass_path:
+        unescaped_user = urllib.parse.unquote(parsed.username) if parsed.username else "*"
+        unescaped_pass = urllib.parse.unquote(password)
+        esc_u = escape_pgpass(unescaped_user)
+        esc_p = escape_pgpass(unescaped_pass)
+
+        q_params = urllib.parse.parse_qs(parsed.query)
+        q_host = q_params.get("host", [None])[0]
+        q_port = q_params.get("port", [None])[0]
+
+        lines = []
+        lines.append(f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
+        if q_host:
+            lines.append(f"{q_host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"{q_host}:*:*:{esc_u}:{esc_p}\n")
+        if host != "*":
+            lines.append(f"{host}:*:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"{host}:*:*:{esc_u}:{esc_p}\n")
+        if port != "*":
+            lines.append(f"*:{port}:{dbname}:{esc_u}:{esc_p}\n")
+            lines.append(f"*:{port}:*:{esc_u}:{esc_p}\n")
+        lines.append(f"*:*:*:{esc_u}:{esc_p}\n")
+
+        with open(pgpass_path, "a", encoding="utf-8") as f:
+            f.writelines(lines)
+
+    sys.stdout.write(clean_url)
+
+else:
+    m = re.search(r"(?:^|\s)password=([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
+    if m:
+        raw_val = m.group(1)
+        if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
+            password = raw_val[1:-1]
+        else:
+            password = raw_val
+        clean_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
+        clean_dsn = re.sub(r"\s+", " ", clean_dsn)
+
+        def get_k(k):
+            km = re.search(r"(?:^|\s)" + k + r"=([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_dsn)
+            if km:
+                v = km.group(1)
+                if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                    return v[1:-1]
+                return v
+            return "*"
+
+        host = get_k("host")
+        port = get_k("port")
+        user = get_k("user")
+        dbname = get_k("dbname")
+
+        if pgpass_path:
+            esc_u = escape_pgpass(user)
+            esc_p = escape_pgpass(password)
+            lines = [
+                f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n",
+                f"*:{port}:{dbname}:{esc_u}:{esc_p}\n",
+                f"*:*:*:{esc_u}:{esc_p}\n"
+            ]
+            with open(pgpass_path, "a", encoding="utf-8") as f:
+                f.writelines(lines)
+
+        sys.stdout.write(clean_dsn)
+    else:
+        sys.stdout.write(raw_url)
+PY
+)"
+
+if [ -z "$PROD_CLEAN_DSN" ]; then
+  echo "FATAL: Failed to parse production database connection parameters from DATABASE_URL." >&2
+  exit 1
+fi
+
+# Scrub raw DATABASE_URL from process environment to prevent subprocess inheritance
+unset DATABASE_URL
+
+# Append rehearsal target credentials to MANAGED_PGPASSFILE if provided
 if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
-  touch "$MANAGED_PGPASSFILE"
-  chmod 600 "$MANAGED_PGPASSFILE"
   echo "$REHEARSAL_PGHOST:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
   echo "*:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
-  export PGPASSFILE="$MANAGED_PGPASSFILE"
 fi
+
+export PGPASSFILE="$MANAGED_PGPASSFILE"
 
 # Explicit maintenance DSN using structured parameters (passwords omitted from CLI arguments)
 REHEARSAL_MAINTENANCE_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_PGUSER dbname=$REHEARSAL_MAINTENANCE_DB"
@@ -304,7 +428,7 @@ echo "==> Verifying production and rehearsal infrastructure identity and isolati
 
 # Query production cluster identity
 # Explicitly handles Unix sockets where inet_server_addr() is NULL
-prod_info=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "
+prod_info=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "
   SELECT 
     coalesce(inet_server_addr()::text, 'unix-socket'),
     coalesce(inet_server_port()::text, coalesce((SELECT setting FROM pg_settings WHERE name = 'port'), '5432')),
@@ -386,7 +510,7 @@ fi
 # Uses safe parameter passing (:'ruser') and strictly inspects PostgreSQL boolean results ('t' / 'f').
 # Fails closed on 't', query errors, malformed results, and unknown states without issuing writes.
 set +e
-priv_output=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
+priv_output=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -v ruser="$rehearsal_user" << 'EOF' 2>&1
 SELECT CASE 
   WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'ruser') THEN 'f'
   WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = :'ruser') THEN 't'
@@ -492,9 +616,9 @@ REHEARSAL_DB_DSN="host=$REHEARSAL_PGHOST port=$REHEARSAL_PGPORT user=$REHEARSAL_
 # 4. Record Production Baseline Metrics
 # -----------------------------------------------------------------------------
 echo "==> 1. Recording baseline production row counts..."
-baseline_users=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")
-baseline_jobs=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.studio_jobs;")
-baseline_migrations=$(psql "$DATABASE_URL" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.schema_migrations;")
+baseline_users=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.users;")
+baseline_jobs=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.studio_jobs;")
+baseline_migrations=$(psql "$PROD_CLEAN_DSN" -t -A -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM public.schema_migrations;")
 echo "Production baseline: users=$baseline_users, studio_jobs=$baseline_jobs, schema_migrations=$baseline_migrations"
 
 # -----------------------------------------------------------------------------
@@ -502,7 +626,7 @@ echo "Production baseline: users=$baseline_users, studio_jobs=$baseline_jobs, sc
 # -----------------------------------------------------------------------------
 echo "==> 2. Streaming custom-format snapshot directly into AES-256 encryption..."
 # Zero plaintext dump touches the filesystem: stream pg_dump directly into gpg
-pg_dump "$DATABASE_URL" --format=custom --schema=public | \
+pg_dump "$PROD_CLEAN_DSN" --format=custom --schema=public | \
   gpg --batch --yes --pinentry-mode loopback --symmetric --cipher-algo AES256 \
       --passphrase-file "$BACKUP_PASSPHRASE_FILE" \
       --output "$ENCRYPTED_BACKUP"
@@ -658,7 +782,7 @@ echo "==> Disposable rehearsal restore and migration dry run successfully comple
 ### Step 2.2: Backup Access Control, Separate Key Custody, and Owner-Approved Disposal Standards
 1. **Access Control & File Mode:** The backup archive contains sensitive production records (user identities, studio job parameters, file keys). Process permissions enforce `umask 077` and `chmod 600`. File ownership belongs strictly to the migration operator role with zero permissions granted to other users or group members.
 2. **Durable Key Material, Separate Key Custody & Zero Command-Line Secrets:** Never pass encryption keys as command-line arguments (which are visible in process tables and audit logs). The procedure strictly requires a pre-provisioned, independently protected `BACKUP_PASSPHRASE_FILE` with permissions `0600` (e.g. from an owner-approved secret store or key management service). Storing or silently generating the recovery key beside the encrypted backup is strictly forbidden in production and staging to maintain absolute separation of backup and key custody. Synthetic key bypass flags (`ALLOW_SYNTHETIC_TEST_KEY`) are completely absent from the production executable. Decryption is verified in a separate, isolated process using solely this pre-provisioned key material.
-3. **Database Credential Protection via Dedicated PGPASSFILE:** Database credentials (e.g. `REHEARSAL_PGPASSWORD`) are never passed as command-line arguments or appended to connection strings (`password=...`), preventing password exposure in process listings (`ps`, `/proc/*/cmdline`) or execution traces. When passwords are required, a temporary, permission-restricted (`0600`) `PGPASSFILE` is initialized and scoped to the rehearsal process, and guaranteed to be deleted on exit across both success and failure exit paths.
+3. **Production Source and Rehearsal Credential Protection via Dedicated PGPASSFILE:** Passwords must never appear in command-line arguments (`psql`, `pg_dump`) or execution traces (`ps`, `/proc/*/cmdline`). For production access, `DATABASE_URL` (in either URI format `postgresql://user:pass@host:port/dbname?query` or keyword/value DSN format) is parsed by the script to extract credentials into a temporary, permission-restricted (`0600`) `MANAGED_PGPASSFILE`. A sanitized connection string retaining all connection options and TLS flags (e.g. `sslmode=require`) with zero passwords is used for all CLI tool invocations (`psql`, `pg_dump`). The raw `DATABASE_URL` is unset from the process environment to prevent subprocess leakage. Rehearsal target credentials (`REHEARSAL_PGPASSWORD`) are appended to the same managed `PGPASSFILE`. The managed file is guaranteed to be securely deleted on exit across all exit paths (success, validation failure, teardown failure, and early abort).
 4. **Immutable Fail-Closed Production Privilege Check:** The production rehearsal executable enforces an immutable privilege query that rejects any rehearsal role possessing write or creation privileges on production. Arbitrary query overrides (`PRIVILEGE_QUERY_OVERRIDE`) have been completely removed from the production script to eliminate SQL injection risks. Negative failure testing is handled via isolated test harness wrappers.
 5. **Elimination of Plaintext Dumps:** Plaintext database dumps must never touch physical or virtual disk storage. The snapshot is piped directly from `pg_dump -Fc` into `gpg --batch --pinentry-mode loopback --symmetric --cipher-algo AES256 --passphrase-file ...`. Rehearsal restore streams decrypted bytes directly from `gpg --decrypt` pipe into `pg_restore --exit-on-error`.
 6. **Fail-Closed Rehearsal Database Teardown:** The rehearsal database contains restored production data that is not encrypted at rest by this procedure. On exit, the script drops only a database positively created by the same execution (never `--force`, never session termination, never a preexisting database), then independently confirms absence with a parameterized `pg_database` catalog query regardless of what `dropdb` reported. If deletion or verification fails, the script prints a `CONTAINMENT REQUIRED` block naming the remaining database and rehearsal target identity (host, port, user, system identifier; no secrets) and exits with status `21` even when all restore and migration checks passed. The encrypted backup and recovery key are preserved, and the managed `PGPASSFILE` is still removed. A rehearsal is only successful when the output ends with `REHEARSAL SUCCEEDED: all checks passed and rehearsal database absence was verified.` and the exit status is `0`.
@@ -685,7 +809,7 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Fail-Closed Privilege Verification** | Production privilege check proves rehearsal role has zero write/create privileges on production | Required | [ ] |
 | **Streaming Encrypted Snapshot** | `pg_dump -Fc` streamed directly into AES-256 encryption (`.dump.gpg`); 0 bytes plaintext on disk | Required | [ ] |
 | **Separate Key Custody Confirmed** | Pre-provisioned recovery key via `BACKUP_PASSPHRASE_FILE` (0600) separate from backup; no silent colocation | Required | [ ] |
-| **Zero Credential Process Leakage** | `REHEARSAL_PGPASSWORD` managed via temporary `PGPASSFILE` (0600); no `password=` parameters in DSN / arguments | Required | [ ] |
+| **Zero Credential Process Leakage** | `DATABASE_URL` and `REHEARSAL_PGPASSWORD` managed via temporary `PGPASSFILE` (0600); 0 passwords in `psql`/`pg_dump` CLI args, DSN strings, logs, or `/proc/*/cmdline` | Required | [ ] |
 | **TOC Integrity Confirmed** | `pg_restore --list` from decrypted stream confirms required table structures | Required | [ ] |
 | **Collision-Safe DB Creation** | `createdb` executed only after verifying database does not preexist; preexisting DBs never dropped | Required | [ ] |
 | **Streaming Rehearsal Restore Passed** | Decrypted stream restored to disposable DB with `--exit-on-error`; 0 errors | Required | [ ] |
@@ -695,14 +819,14 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Verified Rehearsal Teardown** | Script exit status `0` with `Teardown verified` and `REHEARSAL SUCCEEDED`; any exit `21` / `CONTAINMENT REQUIRED` is contained and re-run before sign-off | Required | [ ] |
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
-| **Full 20-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 20/20 negative and positive tests in CI | Required | [ ] |
+| **Full 24-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 24/24 negative and positive tests in CI | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
 
-### Step 2.4: Automated Rehearsal Qualification Suite (20 Comprehensive Checks)
+### Step 2.4: Automated Rehearsal Qualification Suite (24 Comprehensive Checks)
 
-The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 20 negative and positive checks:
+The rehearsal safety invariants are continuously validated in CI via [`scripts/test-runbook-rehearsal.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-runbook-rehearsal.sh). This harness spawns two isolated, disposable PostgreSQL clusters (simulated production and disposable rehearsal) and executes 24 negative and positive checks:
 
 1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
 2. **Negative Test 2:** Rejection of missing `REHEARSAL_PGHOST` / `REHEARSAL_PGUSER` (exit code 2).
@@ -724,6 +848,10 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 18. **Negative Test 18:** Fail-closed teardown: a real active session blocks `dropdb`; the script reports the PostgreSQL refusal, prints the containment warning, exits `21` despite passing restore/migration checks, removes the managed `PGPASSFILE`, preserves the encrypted backup and key, and deletes no unrelated database. The harness independently confirms the database remained, then contains the fixture.
 19. **Negative Test 19:** Fail-closed teardown: a harness `dropdb` that falsely reports success is caught by the script's independent catalog verification (exit `21`).
 20. **Positive Test 20:** Successful teardown: exit `0` only after `Teardown verified`, independently confirmed absent by the harness.
+21. **Positive Test 21:** Production source credential safety: full rehearsal execution with authenticated production source (`DATABASE_URL="$PROD_AUTH_URL"`) and authenticated rehearsal target using distinct canary passwords; verified backup, restore, row counts, 12 indexes, and teardown succeed; asserted zero canary password or `password=` in output; verified `PGPASSFILE` cleaned up; verified separate-process backup decryption.
+22. **Negative Test 22:** Production source wrong-password rejection (`WrongCanarySecret_99999!`); verified fail-fast exit code 4; asserted zero password leakage in error messages; verified `PGPASSFILE` cleaned up on failure.
+23. **Negative Test 23:** Authenticated production source boundary across failed rehearsal teardown (`hold_connection`); verified exit code 21, containment warning emitted, zero secrets leaked, `PGPASSFILE` cleaned up, recovery assets preserved, and test harness contained fixture.
+24. **Positive Test 24:** Production source credential safety with keyword/value DSN format containing canary password; verified execution succeeds with exit code 0, zero password leakage, and `PGPASSFILE` cleaned up.
 
 ---
 
