@@ -119,6 +119,9 @@ jobs:
       - name: Verify durability migration rehearsal runbook safety and recoverability
         run: scripts/test-runbook-rehearsal.sh
 
+      - name: Verify migration operator helper credential safety and boundary enforcement
+        run: scripts/test-migration-operator.sh
+
       - name: Verify Analyzer public failure boundaries
         run: scripts/test-analyzer-public-errors.sh
 

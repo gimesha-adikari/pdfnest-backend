@@ -1018,6 +1018,7 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
 | **Full 36-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 36/36 negative and positive tests in CI | Required | [ ] |
+| **Migration Operator Helper Qualified** | `scripts/test-migration-operator.sh` passed 23/23 tests in CI: zero credentials in argv, zero wildcards in `.pgpass`, positive database verification, fail-closed parsing | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
@@ -1063,178 +1064,61 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 35. **Negative Test 35:** Malformed quoted credentials fail closed before client execution (unterminated quotes, unescaped characters after closing quote, unterminated escape sequences, and unescaped quotes in unquoted values fail closed with exit code 1; managed `.pgpass` cleaned up).
 36. **Test 36:** Direct regression qualification: regex parsing truncation vs libpq parser (confirms that previous HEAD regex `r"(?:^|\s)password\s*=\s*([^\s'"]+|'[^']*'|"[^"]*")"` truncated at escaped apostrophe and leaked `CanaryFragment` into sanitized DSN command arguments, while canonical executable with libpq parser completely removes password without fragments, passing `TEST_ASSERT_NO_SECRETS=1`, exit `0`).
 
+### Step 2.5: Automated Migration Operator Helper Qualification Suite (23 Checks)
+
+The credential safety, libpq parsing boundaries, target verification, and signal handling of [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh) are continuously qualified in CI via [`scripts/test-migration-operator.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-migration-operator.sh) against isolated disposable PostgreSQL fixtures on private Unix sockets:
+
+1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
+2. **Negative Test 2:** Rejection of missing affirmative confirmation (`CONFIRM_PRODUCTION_MIGRATION="yes"`, exit code 2).
+3. **Negative Test 3:** Rejection of missing or unreadable migration DDL file (exit code 3).
+4. **Positive Test 4:** Valid URI connection with canary password authenticated cleanly via `PGPASSFILE`; zero passwords in arguments or child environment (`TEST_ASSERT_NO_SECRETS=1`, exit code 0).
+5. **Positive Test 5:** Valid keyword/value connection with canary password authenticated cleanly (exit code 0).
+6. **Positive Test 6:** Keyword/value password containing escaped apostrophe (`\'`) parsed without truncation (exit code 0).
+7. **Positive Test 7:** Keyword/value password containing escaped backslashes (`\\`) parsed and unescaped for `.pgpass` (exit code 0).
+8. **Positive Test 8:** Quoted password with whitespace, colons, and punctuation authenticated cleanly (exit code 0).
+9. **Negative Test 9:** Unterminated quoted string fails closed before invoking client (exit code 1).
+10. **Negative Test 10:** Unterminated escape sequence fails closed before invoking client (exit code 1).
+11. **Negative Test 11:** Extraneous non-whitespace characters following a closing quote fail closed (exit code 1).
+12. **Negative Test 12:** Unexpected quotes inside unquoted connection values fail closed (exit code 1).
+13. **Negative Test 13:** Ambiguous credentials (password in both userinfo and query string) fail closed (exit code 1).
+14. **Negative Test 14:** Strict target-specific isolation: missing `host`, `user`, `dbname`, or `port` fails closed (zero wildcard fallback allowed, exit code 1).
+15. **Positive Test 15:** Deterministic target matching: `.pgpass` entry confirmed to contain zero wildcard fields (`*`).
+16. **Negative Test 16:** Wrong password rejected with exit code 4; zero secrets leaked in stderr/logs; temporary `.pgpass` purged.
+17. **Negative Test 17:** Target database identity verification: mismatch between actual database and `EXPECTED_DATABASE` fails closed before executing DDL (exit code 5).
+18. **Negative Test 18:** Standby database protection: connection to read-only replica (`pg_is_in_recovery() = true`) fails closed (exit code 5).
+19. **Positive Test 19:** Inspection wrappers verify zero credentials in process command-line arguments (exit 99 assertion) and child environment (`DATABASE_URL` and `PGPASSWORD` scrubbed, exit 98 assertion).
+20. **Negative Test 20:** Unreadable or nonexistent ambient `PGPASSFILE` fails closed (exit code 1).
+21. **Positive Test 21:** Valid ambient `PGPASSFILE` entries preserved by appending with fallback precedence.
+22. **Positive Test 22:** Signal trap handlers confirmed for `INT` (exit 130) and `TERM` (exit 143) with guaranteed temporary file cleanup.
+23. **Positive Test 23:** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1`, durability tables, and column `pending_object_keys`.
+
 ---
 
 ## 5. Phase 3: Transactional Migration Execution
 
-Execute the verified idempotent script `config/migrations/20261029_backend_durability.up.sql` inside a single transaction.
+Execute the verified idempotent script `config/migrations/20261029_backend_durability.up.sql` inside a single transaction using the canonical, independently tested operator helper [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh).
 
 > [!IMPORTANT]
-> **Production Credential Boundary Protection:**
+> **Production Credential Boundary Protection & Target Verification:**
 > Passwords must **never** be passed in process command-line arguments (neither via `psql "$DATABASE_URL"` nor `-d "password=..."`). Command arguments are visible in process tables (`ps`, `/proc/*/cmdline`) and system monitoring.
-> Use the audited libpq `PGPASSFILE` procedure below to extract credentials safely into a temporary, permission-restricted file (mode `0600`) and execute `psql` using a sanitized DSN without embedded secrets:
+> The canonical operator helper `scripts/apply-durability-migration.sh` enforces:
+> 1. Dedicated permission-restricted `PGPASSFILE` (mode `0600`) with automatic cleanup across both normal exits and signal terminations (`SIGINT`, `SIGTERM`).
+> 2. Deterministic, target-specific credential matching with **zero wildcard fallback** (`host`, `port`, `dbname`, and `user` must all be explicitly defined in connection parameters).
+> 3. State-machine libpq lexing rejecting unterminated quotes, malformed escapes, and extraneous characters.
+> 4. Positive, fail-closed pre-execution target database identity verification (`EXPECTED_DATABASE=railway` and primary node verification `pg_is_in_recovery() = false`).
+> 5. Subprocess environment scrubbing (`unset DATABASE_URL`, `unset PGPASSWORD`).
+> 6. Fail-closed ambient credential preservation (rejects unreadable or missing ambient `PGPASSFILE`).
 
 ```bash
-# -----------------------------------------------------------------------------
-# Credential-Safe Production Migration Execution Procedure
-# -----------------------------------------------------------------------------
-set -euo pipefail
+# Set affirmative production confirmation and expected production database name
+export CONFIRM_PRODUCTION_MIGRATION="yes"
+export EXPECTED_DATABASE="railway"
 
-# 1. Allocate process-scoped, permission-restricted PGPASSFILE (mode 0600)
-MIGRATION_PGPASSFILE="$(mktemp /tmp/platen-migration-pgpass-XXXXXX)"
-touch "$MIGRATION_PGPASSFILE"
-chmod 600 "$MIGRATION_PGPASSFILE"
-ORIGINAL_PGPASSFILE="${PGPASSFILE:-}"
-export MIGRATION_PGPASSFILE
-export ORIGINAL_PGPASSFILE
-
-# Guarantee cleanup of managed PGPASSFILE across both success and failure paths
-cleanup_migration_pgpass() {
-  if [ -n "${MIGRATION_PGPASSFILE:-}" ] && [ -f "$MIGRATION_PGPASSFILE" ]; then
-    rm -f "$MIGRATION_PGPASSFILE"
-  fi
-}
-trap cleanup_migration_pgpass EXIT INT TERM
-
-# 2. Parse DATABASE_URL safely using the audited libpq state-machine lexer,
-#    extract credentials into MIGRATION_PGPASSFILE, and obtain sanitized DSN
-MIGRATION_CLEAN_DSN="$(python3 - << 'PY'
-import os, urllib.parse, re, sys
-
-def escape_pgpass(s):
-    if s is None:
-        return ""
-    return str(s).replace("\\", "\\\\").replace(":", "\\:")
-
-raw_url = os.environ.get("DATABASE_URL", "").strip()
-pgpass_path = os.environ.get("MIGRATION_PGPASSFILE", "")
-
-if not raw_url:
-    sys.exit("DATABASE_URL is required but not set.")
-
-user = None
-password = None
-host = None
-port = "5432"
-dbname = ""
-clean_dsn = ""
-
-# Handle URI vs keyword/value connection format
-if raw_url.startswith("postgres://") or raw_url.startswith("postgresql://"):
-    parsed = urllib.parse.urlsplit(raw_url)
-    user = urllib.parse.unquote(parsed.username) if parsed.username else None
-    password = urllib.parse.unquote(parsed.password) if parsed.password else None
-    host = parsed.hostname
-    if parsed.port:
-        port = str(parsed.port)
-    dbname = parsed.path.lstrip("/")
-
-    # Check for ambiguous query parameter credentials
-    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-    if "password" in qs:
-        sys.exit("Ambiguous password in query string: fail closed.")
-
-    # Build sanitized URI without userinfo
-    netloc = host or ""
-    if port and port != "5432":
-        netloc = f"{netloc}:{port}"
-    if user:
-        netloc = f"{urllib.parse.quote(user)}@{netloc}"
-    clean_dsn = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
-else:
-    # Use deterministic libpq state-machine lexer for keyword/value
-    s = raw_url
-    idx = 0
-    n = len(s)
-    tokens = []
-    while idx < n:
-        while idx < n and s[idx].isspace():
-            idx += 1
-        if idx >= n:
-            break
-        keq_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*', s[idx:])
-        if not keq_match:
-            sys.exit(f"Invalid keyword/value connection string at index {idx}")
-        k = keq_match.group(1).lower()
-        idx += keq_match.end()
-        if idx >= n:
-            tokens.append((k, "", "", ""))
-            break
-        if s[idx] == "'":
-            idx += 1
-            val_chars = []
-            while idx < n:
-                c = s[idx]
-                if c == "\\":
-                    idx += 1
-                    if idx >= n:
-                        sys.exit("Unterminated escape sequence in connection string")
-                    val_chars.append(s[idx])
-                    idx += 1
-                elif c == "'":
-                    idx += 1
-                    break
-                else:
-                    val_chars.append(c)
-                    idx += 1
-            if idx < n and not s[idx].isspace():
-                sys.exit("Extraneous character after quoted value in connection string")
-            v = "".join(val_chars)
-            tokens.append((k, v, "quoted", ""))
-        else:
-            val_chars = []
-            while idx < n and not s[idx].isspace():
-                if s[idx] in ("'", '"'):
-                    sys.exit("Unquoted value contains unexpected quote character")
-                val_chars.append(s[idx])
-                idx += 1
-            v = "".join(val_chars)
-            tokens.append((k, v, "unquoted", ""))
-
-    pwd_tokens = [tok for tok in tokens if tok[0] == "password"]
-    if len(pwd_tokens) > 1:
-        sys.exit("Multiple password parameters in connection string: fail closed.")
-    if len(pwd_tokens) == 1:
-        password = pwd_tokens[0][1]
-
-    clean_parts = []
-    for k, v, mode, _ in tokens:
-        if k == "user": user = v
-        elif k == "host": host = v
-        elif k == "port": port = v
-        elif k == "dbname": dbname = v
-        if k != "password":
-            if mode == "quoted":
-                clean_parts.append(f"{k}='{v.replace('\\', '\\\\').replace('\'', '\\\'')}'")
-            else:
-                clean_parts.append(f"{k}={v}")
-    clean_dsn = " ".join(clean_parts)
-
-# Write exact target-specific match to MIGRATION_PGPASSFILE
-entry = f"{escape_pgpass(host or '*')}:{escape_pgpass(port or '5432')}:{escape_pgpass(dbname or '*')}:{escape_pgpass(user or '*')}:{escape_pgpass(password or '')}\n"
-with open(pgpass_path, "w") as f:
-    f.write(entry)
-
-orig_pgpass = os.environ.get("ORIGINAL_PGPASSFILE", "")
-if orig_pgpass and os.path.isfile(orig_pgpass):
-    with open(orig_pgpass, "r") as src, open(pgpass_path, "a") as dst:
-        dst.write(src.read())
-
-print(clean_dsn)
-PY
-)"
-
-# 3. Scrub raw credential from environment before spawning client
-unset DATABASE_URL
-unset PGPASSWORD
-
-# 4. Execute transactional migration using sanitized DSN and managed PGPASSFILE
-PGPASSFILE="$MIGRATION_PGPASSFILE" psql "$MIGRATION_CLEAN_DSN" \
-  -v ON_ERROR_STOP=1 \
-  -f config/migrations/20261029_backend_durability.up.sql
-
-echo "==> Production durability migration successfully executed without process credential leakage."
+# Execute canonical migration operator helper (DATABASE_URL is scrubbed from child process)
+./scripts/apply-durability-migration.sh
 ```
+
+*(Note: The migration operator helper is version-controlled and qualified with 23 automated tests in `scripts/test-migration-operator.sh`.)*
 
 *Raw SQL equivalent (for execution in an admin SQL console):*
 ```sql
