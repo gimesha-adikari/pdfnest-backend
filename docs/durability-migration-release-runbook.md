@@ -1067,10 +1067,173 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 
 ## 5. Phase 3: Transactional Migration Execution
 
-Execute the verified idempotent script `config/migrations/20261029_backend_durability.up.sql` inside a single transaction:
+Execute the verified idempotent script `config/migrations/20261029_backend_durability.up.sql` inside a single transaction.
+
+> [!IMPORTANT]
+> **Production Credential Boundary Protection:**
+> Passwords must **never** be passed in process command-line arguments (neither via `psql "$DATABASE_URL"` nor `-d "password=..."`). Command arguments are visible in process tables (`ps`, `/proc/*/cmdline`) and system monitoring.
+> Use the audited libpq `PGPASSFILE` procedure below to extract credentials safely into a temporary, permission-restricted file (mode `0600`) and execute `psql` using a sanitized DSN without embedded secrets:
 
 ```bash
-psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f config/migrations/20261029_backend_durability.up.sql
+# -----------------------------------------------------------------------------
+# Credential-Safe Production Migration Execution Procedure
+# -----------------------------------------------------------------------------
+set -euo pipefail
+
+# 1. Allocate process-scoped, permission-restricted PGPASSFILE (mode 0600)
+MIGRATION_PGPASSFILE="$(mktemp /tmp/platen-migration-pgpass-XXXXXX)"
+touch "$MIGRATION_PGPASSFILE"
+chmod 600 "$MIGRATION_PGPASSFILE"
+ORIGINAL_PGPASSFILE="${PGPASSFILE:-}"
+export MIGRATION_PGPASSFILE
+export ORIGINAL_PGPASSFILE
+
+# Guarantee cleanup of managed PGPASSFILE across both success and failure paths
+cleanup_migration_pgpass() {
+  if [ -n "${MIGRATION_PGPASSFILE:-}" ] && [ -f "$MIGRATION_PGPASSFILE" ]; then
+    rm -f "$MIGRATION_PGPASSFILE"
+  fi
+}
+trap cleanup_migration_pgpass EXIT INT TERM
+
+# 2. Parse DATABASE_URL safely using the audited libpq state-machine lexer,
+#    extract credentials into MIGRATION_PGPASSFILE, and obtain sanitized DSN
+MIGRATION_CLEAN_DSN="$(python3 - << 'PY'
+import os, urllib.parse, re, sys
+
+def escape_pgpass(s):
+    if s is None:
+        return ""
+    return str(s).replace("\\", "\\\\").replace(":", "\\:")
+
+raw_url = os.environ.get("DATABASE_URL", "").strip()
+pgpass_path = os.environ.get("MIGRATION_PGPASSFILE", "")
+
+if not raw_url:
+    sys.exit("DATABASE_URL is required but not set.")
+
+user = None
+password = None
+host = None
+port = "5432"
+dbname = ""
+clean_dsn = ""
+
+# Handle URI vs keyword/value connection format
+if raw_url.startswith("postgres://") or raw_url.startswith("postgresql://"):
+    parsed = urllib.parse.urlsplit(raw_url)
+    user = urllib.parse.unquote(parsed.username) if parsed.username else None
+    password = urllib.parse.unquote(parsed.password) if parsed.password else None
+    host = parsed.hostname
+    if parsed.port:
+        port = str(parsed.port)
+    dbname = parsed.path.lstrip("/")
+
+    # Check for ambiguous query parameter credentials
+    qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if "password" in qs:
+        sys.exit("Ambiguous password in query string: fail closed.")
+
+    # Build sanitized URI without userinfo
+    netloc = host or ""
+    if port and port != "5432":
+        netloc = f"{netloc}:{port}"
+    if user:
+        netloc = f"{urllib.parse.quote(user)}@{netloc}"
+    clean_dsn = urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+else:
+    # Use deterministic libpq state-machine lexer for keyword/value
+    s = raw_url
+    idx = 0
+    n = len(s)
+    tokens = []
+    while idx < n:
+        while idx < n and s[idx].isspace():
+            idx += 1
+        if idx >= n:
+            break
+        keq_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*', s[idx:])
+        if not keq_match:
+            sys.exit(f"Invalid keyword/value connection string at index {idx}")
+        k = keq_match.group(1).lower()
+        idx += keq_match.end()
+        if idx >= n:
+            tokens.append((k, "", "", ""))
+            break
+        if s[idx] == "'":
+            idx += 1
+            val_chars = []
+            while idx < n:
+                c = s[idx]
+                if c == "\\":
+                    idx += 1
+                    if idx >= n:
+                        sys.exit("Unterminated escape sequence in connection string")
+                    val_chars.append(s[idx])
+                    idx += 1
+                elif c == "'":
+                    idx += 1
+                    break
+                else:
+                    val_chars.append(c)
+                    idx += 1
+            if idx < n and not s[idx].isspace():
+                sys.exit("Extraneous character after quoted value in connection string")
+            v = "".join(val_chars)
+            tokens.append((k, v, "quoted", ""))
+        else:
+            val_chars = []
+            while idx < n and not s[idx].isspace():
+                if s[idx] in ("'", '"'):
+                    sys.exit("Unquoted value contains unexpected quote character")
+                val_chars.append(s[idx])
+                idx += 1
+            v = "".join(val_chars)
+            tokens.append((k, v, "unquoted", ""))
+
+    pwd_tokens = [tok for tok in tokens if tok[0] == "password"]
+    if len(pwd_tokens) > 1:
+        sys.exit("Multiple password parameters in connection string: fail closed.")
+    if len(pwd_tokens) == 1:
+        password = pwd_tokens[0][1]
+
+    clean_parts = []
+    for k, v, mode, _ in tokens:
+        if k == "user": user = v
+        elif k == "host": host = v
+        elif k == "port": port = v
+        elif k == "dbname": dbname = v
+        if k != "password":
+            if mode == "quoted":
+                clean_parts.append(f"{k}='{v.replace('\\', '\\\\').replace('\'', '\\\'')}'")
+            else:
+                clean_parts.append(f"{k}={v}")
+    clean_dsn = " ".join(clean_parts)
+
+# Write exact target-specific match to MIGRATION_PGPASSFILE
+entry = f"{escape_pgpass(host or '*')}:{escape_pgpass(port or '5432')}:{escape_pgpass(dbname or '*')}:{escape_pgpass(user or '*')}:{escape_pgpass(password or '')}\n"
+with open(pgpass_path, "w") as f:
+    f.write(entry)
+
+orig_pgpass = os.environ.get("ORIGINAL_PGPASSFILE", "")
+if orig_pgpass and os.path.isfile(orig_pgpass):
+    with open(orig_pgpass, "r") as src, open(pgpass_path, "a") as dst:
+        dst.write(src.read())
+
+print(clean_dsn)
+PY
+)"
+
+# 3. Scrub raw credential from environment before spawning client
+unset DATABASE_URL
+unset PGPASSWORD
+
+# 4. Execute transactional migration using sanitized DSN and managed PGPASSFILE
+PGPASSFILE="$MIGRATION_PGPASSFILE" psql "$MIGRATION_CLEAN_DSN" \
+  -v ON_ERROR_STOP=1 \
+  -f config/migrations/20261029_backend_durability.up.sql
+
+echo "==> Production durability migration successfully executed without process credential leakage."
 ```
 
 *Raw SQL equivalent (for execution in an admin SQL console):*
@@ -1222,21 +1385,31 @@ ORDER BY t.relname, i.relname;
 
 ---
 
-## 7. Phase 5: Ordered Service Deployment & Health Verification
+## 7. Phase 5: Coordinated Release Sequence & Health Verification
 
-Once the database migration is confirmed:
+The authoritative release sequence coordinates Worker PR #13, the transactional durability migration, and Backend PR #47:
 
-1. **Deploy Worker First:** Deploy the paired Worker candidate (PR #13) on Railway services `pdfnest-worker` and `alert-benevolence`.
-   - Worker PR #13 defaults `dedup_scope="global"` for legacy callers, ensuring uninterrupted operation with existing Backend traffic.
-2. **Deploy Backend Second:** Deploy the combined Backend candidate (PR #47).
-3. **Verify Startup Gate:** Check application container logs to ensure `ValidateBackendDurabilitySchema` passes without warnings or panics.
-4. **Verify Health Endpoints:**
-   ```bash
-   curl -s -i https://<backend-host>/healthz
-   # Expected: HTTP/1.1 200 OK
-   curl -s -i https://<backend-host>/api/health
-   # Expected: HTTP/1.1 200 OK with database: "healthy"
-   ```
+1. **Step 1: Production Preflight & Rehearsal Sign-Off:** Complete all Phase 1 and Phase 2 preflight checks, verify 36/36 rehearsal checks pass on isolated PostgreSQL, confirm separate key custody, and obtain explicit owner authorization.
+2. **Step 2: Deploy Worker Candidate (PR #13) Prior to Migration:** Deploy Worker PR #13 to Railway services `pdfnest-worker` and `alert-benevolence`.
+   - *Backward Compatibility:* Worker PR #13 defaults `dedup_scope="global"` for legacy callers, ensuring uninterrupted operation with existing running Backend (`40dfe66886e7c7c5bc3f522e4ca5fcd55e669a02`) traffic.
+3. **Step 3: Verify Worker Health & Compatibility:**
+   - Confirm Worker `/health/ready` returns `HTTP 200 OK` with all subsystems ready (`redis`, `r2`, `actor`, and OCR binaries).
+   - Confirm existing historical Backend traffic, preview generation, and async tasks continue without disruption.
+4. **Step 4: Execute Transactional Durability Migration:** Execute Phase 3 using the credential-safe `PGPASSFILE` procedure.
+5. **Step 5: Verify Durability Schema Postconditions:** Execute Phase 4 catalog checks to verify marker `20261029_backend_durability_v1` and all 12 valid indexes.
+6. **Step 6: Deploy Backend Candidate (PR #47):** Deploy Backend PR #47 to Railway service `pdfnest-backend`.
+   - Container startup executes `ValidateBackendDurabilitySchema` and validates all durability structures read-only.
+   - Backend activates HMAC-SHA256 `dedup_scope` transmission to Worker endpoints.
+7. **Step 7: Post-Deployment Verification:**
+   - Verify Backend health endpoints:
+     ```bash
+     curl -s -i https://<backend-host>/healthz
+     # Expected: HTTP/1.1 200 OK
+     curl -s -i https://<backend-host>/api/health
+     # Expected: HTTP/1.1 200 OK with status: "healthy"
+     ```
+   - Verify cross-user preview-session owner isolation across distinct guest and user tokens.
+   - Verify async task completion, durable token downloads, and billing reservation workflows.
 
 ---
 
