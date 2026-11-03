@@ -32,9 +32,16 @@
 #      executable's independent absence verification
 #  20. Successful teardown confirms database absence and exits successfully
 #  21. Production credential safety: authenticated connection with canary password (URI format)
-#  22. Production wrong-password rejection & credential-file cleanup
+#  22. Production wrong-password rejection & credential cleanup
 #  23. Production credential boundary across failed rehearsal teardown (exit 21 + containment)
 #  24. Production credential safety with keyword/value DSN format
+#  25. URI query-parameter credentials & clean DSN argument sanitization
+#  26. Ambiguous & malformed credential specifications fail closed
+#  27. Cross-target wildcard elimination: identical usernames with distinct target passwords
+#  28. Cross-target credential mismatch rejection: negative cross-authentication proof
+#  29. Preexisting PGPASSFILE safe preservation & invalid file path rejection
+#  30. Subprocess environment scrubbing & ambient PGPASSWORD neutralization
+#  31. Special-character handling: passwords containing colons, backslashes, and symbols
 # -----------------------------------------------------------------------------
 set -euo pipefail
 
@@ -71,8 +78,12 @@ trap cleanup_all EXIT INT TERM
 echo "==> Initializing simulated production PostgreSQL instance (port 55470)..."
 "$bindir/initdb" -D "$test_root/prod_data" -A trust -U platen_prod --encoding=UTF8 >"$test_root/prod_init.log" 2>&1
 
-# Require password authentication specifically for platen_auth_prod_operator
-echo "local all platen_auth_prod_operator md5" | cat - "$test_root/prod_data/pg_hba.conf" > "$test_root/prod_data/pg_hba.conf.tmp"
+# Require password authentication specifically for authenticated production roles
+cat << 'EOF' | cat - "$test_root/prod_data/pg_hba.conf" > "$test_root/prod_data/pg_hba.conf.tmp"
+local all platen_auth_prod_operator md5
+local all platen_shared_operator md5
+local all platen_special_operator md5
+EOF
 mv "$test_root/prod_data/pg_hba.conf.tmp" "$test_root/prod_data/pg_hba.conf"
 
 "$bindir/pg_ctl" -D "$test_root/prod_data" -l "$test_root/prod.log" -o "-h '' -k $test_root -p 55470 -F" -w start >/dev/null
@@ -121,16 +132,28 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO prod_read_only;
 
 -- 3. Authenticated production operator with distinct canary password
 CREATE ROLE platen_auth_prod_operator LOGIN PASSWORD 'CanaryProdSecret_88412!' SUPERUSER;
+-- 4. Shared operator with distinct production password for cross-target isolation testing (nonprivileged read-only on prod)
+CREATE ROLE platen_shared_operator LOGIN PASSWORD 'ProdCanary_SharedUser_111!';
+GRANT USAGE ON SCHEMA public TO platen_shared_operator;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO platen_shared_operator;
+-- 5. Special-character operator with colons and backslashes in password
+CREATE ROLE platen_special_operator LOGIN PASSWORD $tag$Canary:Spec\ial:Pass\\88412!#@$tag$ SUPERUSER;
 EOF
 
 CANARY_PROD_PASSWORD="CanaryProdSecret_88412!"
+CANARY_PROD_SHARED_PASSWORD="ProdCanary_SharedUser_111!"
+CANARY_REHEARSAL_SHARED_PASSWORD="RehearsalCanary_SharedUser_222!"
+CANARY_SPECIAL_PASSWORD='Canary:Spec\ial:Pass\\88412!#@'
 PROD_AUTH_URL="postgresql://platen_auth_prod_operator:${CANARY_PROD_PASSWORD}@/pdfnest_production?host=$test_root&port=55470&sslmode=disable"
 
 echo "==> Initializing separate disposable rehearsal PostgreSQL instance (port 55471)..."
 "$bindir/initdb" -D "$test_root/rehearsal_data" -A trust -U platen_rehearsal_operator --encoding=UTF8 >"$test_root/rehearsal_init.log" 2>&1
 
-# Require password authentication specifically for platen_auth_rehearsal_operator
-echo "local all platen_auth_rehearsal_operator md5" | cat - "$test_root/rehearsal_data/pg_hba.conf" > "$test_root/rehearsal_data/pg_hba.conf.tmp"
+# Require password authentication specifically for authenticated rehearsal roles
+cat << 'EOF' | cat - "$test_root/rehearsal_data/pg_hba.conf" > "$test_root/rehearsal_data/pg_hba.conf.tmp"
+local all platen_auth_rehearsal_operator md5
+local all platen_shared_operator md5
+EOF
 mv "$test_root/rehearsal_data/pg_hba.conf.tmp" "$test_root/rehearsal_data/pg_hba.conf"
 
 "$bindir/pg_ctl" -D "$test_root/rehearsal_data" -l "$test_root/rehearsal.log" -o "-h '' -k $test_root -p 55471 -F" -w start >/dev/null
@@ -143,6 +166,8 @@ CREATE ROLE prod_write_operator LOGIN CREATEDB;
 CREATE ROLE prod_read_only LOGIN;
 -- Authenticated role with password for credential safety verification
 CREATE ROLE platen_auth_rehearsal_operator LOGIN PASSWORD 'SecretRehearsalPass_12345!' CREATEDB;
+-- Shared operator with distinct rehearsal password for cross-target isolation testing
+CREATE ROLE platen_shared_operator LOGIN PASSWORD 'RehearsalCanary_SharedUser_222!' CREATEDB;
 EOF
 
 # Pre-provision independent recovery key file (Separate Custody)
@@ -160,12 +185,24 @@ real_psql="$bindir/psql"
 cat > "$harness_bin/psql" << 'EOF'
 #!/usr/bin/env bash
 if [ -n "${TEST_ASSERT_NO_SECRETS:-}" ]; then
+  # 1. Command argument leakage check (argv)
   for arg in "$@"; do
-    if [[ "$arg" == *"CanaryProdSecret"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
+    if [[ "$arg" == *"Canary"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
       echo "FATAL HARNESS ERROR: Secret leaked in psql argument: $arg" >&2
       exit 99
     fi
   done
+  # 2. Child environment leakage check (env)
+  for var in DATABASE_URL REHEARSAL_PGPASSWORD PGPASSWORD; do
+    if [ -n "${!var:-}" ]; then
+      echo "FATAL HARNESS ERROR: Secret variable $var present in psql child environment!" >&2
+      exit 98
+    fi
+  done
+  if env | grep -E -q "Canary|SecretRehearsalPass"; then
+    echo "FATAL HARNESS ERROR: Secret value leaked in psql child environment!" >&2
+    exit 98
+  fi
 fi
 if [ -n "${TEST_INJECT_PSQL_FAILURE:-}" ]; then
   # Detect if this invocation is the privilege check (inspects parameters)
@@ -189,12 +226,24 @@ chmod +x "$harness_bin/psql"
 cat > "$harness_bin/pg_dump" << 'EOF'
 #!/usr/bin/env bash
 if [ -n "${TEST_ASSERT_NO_SECRETS:-}" ]; then
+  # 1. Command argument leakage check (argv)
   for arg in "$@"; do
-    if [[ "$arg" == *"CanaryProdSecret"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
+    if [[ "$arg" == *"Canary"* ]] || [[ "$arg" == *"SecretRehearsalPass"* ]] || [[ "$arg" == *"password="* ]]; then
       echo "FATAL HARNESS ERROR: Secret leaked in pg_dump argument: $arg" >&2
       exit 99
     fi
   done
+  # 2. Child environment leakage check (env)
+  for var in DATABASE_URL REHEARSAL_PGPASSWORD PGPASSWORD; do
+    if [ -n "${!var:-}" ]; then
+      echo "FATAL HARNESS ERROR: Secret variable $var present in pg_dump child environment!" >&2
+      exit 98
+    fi
+  done
+  if env | grep -E -q "Canary|SecretRehearsalPass"; then
+    echo "FATAL HARNESS ERROR: Secret value leaked in pg_dump child environment!" >&2
+    exit 98
+  fi
 fi
 real_bin="$(cat "$0.real_bin")"
 exec "$real_bin" "$@"
@@ -1217,7 +1266,303 @@ assert_no_managed_pgpassfile
 assert_recovery_assets_protected "$prod_dsn_backup_dir"
 echo "PASSED: Keyword/value production DSN with canary password succeeded; 0 secrets leaked; PGPASSFILE cleaned."
 
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 25: URI Query-Parameter Credentials & DSN Sanitization
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 25] URI query-parameter credentials and DSN argument sanitization..."
+prod_query_backup_dir="$test_root/prod_query_backups"
+prod_query_url="postgresql://platen_auth_prod_operator@/pdfnest_production?host=$test_root&port=55470&password=$CANARY_PROD_PASSWORD&sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$prod_query_url" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_query_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Expected exit 0 with query-parameter password, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "$CANARY_PROD_PASSWORD"; then
+  echo "FAILED: Canary password leaked in output with query-parameter password!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_query_backup_dir"
+echo "PASSED: Query-parameter password correctly sanitized; 0 secrets in args (exit 99) or env (exit 98); rehearsal succeeded."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 26: Ambiguous and Malformed Credential Specifications Fail Closed
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 26] Ambiguous and malformed credential specifications fail closed..."
+# 26a: Password in both userinfo and query string
+set +e
+out_ambig1=$(DATABASE_URL="postgresql://platen_auth_prod_operator:Pass1@/pdfnest_production?host=$test_root&port=55470&password=Pass2&sslmode=disable" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_ambig1=$?
+set -e
+if [ "$rc_ambig1" -eq 0 ]; then
+  echo "FAILED: Ambiguous password (userinfo + query) was accepted!" >&2; exit 1
+fi
+echo "$out_ambig1" | grep -q "Ambiguous credentials: password specified in both userinfo and query parameters" || {
+  echo "FAILED: Expected ambiguous credentials error message. Got: $out_ambig1" >&2; exit 1
+}
+
+# 26b: Multiple query passwords
+set +e
+out_ambig2=$(DATABASE_URL="postgresql://platen_auth_prod_operator@/pdfnest_production?host=$test_root&port=55470&password=P1&password=P2&sslmode=disable" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_ambig2=$?
+set -e
+if [ "$rc_ambig2" -eq 0 ]; then
+  echo "FAILED: Multiple query passwords were accepted!" >&2; exit 1
+fi
+echo "$out_ambig2" | grep -q "Ambiguous credentials: multiple password query parameters" || {
+  echo "FAILED: Expected multiple password query error. Got: $out_ambig2" >&2; exit 1
+}
+
+# 26c: Multiple DSN passwords
+set +e
+out_ambig3=$(DATABASE_URL="host=$test_root port=55470 user=platen_auth_prod_operator password=P1 password=P2 dbname=pdfnest_production" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_ambig3=$?
+set -e
+if [ "$rc_ambig3" -eq 0 ]; then
+  echo "FAILED: Multiple DSN passwords were accepted!" >&2; exit 1
+fi
+echo "$out_ambig3" | grep -q "Ambiguous credentials: multiple password parameters in DSN" || {
+  echo "FAILED: Expected multiple DSN password error. Got: $out_ambig3" >&2; exit 1
+}
+
+# 26d: Malformed format
+set +e
+out_malformed=$(DATABASE_URL="invalid_unsupported_scheme_without_params" \
+  REHEARSAL_PGHOST="$test_root" REHEARSAL_PGUSER="platen_rehearsal_operator" REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_malformed=$?
+set -e
+if [ "$rc_malformed" -eq 0 ]; then
+  echo "FAILED: Malformed DATABASE_URL format was accepted!" >&2; exit 1
+fi
+echo "$out_malformed" | grep -q "Unsupported or ambiguous DATABASE_URL format" || {
+  echo "FAILED: Expected unsupported format error. Got: $out_malformed" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+echo "PASSED: Ambiguous and malformed credential specifications cleanly rejected (fail-closed)."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 27: Cross-Target Wildcard Elimination (Identical Usernames, Distinct Passwords)
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 27] Cross-target wildcard elimination: identical usernames with distinct target passwords..."
+prod_shared_backup_dir="$test_root/prod_shared_backups"
+PROD_SHARED_URL="postgresql://platen_shared_operator:${CANARY_PROD_SHARED_PASSWORD}@/pdfnest_production?host=$test_root&port=55470&sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$PROD_SHARED_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_shared_operator" \
+  REHEARSAL_PGPASSWORD="$CANARY_REHEARSAL_SHARED_PASSWORD" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_shared_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Rehearsal with identical username failed, got exit code $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q -E "$CANARY_PROD_SHARED_PASSWORD|$CANARY_REHEARSAL_SHARED_PASSWORD"; then
+  echo "FAILED: Shared-user canary passwords leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_shared_backup_dir"
+echo "PASSED: Target-specific matching succeeded for identical usernames with distinct passwords (0 wildcards)."
+
+# -----------------------------------------------------------------------------
+# NEGATIVE TEST 28: Cross-Target Credential Mismatch Rejection
+# -----------------------------------------------------------------------------
+echo "==> [Negative Test 28] Cross-target credential mismatch rejection (negative cross-authentication)..."
+# 28a: Rehearsal given production password
+set +e
+out_mismatch_r=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="$PROD_SHARED_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_shared_operator" \
+  REHEARSAL_PGPASSWORD="$CANARY_PROD_SHARED_PASSWORD" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_mismatch_r=$?
+set -e
+if [ "$rc_mismatch_r" -eq 0 ]; then
+  echo "FAILED: Rehearsal target accepted production password unexpectedly!" >&2; exit 1
+fi
+echo "$out_mismatch_r" | grep -q "Failed to connect to rehearsal maintenance instance" || {
+  echo "FAILED: Expected rehearsal connection refusal on mismatched password. Got: $out_mismatch_r" >&2; exit 1
+}
+
+# 28b: Production given rehearsal password
+set +e
+out_mismatch_p=$(env -i PATH="$harness_bin:$PATH" \
+  DATABASE_URL="postgresql://platen_shared_operator:${CANARY_REHEARSAL_SHARED_PASSWORD}@/pdfnest_production?host=$test_root&port=55470&sslmode=disable" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_shared_operator" \
+  REHEARSAL_PGPASSWORD="$CANARY_REHEARSAL_SHARED_PASSWORD" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_mismatch_p=$?
+set -e
+if [ "$rc_mismatch_p" -eq 0 ]; then
+  echo "FAILED: Production target accepted rehearsal password unexpectedly!" >&2; exit 1
+fi
+if [ "$rc_mismatch_p" -ne 4 ]; then
+  echo "FAILED: Expected exit 4 on production authentication failure, got $rc_mismatch_p. Output: $out_mismatch_p" >&2; exit 1
+fi
+assert_no_managed_pgpassfile
+echo "PASSED: Cross-target credential mismatch rejected; production credentials cannot authenticate rehearsal and vice versa."
+
+# -----------------------------------------------------------------------------
+# POSITIVE & NEGATIVE TEST 29: Preexisting PGPASSFILE Safe Preservation
+# -----------------------------------------------------------------------------
+echo "==> [Test 29] Preexisting PGPASSFILE safe preservation and invalid path rejection..."
+ambient_pgpass_file="$test_root/ambient_operator.pgpass"
+echo "ambient_host:5432:*:ambient_operator:ambient_secret_pass" > "$ambient_pgpass_file"
+chmod 600 "$ambient_pgpass_file"
+
+# 29a: Valid ambient PGPASSFILE is preserved without mutation
+set +e
+out_ambient=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  PGPASSFILE="$ambient_pgpass_file" \
+  DATABASE_URL="$PROD_AUTH_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_ambient=$?
+set -e
+if [ "$rc_ambient" -ne 0 ]; then
+  echo "FAILED: Rehearsal with ambient PGPASSFILE failed, got $rc_ambient. Output: $out_ambient" >&2; exit 1
+fi
+if [ ! -f "$ambient_pgpass_file" ]; then
+  echo "FAILED: Original ambient PGPASSFILE was deleted by rehearsal cleanup!" >&2; exit 1
+fi
+if ! grep -qF "ambient_host:5432:*:ambient_operator:ambient_secret_pass" "$ambient_pgpass_file"; then
+  echo "FAILED: Original ambient PGPASSFILE was modified or corrupted!" >&2; exit 1
+fi
+
+# 29b: Invalid / Nonexistent PGPASSFILE fails closed
+set +e
+out_bad_pgpass=$(env -i PATH="$harness_bin:$PATH" \
+  PGPASSFILE="$test_root/definitely_nonexistent_pgpass_file.pgpass" \
+  DATABASE_URL="$PROD_AUTH_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_bad_pgpass=$?
+set -e
+if [ "$rc_bad_pgpass" -eq 0 ]; then
+  echo "FAILED: Execution succeeded despite invalid/nonexistent PGPASSFILE!" >&2; exit 1
+fi
+echo "$out_bad_pgpass" | grep -q "Specified PGPASSFILE does not exist or is not a regular file" || {
+  echo "FAILED: Expected error message for nonexistent PGPASSFILE. Got: $out_bad_pgpass" >&2; exit 1
+}
+assert_no_managed_pgpassfile
+echo "PASSED: Ambient PGPASSFILE safely preserved without mutation; invalid PGPASSFILE fails closed."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 30: Subprocess Environment Scrubbing & Ambient PGPASSWORD Neutralization
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 30] Subprocess environment scrubbing and ambient PGPASSWORD neutralization..."
+set +e
+out_pgpassword=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  PGPASSWORD="HostileAmbientPassword_99999!" \
+  DATABASE_URL="$PROD_AUTH_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc_pgpassword=$?
+set -e
+if [ "$rc_pgpassword" -ne 0 ]; then
+  echo "FAILED: Ambient PGPASSWORD caused execution failure (was not scrubbed)! Got $rc_pgpassword. Output: $out_pgpassword" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+echo "PASSED: Ambient PGPASSWORD neutralized; child environment verified clean (exit 98 check passed)."
+
+# -----------------------------------------------------------------------------
+# POSITIVE TEST 31: Special Characters in Passwords and Usernames
+# -----------------------------------------------------------------------------
+echo "==> [Positive Test 31] Special characters in passwords (colons, backslashes, symbols)..."
+prod_special_backup_dir="$test_root/prod_special_backups"
+# Password contains colons, backslashes, and symbols: Canary:Spec\ial:Pass\\88412!#@
+# URL encoded for URI: Canary%3ASpec%5Cial%3APass%5C%5C88412%21%23%40
+PROD_SPECIAL_URL="postgresql://platen_special_operator:Canary%3ASpec%5Cial%3APass%5C%5C88412%21%23%40@/pdfnest_production?host=$test_root&port=55470&sslmode=disable"
+
+set +e
+output=$(env -i PATH="$harness_bin:$PATH" \
+  TEST_ASSERT_NO_SECRETS=1 \
+  DATABASE_URL="$PROD_SPECIAL_URL" \
+  REHEARSAL_PGHOST="$test_root" \
+  REHEARSAL_PGPORT="55471" \
+  REHEARSAL_PGUSER="platen_auth_rehearsal_operator" \
+  REHEARSAL_PGPASSWORD="SecretRehearsalPass_12345!" \
+  REHEARSAL_NONPRODUCTION_CONFIRMED="true" \
+  BACKUP_PASSPHRASE_FILE="$PROD_RECOVERY_KEY" \
+  BACKUP_DIR="$prod_special_backup_dir" \
+  "$repo_root/scripts/run-durability-rehearsal.sh" 2>&1)
+rc=$?
+set -e
+
+if [ "$rc" -ne 0 ]; then
+  echo "FAILED: Special character password execution failed, got $rc. Output: $output" >&2
+  exit 1
+fi
+if echo "$output" | grep -q "Canary:Spec"; then
+  echo "FAILED: Special canary password leaked in output!" >&2
+  exit 1
+fi
+assert_no_managed_pgpassfile
+assert_recovery_assets_protected "$prod_special_backup_dir"
+echo "PASSED: Special-character password (colons, backslashes) properly escaped in .pgpass; authenticated successfully."
+
 echo ""
 echo "================================================================================"
-echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (24/24) PASSED SUCCESSFULLY!"
+echo "ALL REHEARSAL RUNBOOK QUALIFICATION CHECKS (31/31) PASSED SUCCESSFULLY!"
 echo "================================================================================"

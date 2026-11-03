@@ -174,132 +174,238 @@ REHEARSAL_PGPASSWORD="${REHEARSAL_PGPASSWORD:-}"
 # Passwords must NEVER be passed in command line arguments (DSN parameters or URIs).
 # Both production and rehearsal credentials are managed via a dedicated, permission-
 # restricted PGPASSFILE (mode 0600) scoped to this rehearsal execution.
+ORIGINAL_PGPASSFILE="${PGPASSFILE:-}"
 MANAGED_PGPASSFILE="$(mktemp /tmp/platen-rehearsal-pgpass-XXXXXX)"
 touch "$MANAGED_PGPASSFILE"
 chmod 600 "$MANAGED_PGPASSFILE"
 export MANAGED_PGPASSFILE
-export PGPASSFILE="$MANAGED_PGPASSFILE"
+export ORIGINAL_PGPASSFILE
+export REHEARSAL_PGHOST
+export REHEARSAL_PGPORT
+export REHEARSAL_PGUSER
+export REHEARSAL_PGPASSWORD
 
-# Preserve any preexisting ambient PGPASSFILE entries if present
-if [ -n "${PGPASSFILE:-}" ] && [ -f "$PGPASSFILE" ] && [ "$PGPASSFILE" != "$MANAGED_PGPASSFILE" ]; then
-  cat "$PGPASSFILE" >> "$MANAGED_PGPASSFILE"
-fi
-
-# Sanitize DATABASE_URL: extract production password into MANAGED_PGPASSFILE,
-# preserving all connection options (host, port, dbname, TLS/sslmode parameters).
+# Sanitize DATABASE_URL: extract production and rehearsal credentials into MANAGED_PGPASSFILE,
+# using deterministic target-specific entries (zero cross-target wildcards for host or port),
+# properly escaping libpq special characters (\ and :), sanitizing all URI credential locations,
+# preserving original PGPASSFILE entries with documented fallback precedence, and failing closed
+# on ambiguous or malformed credential specifications.
 PROD_CLEAN_DSN="$(python3 - << 'PY'
 import os, urllib.parse, re, sys
 
+def escape_pgpass(s):
+    if s is None:
+        return ""
+    return str(s).replace("\\", "\\\\").replace(":", "\\:")
+
 raw_url = os.environ.get("DATABASE_URL", "").strip()
 pgpass_path = os.environ.get("MANAGED_PGPASSFILE", "")
+r_host = os.environ.get("REHEARSAL_PGHOST", "").strip()
+r_port = os.environ.get("REHEARSAL_PGPORT", "").strip()
+r_user = os.environ.get("REHEARSAL_PGUSER", "").strip()
+r_pass = os.environ.get("REHEARSAL_PGPASSWORD", "")
+orig_pgpass = os.environ.get("ORIGINAL_PGPASSFILE", "").strip()
 
-def escape_pgpass(s):
-    return s.replace("\\", "\\\\").replace(":", "\\:")
+if not raw_url:
+    sys.stderr.write("FATAL: DATABASE_URL is not set or empty.\n")
+    sys.exit(1)
+
+prod_password = None
+clean_prod_dsn = None
+prod_host = None
+prod_port = None
+prod_dbname = None
+prod_user = None
 
 if raw_url.startswith(("postgres://", "postgresql://")):
-    parsed = urllib.parse.urlsplit(raw_url)
-    password = parsed.password
-    user = parsed.username or "*"
-    host = parsed.hostname or "*"
-    port = str(parsed.port) if parsed.port is not None else "*"
-    dbname = parsed.path.lstrip("/") if parsed.path else "*"
-    if not dbname:
-        dbname = "*"
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Malformed DATABASE_URL URI: {e}\n")
+        sys.exit(1)
+
+    userinfo_pass = urllib.parse.unquote(parsed.password) if parsed.password is not None else None
+    userinfo_user = urllib.parse.unquote(parsed.username) if parsed.username is not None else None
+
+    try:
+        q_list = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Malformed query parameters in DATABASE_URL: {e}\n")
+        sys.exit(1)
+
+    query_passwords = [v for k, v in q_list if k.lower() in ("password", "passwd")]
+    if len(query_passwords) > 1:
+        sys.stderr.write("FATAL: Ambiguous credentials: multiple password query parameters in DATABASE_URL\n")
+        sys.exit(1)
+
+    query_pass = query_passwords[0] if query_passwords else None
+
+    if userinfo_pass is not None and query_pass is not None:
+        sys.stderr.write("FATAL: Ambiguous credentials: password specified in both userinfo and query parameters in DATABASE_URL\n")
+        sys.exit(1)
+
+    prod_password = userinfo_pass if userinfo_pass is not None else query_pass
+
+    query_users = [v for k, v in q_list if k.lower() == "user"]
+    if len(query_users) > 1:
+        sys.stderr.write("FATAL: Ambiguous parameters: multiple user query parameters in DATABASE_URL\n")
+        sys.exit(1)
+    query_user = query_users[0] if query_users else None
+
+    if userinfo_user is not None and query_user is not None and userinfo_user != query_user:
+        sys.stderr.write("FATAL: Ambiguous parameters: conflicting user values in userinfo and query parameters\n")
+        sys.exit(1)
+
+    prod_user = userinfo_user if userinfo_user is not None else query_user
+
+    prod_host = parsed.hostname
+    prod_port = parsed.port
+    prod_dbname = parsed.path.lstrip("/") if parsed.path else None
+
+    q_dict = dict(q_list)
+    if not prod_host and "host" in q_dict:
+        prod_host = q_dict["host"]
+    if prod_port is None and "port" in q_dict:
+        try:
+            prod_port = int(q_dict["port"])
+        except ValueError:
+            sys.stderr.write("FATAL: Invalid port parameter in DATABASE_URL\n")
+            sys.exit(1)
+    if not prod_dbname and "dbname" in q_dict:
+        prod_dbname = q_dict["dbname"]
+
+    # Build clean query removing all password occurrences
+    clean_q_list = [(k, v) for k, v in q_list if k.lower() not in ("password", "passwd")]
+    clean_query = urllib.parse.urlencode(clean_q_list, safe="/:")
 
     host_port = parsed.hostname or ""
     if parsed.port is not None:
         host_port = f"{host_port}:{parsed.port}"
-    if parsed.username:
-        new_user = urllib.parse.quote(parsed.username)
-        new_netloc = f"{new_user}@{host_port}"
+    if userinfo_user:
+        new_user = urllib.parse.quote(userinfo_user)
+        clean_netloc = f"{new_user}@{host_port}"
     else:
-        new_netloc = host_port
+        clean_netloc = host_port
 
-    clean_url = urllib.parse.urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
-
-    if password is not None and pgpass_path:
-        unescaped_user = urllib.parse.unquote(parsed.username) if parsed.username else "*"
-        unescaped_pass = urllib.parse.unquote(password)
-        esc_u = escape_pgpass(unescaped_user)
-        esc_p = escape_pgpass(unescaped_pass)
-
-        q_params = urllib.parse.parse_qs(parsed.query)
-        q_host = q_params.get("host", [None])[0]
-        q_port = q_params.get("port", [None])[0]
-
-        lines = []
-        lines.append(f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
-        if q_host:
-            lines.append(f"{q_host}:{port}:{dbname}:{esc_u}:{esc_p}\n")
-            lines.append(f"{q_host}:*:*:{esc_u}:{esc_p}\n")
-        if host != "*":
-            lines.append(f"{host}:*:{dbname}:{esc_u}:{esc_p}\n")
-            lines.append(f"{host}:*:*:{esc_u}:{esc_p}\n")
-        if port != "*":
-            lines.append(f"*:{port}:{dbname}:{esc_u}:{esc_p}\n")
-            lines.append(f"*:{port}:*:{esc_u}:{esc_p}\n")
-        lines.append(f"*:*:*:{esc_u}:{esc_p}\n")
-
-        with open(pgpass_path, "a", encoding="utf-8") as f:
-            f.writelines(lines)
-
-    sys.stdout.write(clean_url)
+    clean_prod_dsn = urllib.parse.urlunsplit((parsed.scheme, clean_netloc, parsed.path, clean_query, ""))
 
 else:
-    m = re.search(r"(?:^|\s)password=([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
+    # Keyword / value format
+    pw_matches = re.findall(r"(?:^|\s)password\s*=", raw_url)
+    if len(pw_matches) > 1:
+        sys.stderr.write("FATAL: Ambiguous credentials: multiple password parameters in DSN\n")
+        sys.exit(1)
+
+    m = re.search(r"(?:^|\s)password\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", raw_url)
     if m:
         raw_val = m.group(1)
         if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
-            password = raw_val[1:-1]
+            prod_password = raw_val[1:-1]
         else:
-            password = raw_val
-        clean_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
-        clean_dsn = re.sub(r"\s+", " ", clean_dsn)
-
-        def get_k(k):
-            km = re.search(r"(?:^|\s)" + k + r"=([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_dsn)
-            if km:
-                v = km.group(1)
-                if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
-                    return v[1:-1]
-                return v
-            return "*"
-
-        host = get_k("host")
-        port = get_k("port")
-        user = get_k("user")
-        dbname = get_k("dbname")
-
-        if pgpass_path:
-            esc_u = escape_pgpass(user)
-            esc_p = escape_pgpass(password)
-            lines = [
-                f"{host}:{port}:{dbname}:{esc_u}:{esc_p}\n",
-                f"*:{port}:{dbname}:{esc_u}:{esc_p}\n",
-                f"*:*:*:{esc_u}:{esc_p}\n"
-            ]
-            with open(pgpass_path, "a", encoding="utf-8") as f:
-                f.writelines(lines)
-
-        sys.stdout.write(clean_dsn)
+            prod_password = raw_val
+        clean_prod_dsn = (raw_url[:m.start()] + " " + raw_url[m.end():]).strip()
+        clean_prod_dsn = re.sub(r"\s+", " ", clean_prod_dsn)
     else:
-        sys.stdout.write(raw_url)
+        clean_prod_dsn = raw_url
+
+    def get_k(k):
+        km = re.search(r"(?:^|\s)" + k + r"\s*=\s*([^\s'\"]+|'[^']*'|\"[^\"]*\")", clean_prod_dsn)
+        if km:
+            v = km.group(1)
+            if (v.startswith("'") and v.endswith("'")) or (v.startswith('"') and v.endswith('"')):
+                return v[1:-1]
+            return v
+        return None
+
+    prod_host = get_k("host")
+    port_val = get_k("port")
+    if port_val is not None:
+        try:
+            prod_port = int(port_val)
+        except ValueError:
+            sys.stderr.write("FATAL: Invalid port parameter in DSN\n")
+            sys.exit(1)
+    prod_user = get_k("user")
+    prod_dbname = get_k("dbname")
+
+    if not (prod_host or prod_user or prod_dbname):
+        sys.stderr.write("FATAL: Unsupported or ambiguous DATABASE_URL format\n")
+        sys.exit(1)
+
+# Fail closed if password appears anywhere in clean_prod_dsn
+if re.search(r"(?:^|[\s?&])password\s*=", clean_prod_dsn, re.IGNORECASE):
+    sys.stderr.write("FATAL: Failed to sanitize password from production connection parameters\n")
+    sys.exit(1)
+
+# Build deterministic, target-specific .pgpass entries (NO WILDCARDS FOR HOST OR PORT)
+pgpass_lines = []
+
+# 1. Target-Specific Production Entries
+if prod_password is not None:
+    p_u = escape_pgpass(prod_user or "*")
+    p_p = escape_pgpass(prod_password)
+    p_db = escape_pgpass(prod_dbname or "*")
+    p_port = str(prod_port) if prod_port is not None else "5432"
+    p_h = prod_host or "localhost"
+
+    pgpass_lines.append(f"{escape_pgpass(p_h)}:{p_port}:{p_db}:{p_u}:{p_p}\n")
+    if p_h.startswith("/") or p_h.startswith("."):
+        pgpass_lines.append(f"localhost:{p_port}:{p_db}:{p_u}:{p_p}\n")
+    elif p_h in ("localhost", "127.0.0.1"):
+        pgpass_lines.append(f"127.0.0.1:{p_port}:{p_db}:{p_u}:{p_p}\n")
+        pgpass_lines.append(f"localhost:{p_port}:{p_db}:{p_u}:{p_p}\n")
+
+# 2. Target-Specific Rehearsal Entries
+if r_pass:
+    r_u = escape_pgpass(r_user or "*")
+    r_p = escape_pgpass(r_pass)
+    r_port_str = str(r_port) if r_port else "5432"
+    r_h_str = r_host or "localhost"
+
+    pgpass_lines.append(f"{escape_pgpass(r_h_str)}:{r_port_str}:*:{r_u}:{r_p}\n")
+    if r_h_str.startswith("/") or r_h_str.startswith("."):
+        pgpass_lines.append(f"localhost:{r_port_str}:*:{r_u}:{r_p}\n")
+    elif r_h_str in ("localhost", "127.0.0.1"):
+        pgpass_lines.append(f"127.0.0.1:{r_port_str}:*:{r_u}:{r_p}\n")
+        pgpass_lines.append(f"localhost:{r_port_str}:*:{r_u}:{r_p}\n")
+
+# 3. Preserve Preexisting Ambient PGPASSFILE Entries (Documented Fallback Precedence)
+if orig_pgpass:
+    if not os.path.exists(orig_pgpass) or not os.path.isfile(orig_pgpass):
+        sys.stderr.write(f"FATAL: Specified PGPASSFILE does not exist or is not a regular file: {orig_pgpass}\n")
+        sys.exit(1)
+    if not os.access(orig_pgpass, os.R_OK):
+        sys.stderr.write(f"FATAL: Specified PGPASSFILE is not readable: {orig_pgpass}\n")
+        sys.exit(1)
+    try:
+        with open(orig_pgpass, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.strip():
+                    pgpass_lines.append(line if line.endswith("\n") else line + "\n")
+    except Exception as e:
+        sys.stderr.write(f"FATAL: Failed to read existing PGPASSFILE: {e}\n")
+        sys.exit(1)
+
+if pgpass_path:
+    with open(pgpass_path, "w", encoding="utf-8") as f:
+        f.writelines(pgpass_lines)
+
+sys.stdout.write(clean_prod_dsn)
 PY
 )"
+py_status=$?
 
-if [ -z "$PROD_CLEAN_DSN" ]; then
-  echo "FATAL: Failed to parse production database connection parameters from DATABASE_URL." >&2
+if [ $py_status -ne 0 ] || [ -z "$PROD_CLEAN_DSN" ]; then
+  echo "FATAL: Failed to process database connection parameters (exit code: $py_status)." >&2
   exit 1
 fi
 
-# Scrub raw DATABASE_URL from process environment to prevent subprocess inheritance
+# Scrub raw credentials and ambient password variables from process environment
+# to prevent subprocess inheritance and prevent PGPASSWORD from overriding PGPASSFILE.
 unset DATABASE_URL
-
-# Append rehearsal target credentials to MANAGED_PGPASSFILE if provided
-if [ -n "$REHEARSAL_PGPASSWORD" ]; then
-  echo "$REHEARSAL_PGHOST:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
-  echo "*:$REHEARSAL_PGPORT:*:$REHEARSAL_PGUSER:$REHEARSAL_PGPASSWORD" >> "$MANAGED_PGPASSFILE"
-fi
+unset REHEARSAL_PGPASSWORD
+unset PGPASSWORD
+unset ORIGINAL_PGPASSFILE
 
 export PGPASSFILE="$MANAGED_PGPASSFILE"
 
