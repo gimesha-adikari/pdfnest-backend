@@ -109,10 +109,42 @@ fi
 
 MIGRATION_FILE="$CANONICAL_MIGRATION_FILE"
 
-# Target identity expectations (defaults to Railway production database "railway")
+# Target identity expectations (Mandatory for production migration)
 EXPECTED_DATABASE="${EXPECTED_DATABASE:-railway}"
 EXPECTED_USER="${EXPECTED_USER:-}"
 EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="${EXPECTED_CLUSTER_SYSTEM_IDENTIFIER:-}"
+
+# Fail closed if EXPECTED_DATABASE is missing, empty, or malformed
+if [ -z "$EXPECTED_DATABASE" ]; then
+  echo "ERROR: EXPECTED_DATABASE is required but not set." >&2
+  exit 5
+fi
+if ! [[ "$EXPECTED_DATABASE" =~ ^[a-zA-Z0-9_-]{1,63}$ ]]; then
+  echo "ERROR: EXPECTED_DATABASE has invalid format: '$EXPECTED_DATABASE'." >&2
+  exit 5
+fi
+
+# Fail closed if EXPECTED_USER is missing, empty, or malformed
+if [ -z "$EXPECTED_USER" ]; then
+  echo "ERROR: EXPECTED_USER is mandatory for production migration execution but not set." >&2
+  echo "Set EXPECTED_USER=<target_role> (e.g. postgres) to authorize execution." >&2
+  exit 5
+fi
+if ! [[ "$EXPECTED_USER" =~ ^[a-zA-Z0-9_-]{1,63}$ ]]; then
+  echo "ERROR: EXPECTED_USER has invalid format: '$EXPECTED_USER'." >&2
+  exit 5
+fi
+
+# Fail closed if EXPECTED_CLUSTER_SYSTEM_IDENTIFIER is missing, empty, or malformed
+if [ -z "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" ]; then
+  echo "ERROR: EXPECTED_CLUSTER_SYSTEM_IDENTIFIER is mandatory for production migration execution but not set." >&2
+  echo "Set EXPECTED_CLUSTER_SYSTEM_IDENTIFIER=<uint64_sysid> to authorize execution." >&2
+  exit 5
+fi
+if ! [[ "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" =~ ^[1-9][0-9]{0,19}$ ]]; then
+  echo "ERROR: EXPECTED_CLUSTER_SYSTEM_IDENTIFIER has invalid format (expected positive uint64): '$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER'." >&2
+  exit 5
+fi
 
 # -----------------------------------------------------------------------------
 # Allocate Permission-Restricted PGPASSFILE
@@ -233,13 +265,15 @@ else:
             idx += 1
         if idx >= n:
             break
+        tok_start = idx
         keq_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*', s[idx:])
         if not keq_match:
-            sys.exit(f"Invalid keyword/value connection string syntax at position {idx}")
+            sys.exit("Invalid keyword/value connection string syntax at position %d" % idx)
         k = keq_match.group(1).lower()
         idx += keq_match.end()
         if idx >= n:
-            tokens.append((k, "", "unquoted"))
+            raw_tok = s[tok_start:idx]
+            tokens.append((k, "", raw_tok, "unquoted"))
             break
         if s[idx] == "'":
             idx += 1
@@ -265,16 +299,25 @@ else:
             if idx < n and not s[idx].isspace():
                 sys.exit("Extraneous character after closing quote in connection string: fail closed.")
             v = "".join(val_chars)
-            tokens.append((k, v, "quoted"))
+            raw_tok = s[tok_start:idx]
+            tokens.append((k, v, raw_tok, "quoted"))
         else:
             val_chars = []
             while idx < n and not s[idx].isspace():
                 if s[idx] in ("'", '"'):
                     sys.exit("Unquoted value contains unexpected quote character: fail closed.")
-                val_chars.append(s[idx])
-                idx += 1
+                if s[idx] == "\\":
+                    idx += 1
+                    if idx >= n:
+                        sys.exit("Unterminated escape sequence inside unquoted value: fail closed.")
+                    val_chars.append(s[idx])
+                    idx += 1
+                else:
+                    val_chars.append(s[idx])
+                    idx += 1
             v = "".join(val_chars)
-            tokens.append((k, v, "unquoted"))
+            raw_tok = s[tok_start:idx]
+            tokens.append((k, v, raw_tok, "unquoted"))
 
     pwd_tokens = [tok for tok in tokens if tok[0] == "password"]
     if len(pwd_tokens) > 1:
@@ -282,19 +325,14 @@ else:
     if len(pwd_tokens) == 1:
         password = pwd_tokens[0][1]
 
-    clean_parts = []
-    for k, v, mode in tokens:
+    for k, v, raw_tok, mode in tokens:
         if k in ("user", "username"): user = v
         elif k == "host": host = v
         elif k == "port": port = v
         elif k in ("dbname", "database"): dbname = v
-        if k != "password":
-            if mode == "quoted":
-                clean_parts.append(f"{k}='{v.replace('\\', '\\\\').replace('\'', '\\\'')}'")
-            else:
-                clean_parts.append(f"{k}={v}")
 
-    clean_dsn = " ".join(clean_parts)
+    clean_tokens = [tok for tok in tokens if tok[0] != "password"]
+    clean_dsn = " ".join(tok[2] for tok in clean_tokens)
 
 # Strict fail-closed validation of required connection attributes
 if not host:
@@ -307,7 +345,13 @@ if not port:
     sys.exit("Target port is missing in connection specification: wildcard fallback prohibited.")
 
 # Write deterministic exact-target line to MANAGED_PGPASSFILE
-entry = f"{escape_pgpass(host)}:{escape_pgpass(port)}:{escape_pgpass(dbname)}:{escape_pgpass(user)}:{escape_pgpass(password or '')}\n"
+entry = "%s:%s:%s:%s:%s\n" % (
+    escape_pgpass(host),
+    escape_pgpass(port),
+    escape_pgpass(dbname),
+    escape_pgpass(user),
+    escape_pgpass(password or "")
+)
 with open(pgpass_path, "w") as f:
     f.write(entry)
 
@@ -326,10 +370,16 @@ PY
 CLEAN_DSN="$PARSER_OUTPUT"
 
 # -----------------------------------------------------------------------------
-# Subprocess Environment Scrubbing
+# Subprocess Environment Scrubbing & Accurate Credential Secrecy Model
 # -----------------------------------------------------------------------------
-# Explicitly unset raw credential variables to prevent child process inheritance.
-# PostgreSQL libpq clients read credentials securely from MANAGED_PGPASSFILE (mode 0600).
+# Lifecycle note: DATABASE_URL is accepted by the parent shell and read by the
+# initial in-process Python parser subprocess to extract connection parameters and
+# generate the mode 0600 PGPASSFILE.
+# Immediately following parsing, DATABASE_URL and PGPASSWORD are scrubbed (unset)
+# from the process environment.
+# All subsequent PostgreSQL client processes (psql) are invoked with sanitized
+# connection parameters (CLEAN_DSN) containing zero credentials in command arguments
+# (argv) and zero credentials in process environment.
 unset DATABASE_URL
 unset PGPASSWORD
 export PGPASSFILE="$MANAGED_PGPASSFILE"
@@ -351,7 +401,7 @@ IS_RECOVERY="$(echo "$IDENTITY_INFO" | cut -d'|' -f3)"
 ACTUAL_SYSID="$(echo "$IDENTITY_INFO" | cut -d'|' -f4)"
 FIELD_COUNT="$(echo "$IDENTITY_INFO" | awk -F'|' '{print NF}')"
 
-if [ "$FIELD_COUNT" -ne 4 ] || [ -z "$ACTUAL_DB" ] || [ -z "$ACTUAL_USER" ] || [ -z "$IS_RECOVERY" ]; then
+if [ "$FIELD_COUNT" -ne 4 ] || [ -z "$ACTUAL_DB" ] || [ -z "$ACTUAL_USER" ] || [ -z "$IS_RECOVERY" ] || [ -z "$ACTUAL_SYSID" ]; then
   echo "ERROR: Target verification returned malformed or unexpected result." >&2
   echo "  Raw output : $IDENTITY_INFO" >&2
   echo "  Field count: $FIELD_COUNT (expected 4)" >&2
@@ -370,7 +420,7 @@ if [ "$IS_RECOVERY" != "f" ] && [ "$IS_RECOVERY" != "false" ]; then
   exit 5
 fi
 
-# Positively verify database name
+# Positively verify database name against mandatory expected pin
 if [ "$ACTUAL_DB" != "$EXPECTED_DATABASE" ]; then
   echo "ERROR: Target database identity mismatch!" >&2
   echo "  Expected database : $EXPECTED_DATABASE" >&2
@@ -379,8 +429,8 @@ if [ "$ACTUAL_DB" != "$EXPECTED_DATABASE" ]; then
   exit 5
 fi
 
-# Positively verify operator role if specified
-if [ -n "$EXPECTED_USER" ] && [ "$ACTUAL_USER" != "$EXPECTED_USER" ]; then
+# Positively verify operator role against mandatory expected pin
+if [ "$ACTUAL_USER" != "$EXPECTED_USER" ]; then
   echo "ERROR: Target operator identity mismatch!" >&2
   echo "  Expected operator : $EXPECTED_USER" >&2
   echo "  Connected operator: $ACTUAL_USER" >&2
@@ -388,8 +438,8 @@ if [ -n "$EXPECTED_USER" ] && [ "$ACTUAL_USER" != "$EXPECTED_USER" ]; then
   exit 5
 fi
 
-# Positively verify cluster system identifier if specified
-if [ -n "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" ] && [ "$ACTUAL_SYSID" != "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" ]; then
+# Positively verify cluster system identifier against mandatory expected pin
+if [ "$ACTUAL_SYSID" != "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" ]; then
   echo "ERROR: Target cluster system_identifier mismatch!" >&2
   echo "  Expected cluster identifier : $EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" >&2
   echo "  Connected cluster identifier: $ACTUAL_SYSID" >&2
@@ -397,20 +447,21 @@ if [ -n "$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER" ] && [ "$ACTUAL_SYSID" != "$EXPECT
   exit 5
 fi
 
-echo "==> Positively verified target cluster (system_identifier: '${ACTUAL_SYSID:-unknown}'), database: '$ACTUAL_DB', operator: '$ACTUAL_USER', primary: true."
+echo "==> Positively verified target cluster (system_identifier: '$EXPECTED_CLUSTER_SYSTEM_IDENTIFIER'), database: '$EXPECTED_DATABASE', operator: '$EXPECTED_USER', primary: true."
 
 # -----------------------------------------------------------------------------
 # Atomic Within-Session Verification & Migration Execution
 # -----------------------------------------------------------------------------
 # Enforce that the target cannot change between preflight verification and DDL execution.
-# The runner script asserts session-level connection properties within the execution connection itself.
+# The runner script asserts session-level connection properties within the execution connection itself,
+# verifying against authoritative operator pins (NEVER against the connected database's own query result).
 MIGRATION_RUNNER_SCRIPT="$(mktemp /tmp/platen-migration-runner-XXXXXX.sql)"
 touch "$MIGRATION_RUNNER_SCRIPT"
 chmod 600 "$MIGRATION_RUNNER_SCRIPT"
 
-escaped_db="${ACTUAL_DB//\'/\'\'}"
-escaped_user="${ACTUAL_USER//\'/\'\'}"
-escaped_sysid="${ACTUAL_SYSID//\'/\'\'}"
+escaped_exp_db="${EXPECTED_DATABASE//\'/\'\'}"
+escaped_exp_user="${EXPECTED_USER//\'/\'\'}"
+escaped_exp_sysid="${EXPECTED_CLUSTER_SYSTEM_IDENTIFIER//\'/\'\'}"
 
 cat << EOF > "$MIGRATION_RUNNER_SCRIPT"
 \set ON_ERROR_STOP on
@@ -423,14 +474,14 @@ DECLARE
   v_rec boolean := pg_catalog.pg_is_in_recovery();
   v_sysid text := coalesce((SELECT system_identifier::text FROM pg_control_system()), '');
 BEGIN
-  IF v_db IS DISTINCT FROM '$escaped_db' THEN
-    RAISE EXCEPTION 'Session target database changed between preflight and execution: % != %', v_db, '$escaped_db';
+  IF v_db IS DISTINCT FROM '$escaped_exp_db' THEN
+    RAISE EXCEPTION 'Session target database changed or unapproved: % != %', v_db, '$escaped_exp_db';
   END IF;
-  IF v_user IS DISTINCT FROM '$escaped_user' THEN
-    RAISE EXCEPTION 'Session target operator changed between preflight and execution: % != %', v_user, '$escaped_user';
+  IF v_user IS DISTINCT FROM '$escaped_exp_user' THEN
+    RAISE EXCEPTION 'Session target operator changed or unapproved: % != %', v_user, '$escaped_exp_user';
   END IF;
-  IF '$escaped_sysid' <> '' AND v_sysid IS DISTINCT FROM '$escaped_sysid' THEN
-    RAISE EXCEPTION 'Session target cluster changed between preflight and execution: % != %', v_sysid, '$escaped_sysid';
+  IF v_sysid IS DISTINCT FROM '$escaped_exp_sysid' THEN
+    RAISE EXCEPTION 'Session target cluster changed or unapproved: % != %', v_sysid, '$escaped_exp_sysid';
   END IF;
   IF v_rec THEN
     RAISE EXCEPTION 'Session target transitioned to standby recovery mode; refusing DDL execution';

@@ -1018,7 +1018,7 @@ Before proceeding to Phase 3 (Production Execution), confirm and check off every
 | **Separate-Process Decryption Proven** | Encrypted backup decrypted in a separate, isolated process using only retained key file | Required | [ ] |
 | **Recovery Asset Retention Confirmed** | Approved backup and key file preserved across rehearsal; no automatic purging | Required | [ ] |
 | **Full 36-Check Harness Verified** | `scripts/test-runbook-rehearsal.sh` passed 36/36 negative and positive tests in CI | Required | [ ] |
-| **Migration Operator Helper Qualified** | `scripts/test-migration-operator.sh` passed 23/23 tests in CI: zero credentials in argv, zero wildcards in `.pgpass`, positive database verification, fail-closed parsing | Required | [ ] |
+| **Migration Operator Helper Qualified** | `scripts/test-migration-operator.sh` passed 33/33 tests in CI: mandatory target identity pins (cluster sysid, db, user), zero credentials in argv/env, zero wildcards in `.pgpass`, positive database verification, fail-closed parsing, Python 3.8+ qualification | Required | [ ] |
 | **Worker PR #13 Deployed** | Worker deployed first; running healthy on Railway (`pdfnest-worker`, `alert-benevolence`) | Required | [ ] |
 | **Rollback Binary Qualified** | Preflight test `TestPreflight_HistoricalBinaryRuntimeCompatibility` passing in CI | Required | [ ] |
 | **Explicit Owner Authorization** | Written owner/lead approval to execute production DDL | Required | [ ] |
@@ -1064,36 +1064,43 @@ The rehearsal safety invariants are continuously validated in CI via [`scripts/t
 35. **Negative Test 35:** Malformed quoted credentials fail closed before client execution (unterminated quotes, unescaped characters after closing quote, unterminated escape sequences, and unescaped quotes in unquoted values fail closed with exit code 1; managed `.pgpass` cleaned up).
 36. **Test 36:** Direct regression qualification: regex parsing truncation vs libpq parser (confirms that previous HEAD regex `r"(?:^|\s)password\s*=\s*([^\s'"]+|'[^']*'|"[^"]*")"` truncated at escaped apostrophe and leaked `CanaryFragment` into sanitized DSN command arguments, while canonical executable with libpq parser completely removes password without fragments, passing `TEST_ASSERT_NO_SECRETS=1`, exit `0`).
 
-### Step 2.5: Automated Migration Operator Helper Qualification Suite (26 Checks)
+### Step 2.5: Automated Migration Operator Helper Qualification Suite (33 Checks)
 
-The credential safety, libpq parsing boundaries, target verification, signal handling, and execution integrity of [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh) are continuously qualified in CI via [`scripts/test-migration-operator.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-migration-operator.sh) against isolated disposable PostgreSQL fixtures on private Unix sockets:
+The credential safety, libpq parsing boundaries, target verification, signal handling, Python 3.8+ compatibility, and execution integrity of [`scripts/apply-durability-migration.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/apply-durability-migration.sh) are continuously qualified in CI via [`scripts/test-migration-operator.sh`](file:///home/gimesha/My_Projects/platen/pdfnest-backend/scripts/test-migration-operator.sh) against isolated disposable PostgreSQL fixtures on private Unix sockets:
 
 1. **Negative Test 1:** Rejection of missing `DATABASE_URL` (exit code 1).
 2. **Negative Test 2:** Rejection of missing affirmative confirmation (`CONFIRM_PRODUCTION_MIGRATION="yes"`, exit code 2).
 3. **Negative Test 3:** Rejection of arbitrary/unreviewed `MIGRATION_FILE` overrides (strictly bound to canonical migration SQL, exit code 3).
-4. **Positive Test 4:** Valid URI connection with canary password authenticated cleanly via `PGPASSFILE`; zero passwords in arguments or child environment (`TEST_ASSERT_NO_SECRETS=1`, exit code 0).
-5. **Positive Test 5:** Valid keyword/value connection with canary password authenticated cleanly (exit code 0).
-6. **Positive Test 6:** Keyword/value password containing escaped apostrophe (`\'`) parsed without truncation (exit code 0).
-7. **Positive Test 7:** Keyword/value password containing escaped backslashes (`\\`) parsed and unescaped for `.pgpass` (exit code 0).
-8. **Positive Test 8:** Quoted password with whitespace, colons, and punctuation authenticated cleanly (exit code 0).
-9. **Negative Test 9:** Unterminated quoted string fails closed before invoking client (exit code 1).
-10. **Negative Test 10:** Unterminated escape sequence fails closed before invoking client (exit code 1).
-11. **Negative Test 11:** Extraneous non-whitespace characters following a closing quote fail closed (exit code 1).
-12. **Negative Test 12:** Unexpected quotes inside unquoted connection values fail closed (exit code 1).
-13. **Negative Test 13:** Ambiguous credentials (password in both userinfo and query string) fail closed (exit code 1).
-14. **Negative Test 14:** Strict target-specific isolation: missing `host`, `user`, `dbname`, or `port` fails closed (zero wildcard fallback allowed, exit code 1).
-15. **Positive Test 15:** Empirical inspection of actual generated `.pgpass` file: mode `0600`, exact target-specific fields, and zero wildcard tokens (`*`).
-16. **Negative Test 16:** Wrong password rejected with exit code 4; zero secrets leaked in stderr/logs; temporary `.pgpass` purged.
-17. **Negative Test 17:** Target database identity verification: mismatch between actual database and `EXPECTED_DATABASE` fails closed before executing DDL (exit code 5).
-18. **Negative Test 18:** Standby database protection: connection to read-only replica (`pg_is_in_recovery() = true`) fails closed with controlled test response (exit code 5); independently verified zero DDL executed.
-19. **Positive Test 19:** Inspection wrappers verify zero credentials in process command-line arguments (exit 99 assertion) and child environment (`DATABASE_URL` and `PGPASSWORD` scrubbed, exit 98 assertion).
-20. **Negative Test 20:** Unreadable or nonexistent ambient `PGPASSFILE` fails closed (exit code 1).
-21. **Positive Test 21:** Valid ambient `PGPASSFILE` entries preserved by appending with fallback precedence.
-22. **Positive Test 22:** Genuine signal termination: SIGTERM (exit 143) and SIGINT (exit 130) delivered to live processes; independently verified temporary files unlinked.
-23. **Positive Test 23:** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1`, 4 durability tables, `pending_object_keys` jsonb column, and all 12 valid indexes.
-24. **Negative Test 24:** Unreviewed SQL file substitution rejection: tampered SQL file is rejected (exit code 3); independently verified zero DDL executed.
-25. **Negative Test 25:** Wrong PostgreSQL cluster rejection: cluster `system_identifier` mismatch is rejected (exit code 5) even when target database name and operator username match.
-26. **Negative Test 26:** Operator role identity mismatch rejection: unexpected connected role fails closed before DDL execution (exit code 5).
+4. **Negative Test 4:** Rejection of missing mandatory `EXPECTED_USER` pin (exit code 5).
+5. **Negative Test 5:** Rejection of malformed `EXPECTED_USER` pin (exit code 5).
+6. **Negative Test 6:** Rejection of missing mandatory `EXPECTED_CLUSTER_SYSTEM_IDENTIFIER` pin (exit code 5).
+7. **Negative Test 7:** Rejection of malformed `EXPECTED_CLUSTER_SYSTEM_IDENTIFIER` pin (exit code 5).
+8. **Negative Test 8:** Rejection of second PostgreSQL cluster with identical database name and username via `system_identifier` mismatch (exit code 5, zero DDL executed on either cluster).
+9. **Positive Test 9:** Valid URI connection with canary password authenticated cleanly via `PGPASSFILE`; zero passwords in arguments or child environment (`TEST_ASSERT_NO_SECRETS=1`, exit code 0).
+10. **Positive Test 10:** Valid keyword/value connection with canary password authenticated cleanly (exit code 0).
+11. **Positive Test 11:** Keyword/value password containing escaped apostrophe (`\'`) parsed without truncation (exit code 0).
+12. **Positive Test 12:** Keyword/value password containing escaped backslashes (`\\`) parsed and unescaped for `.pgpass` (exit code 0).
+13. **Positive Test 13:** Quoted password with whitespace, colons, and punctuation authenticated cleanly (exit code 0).
+14. **Positive Test 14:** Unquoted value with escaped backslash (`\\`) authenticated cleanly (exit code 0).
+15. **Negative Test 15:** Unterminated quoted string fails closed before invoking client (exit code 1).
+16. **Negative Test 16:** Unterminated escape sequence in quoted value fails closed before invoking client (exit code 1).
+17. **Negative Test 17:** Unterminated escape sequence in unquoted value fails closed (exit code 1).
+18. **Negative Test 18:** Extraneous non-whitespace characters following a closing quote fail closed (exit code 1).
+19. **Negative Test 19:** Unexpected quotes inside unquoted connection values fail closed (exit code 1).
+20. **Negative Test 20:** Ambiguous credentials in URI (password in both userinfo and query string) fail closed (exit code 1).
+21. **Negative Test 21:** Strict target-specific isolation: missing `host`, `user`, `dbname`, or `port` fails closed (zero wildcard fallback allowed, exit code 1).
+22. **Positive Test 22 (Strengthened T-15):** Empirical inspection of actual generated `.pgpass` file: mode `0600`, UID match with current process, `/tmp/platen-migration-pgpass-` prefix, exact target-specific fields, zero wildcard tokens (`*`), and verified unlinked after exit.
+23. **Negative Test 23:** Wrong password rejected with exit code 4; zero secrets leaked in stderr/logs; temporary `.pgpass` purged.
+24. **Negative Test 24:** Target database identity verification: mismatch between actual database and `EXPECTED_DATABASE` fails closed before executing DDL (exit code 5).
+25. **Negative Test 25:** Standby database protection: connection to read-only replica (`pg_is_in_recovery() = true`) fails closed with controlled test response (exit code 5); independently verified zero DDL executed.
+26. **Positive Test 26:** Inspection wrappers verify zero credentials in process command-line arguments (exit 99 assertion) and child environment (`DATABASE_URL` and `PGPASSWORD` scrubbed, exit 98 assertion).
+27. **Negative Test 27:** Unreadable or nonexistent ambient `PGPASSFILE` fails closed (exit code 1).
+28. **Positive Test 28:** Valid ambient `PGPASSFILE` entries preserved by appending with fallback precedence.
+29. **Positive Test 29:** Genuine signal termination: SIGTERM (exit 143) and SIGINT (exit 130) delivered to live processes; independently verified temporary files unlinked.
+30. **Positive Test 30 (Strengthened T-23):** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1` with timestamp, all 4 durability tables in `public`, PK constraints on all 4 tables, `pending_object_keys` nullable `jsonb` column, all 12 valid indexes (5 unique, 4 PK, 7 secondary) matching expected definitions, and verified migration idempotency on second execution.
+31. **Negative Test 31:** Unreviewed SQL file substitution rejection: tampered SQL file is rejected (exit code 3); independently verified zero DDL executed.
+32. **Negative Test 32:** Operator role identity mismatch rejection: unexpected connected role fails closed before DDL execution (exit code 5).
+33. **Positive Test 33:** Python 3.8+ syntax and compatibility qualification: verified zero backslashes in f-string expression parts across parser script, verified parsing of URI and keyword/value DSN formats in isolated Python runtime.
 
 ---
 
@@ -1107,26 +1114,26 @@ Execute the verified idempotent script `config/migrations/20261029_backend_durab
 > The canonical operator helper `scripts/apply-durability-migration.sh` enforces:
 > 1. Dedicated permission-restricted `PGPASSFILE` (mode `0600`) with automatic cleanup across both normal exits and signal terminations (`SIGINT`, `SIGTERM`).
 > 2. Deterministic, target-specific credential matching with **zero wildcard fallback** (`host`, `port`, `dbname`, and `user` must all be explicitly defined in connection parameters).
-> 3. State-machine libpq lexing rejecting unterminated quotes, malformed escapes, and extraneous characters.
+> 3. State-machine libpq lexing supporting escaped apostrophes (`\'`) and backslashes (`\\`), rejecting unterminated quotes, malformed escapes, and extraneous characters. Unquoted values support backslash escaping; whitespace terminates unquoted values and unescaped quotes are rejected (single-quoted values are recommended for complex passwords).
 > 4. Immutable binding to the reviewed migration SQL file (`config/migrations/20261029_backend_durability.up.sql`, SHA-256 `5800307ef280515a4a8edb5dac5c65b62b3c497213d2947afae5043d09e55b6b`), strictly rejecting arbitrary `MIGRATION_FILE` substitution in the production path.
-> 5. Positive, fail-closed pre-execution target cluster, database, and operator identity verification (`EXPECTED_DATABASE=railway`, optional `EXPECTED_USER`, optional `EXPECTED_CLUSTER_SYSTEM_IDENTIFIER`, and primary node verification `pg_is_in_recovery() = false`).
-> 6. Atomic within-session target verification: re-asserts database, operator, cluster system identifier, and primary status inside the execution transaction itself before applying DDL, eliminating target-shift / TOCTOU boundaries.
-> 7. Subprocess environment scrubbing (`unset DATABASE_URL`, `unset PGPASSWORD`).
+> 5. Mandatory positive, fail-closed pre-execution target cluster, database, and operator identity verification (`EXPECTED_DATABASE=railway`, `EXPECTED_USER=postgres`, `EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="<production_system_identifier>"`, and primary node verification `pg_is_in_recovery() = false`). Omitting any identity pin fails closed before any connection or DDL.
+> 6. Atomic within-session target verification: re-asserts database, operator, cluster system identifier against authoritative expected identity pins, and primary status inside the execution transaction itself before applying DDL, eliminating target-shift / TOCTOU boundaries.
+> 7. Subprocess environment scrubbing: `DATABASE_URL` is parsed by the initial in-process Python parser subprocess; immediately after parsing, `DATABASE_URL` and `PGPASSWORD` are unset; all subsequent `psql` invocations receive zero credentials in `argv` or environment.
 > 8. Fail-closed ambient credential preservation (rejects unreadable or missing ambient `PGPASSFILE`).
+> 9. Verified Python 3.8+ compatibility: parser syntax uses Python 3.8+ compliant construct without backslashes in f-string expression parts.
 
 ```bash
-# Set affirmative production confirmation and expected production database name
+# Set affirmative production confirmation and mandatory expected target identity pins
 export CONFIRM_PRODUCTION_MIGRATION="yes"
 export EXPECTED_DATABASE="railway"
-# Optional positive identity pins:
-# export EXPECTED_USER="postgres"
-# export EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="<production_system_identifier>"
+export EXPECTED_USER="postgres"
+export EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="<production_system_identifier>"
 
 # Execute canonical migration operator helper (DATABASE_URL is scrubbed from child process)
 ./scripts/apply-durability-migration.sh
 ```
 
-*(Note: The migration operator helper is version-controlled and qualified with 26 automated tests in `scripts/test-migration-operator.sh`.)*
+*(Note: The migration operator helper is version-controlled and qualified with 33 automated tests in `scripts/test-migration-operator.sh`.)*
 
 *Raw SQL equivalent (for execution in an admin SQL console):*
 ```sql
