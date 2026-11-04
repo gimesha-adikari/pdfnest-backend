@@ -1100,7 +1100,9 @@ The credential safety, libpq parsing boundaries, target verification, signal han
 30. **Positive Test 30 (Strengthened T-23):** Full end-to-end durability migration execution against disposable PostgreSQL fixture; verifies marker `20261029_backend_durability_v1` with timestamp, all 4 durability tables in `public`, PK constraints on all 4 tables, `pending_object_keys` nullable `jsonb` column, all 12 valid indexes (5 unique, 4 PK, 7 secondary) matching expected definitions, and verified migration idempotency on second execution.
 31. **Negative Test 31:** Unreviewed SQL file substitution rejection: tampered SQL file is rejected (exit code 3); independently verified zero DDL executed.
 32. **Negative Test 32:** Operator role identity mismatch rejection: unexpected connected role fails closed before DDL execution (exit code 5).
-33. **Test 33:** Extracts and compiles the actual embedded Python parser using the CI Python interpreter; tests 9–14 exercise actual authentication parsing. This does not independently qualify other Python versions.\n34. **Negative Test 34:** Missing `EXPECTED_DATABASE` (unset rather than defaulted) rejects before any connection (exit 5).\n35. **Negative Test 35:** Malformed explicit `EXPECTED_DATABASE` rejects before any connection (exit 5).
+33. **Test 33:** Extracts and compiles the actual embedded Python parser using the CI Python interpreter; tests 9–14 exercise actual authentication parsing. This does not independently qualify other Python versions.
+34. **Negative Test 34:** Missing `EXPECTED_DATABASE` (unset rather than defaulted) rejects before any connection (exit 5).
+35. **Negative Test 35:** Malformed explicit `EXPECTED_DATABASE` rejects before any connection (exit 5).
 
 ---
 
@@ -1133,7 +1135,7 @@ export EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="<production_system_identifier>"
 ./scripts/apply-durability-migration.sh
 ```
 
-*(Note: The migration operator helper is version-controlled and qualified with 33 automated tests in `scripts/test-migration-operator.sh`.)*
+*(Note: The migration operator helper is version-controlled and qualified with 35 automated tests in `scripts/test-migration-operator.sh`.)*
 
 *Raw SQL equivalent (for execution in an admin SQL console):*
 ```sql
