@@ -318,7 +318,7 @@ func WithReservationRelease(ctx context.Context, reservationID string, fn func(*
 	})
 }
 
-// transitionDurable arbitrates cancellation/failure with the publishing decision.
+// transitionDurable arbitrates failure with the publishing decision.
 func transitionDurable(ctx context.Context, id, owner, state, message string) (*models.TaskCompletion, bool, error) {
 	if config.DB == nil {
 		return nil, false, nil
@@ -329,7 +329,7 @@ func transitionDurable(ctx context.Context, id, owner, state, message string) (*
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
 			return err
 		}
-		if (owner != "" || state == "cancelled") && row.OwnerIdentity != "" && owner != row.OwnerIdentity {
+		if owner != "" && row.OwnerIdentity != "" && owner != row.OwnerIdentity {
 			return nil
 		}
 		if row.State == "failed" && state == "failed" && message != "" {
@@ -349,6 +349,50 @@ func transitionDurable(ctx context.Context, id, owner, state, message string) (*
 		return nil, false, nil
 	}
 	return &row, changed, err
+}
+
+// cancelDurable atomically authorizes and cancels a durable task record.
+// If the record exists in PostgreSQL, authorization is verified atomically under the row update lock
+// BEFORE ANY state transition or modification occurs.
+// Returns:
+//   result: "CANCELLED_SUCCESS", "TERMINAL_ALREADY", "UNAUTHORIZED", or "" if not found in DB or DB unavailable
+//   task: the task status representation of the row (or nil)
+//   err: DB error if any
+func cancelDurable(ctx context.Context, id, owner, token string) (string, *TaskStatus, error) {
+	if config.DB == nil {
+		return "", nil, nil
+	}
+	var row models.TaskCompletion
+	var result string
+	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
+			return err
+		}
+		ownerMatches := row.OwnerIdentity != "" && owner != "" && row.OwnerIdentity == owner
+		capabilityMatches := row.DownloadToken != "" && token != "" && row.DownloadToken == token
+		if !ownerMatches && !capabilityMatches {
+			result = "UNAUTHORIZED"
+			return nil
+		}
+		if row.State != "active" {
+			result = "TERMINAL_ALREADY"
+			return nil
+		}
+		row.State = "cancelled"
+		row.Error = "Task processing cancelled by user."
+		if err := tx.Save(&row).Error; err != nil {
+			return err
+		}
+		result = "CANCELLED_SUCCESS"
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "ERROR", nil, err
+	}
+	return result, durableStatus(&row), nil
 }
 
 func (r *TaskRegistry) SweepDurableCompletions(ctx context.Context, now time.Time) error {

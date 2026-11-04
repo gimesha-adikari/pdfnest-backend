@@ -3,14 +3,20 @@ package conversion
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,9 +177,11 @@ func TestPreviewSessionRemediation_WorkerErrorMapping(t *testing.T) {
 
 func TestCreatePreviewSession_DelegatesToWorkerAlways(t *testing.T) {
 	createCount := 0
+	var dedupScopes []string
 	mockWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/render/sessions" && r.Method == http.MethodPost {
 			createCount++
+			dedupScopes = append(dedupScopes, r.URL.Query().Get("dedup_scope"))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -196,6 +204,7 @@ func TestCreatePreviewSession_DelegatesToWorkerAlways(t *testing.T) {
 			_ = os.Unsetenv("PDFNEST_WORKER_URL")
 		}
 	}()
+	t.Setenv("WORKER_SHARED_SECRET", "synthetic-preview-worker-secret")
 
 	svc := &ConversionService{}
 	ctx := context.Background()
@@ -208,7 +217,7 @@ func TestCreatePreviewSession_DelegatesToWorkerAlways(t *testing.T) {
 	_, _ = tmpFile.WriteString("%PDF-1.4 mock")
 	_ = tmpFile.Close()
 
-	res1, err := svc.createWorkerPreviewSession(ctx, mockWorker.URL, tmpFile.Name())
+	res1, err := svc.createWorkerPreviewSession(ctx, mockWorker.URL, tmpFile.Name(), "guest:a")
 	if err != nil {
 		t.Fatalf("createWorkerPreviewSession failed: %v", err)
 	}
@@ -216,7 +225,7 @@ func TestCreatePreviewSession_DelegatesToWorkerAlways(t *testing.T) {
 		t.Fatalf("Expected session worker-sess-1, got %s", res1.ID)
 	}
 
-	res2, err := svc.createWorkerPreviewSession(ctx, mockWorker.URL, tmpFile.Name())
+	res2, err := svc.createWorkerPreviewSession(ctx, mockWorker.URL, tmpFile.Name(), "guest:b")
 	if err != nil {
 		t.Fatalf("createWorkerPreviewSession failed: %v", err)
 	}
@@ -225,5 +234,247 @@ func TestCreatePreviewSession_DelegatesToWorkerAlways(t *testing.T) {
 	}
 	if createCount != 2 {
 		t.Fatalf("Expected worker to be called 2 times, got %d", createCount)
+	}
+	if len(dedupScopes) != 2 || dedupScopes[0] != previewWorkerDedupScope("guest:a") || dedupScopes[1] != previewWorkerDedupScope("guest:b") {
+		t.Fatalf("worker received unexpected owner deduplication scopes: %v", dedupScopes)
+	}
+	if dedupScopes[0] == dedupScopes[1] {
+		t.Fatal("worker received the same deduplication scope for different identities")
+	}
+}
+
+func TestPreviewSessionService_IsolatesIdenticalUploadsByOwner(t *testing.T) {
+	t.Setenv("WORKER_SHARED_SECRET", "synthetic-preview-worker-secret")
+
+	previousCache := globalPreviewSessions
+	globalPreviewSessions = &previewSessionCache{
+		sessions: make(map[string]*previewWorkerSession),
+		byHash:   make(map[string]string),
+	}
+	t.Cleanup(func() { globalPreviewSessions = previousCache })
+
+	workerSessions := make(map[string][]byte)
+	scopeHashSessions := make(map[string]string)
+	mockWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/render/sessions":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				http.Error(w, "invalid upload", http.StatusBadRequest)
+				return
+			}
+			files := r.MultipartForm.File["file"]
+			if len(files) != 1 {
+				http.Error(w, "expected one file", http.StatusBadRequest)
+				return
+			}
+			file, err := files[0].Open()
+			if err != nil {
+				http.Error(w, "could not open upload", http.StatusBadRequest)
+				return
+			}
+			data, readErr := io.ReadAll(file)
+			_ = file.Close()
+			if readErr != nil {
+				http.Error(w, "could not read upload", http.StatusBadRequest)
+				return
+			}
+			scope := r.URL.Query().Get("dedup_scope")
+			if len(scope) != 64 || strings.Contains(scope, "guest") {
+				http.Error(w, "invalid owner scope", http.StatusBadRequest)
+				return
+			}
+			digest := sha256.Sum256(data)
+			key := scope + "\x00" + hex.EncodeToString(digest[:])
+			sessionID, ok := scopeHashSessions[key]
+			if !ok {
+				sessionID = fmt.Sprintf("worker-session-%d", len(workerSessions)+1)
+				scopeHashSessions[key] = sessionID
+				workerSessions[sessionID] = append([]byte(nil), data...)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": sessionID,
+				"page_count": 2,
+				"file_size":  len(data),
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/render/sessions/"):
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) != 7 || parts[3] != "sessions" || parts[5] != "page" {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := workerSessions[parts[4]]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(createTestJpegBytes())
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/render/sessions/"):
+			sessionID := strings.TrimPrefix(r.URL.Path, "/api/v1/render/sessions/")
+			if _, ok := workerSessions[sessionID]; !ok {
+				http.NotFound(w, r)
+				return
+			}
+			delete(workerSessions, sessionID)
+			for key, id := range scopeHashSessions {
+				if id == sessionID {
+					delete(scopeHashSessions, key)
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockWorker.Close()
+	t.Setenv("PDFNEST_WORKER_URL", mockWorker.URL)
+
+	fileHeader := func(name string) *multipart.FileHeader {
+		var body bytes.Buffer
+		form := multipart.NewWriter(&body)
+		part, err := form.CreateFormFile("file", name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write([]byte("%PDF-1.4 synthetic same-content preview")); err != nil {
+			t.Fatal(err)
+		}
+		if err := form.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/upload", &body)
+		req.Header.Set("Content-Type", form.FormDataContentType())
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		return req.MultipartForm.File["file"][0]
+	}
+
+	svc := &ConversionService{}
+	ctx := context.Background()
+	create := func(ownerID, name string) string {
+		t.Helper()
+		result, err := svc.CreatePreviewSession(ctx, fileHeader(name), ownerID)
+		if err != nil {
+			t.Fatalf("CreatePreviewSession(%s) failed: %v", ownerID, err)
+		}
+		id, ok := result["session_id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("CreatePreviewSession(%s) returned no session ID", ownerID)
+		}
+		return id
+	}
+
+	guestA := "guest:preview-owner-a"
+	guestB := "guest:preview-owner-b"
+	sessionA := create(guestA, "same-a.pdf")
+	sessionAAgain := create(guestA, "same-a-again.pdf")
+	sessionB := create(guestB, "same-b.pdf")
+	if sessionA != sessionAAgain {
+		t.Fatal("repeated identical upload from the same identity did not reuse its worker session")
+	}
+	if sessionA == sessionB {
+		t.Fatal("different identities received a shared worker session ID")
+	}
+	if string(workerSessions[sessionA]) != "%PDF-1.4 synthetic same-content preview" || string(workerSessions[sessionB]) != string(workerSessions[sessionA]) {
+		t.Fatal("mock worker did not receive the same expected synthetic PDF bytes for both identities")
+	}
+
+	for _, test := range []struct {
+		ownerID   string
+		sessionID string
+	}{
+		{ownerID: guestA, sessionID: sessionA},
+		{ownerID: guestB, sessionID: sessionB},
+	} {
+		if _, err := svc.GetPreviewSessionPage(ctx, test.sessionID, 1, 2, test.ownerID); err != nil {
+			t.Fatalf("owner page retrieval failed: %v", err)
+		}
+	}
+	if _, err := svc.GetPreviewSessionPage(ctx, sessionA, 1, 2, guestB); err != ErrPreviewSessionForbidden {
+		t.Fatalf("cross-identity page access error = %v, want forbidden", err)
+	}
+	if err := svc.DeletePreviewSession(ctx, sessionA, guestB); err != ErrPreviewSessionForbidden {
+		t.Fatalf("cross-identity deletion error = %v, want forbidden", err)
+	}
+	if err := svc.DeletePreviewSession(ctx, sessionA, guestA); err != nil {
+		t.Fatalf("guest A session deletion failed: %v", err)
+	}
+	if _, err := svc.GetPreviewSessionPage(ctx, sessionB, 1, 2, guestB); err != nil {
+		t.Fatalf("deleting guest A session invalidated guest B session: %v", err)
+	}
+	if err := svc.DeletePreviewSession(ctx, sessionB, guestB); err != nil {
+		t.Fatalf("guest B session deletion failed: %v", err)
+	}
+	if len(workerSessions) != 0 {
+		t.Fatalf("worker sessions remained after owner deletion: %d", len(workerSessions))
+	}
+}
+
+func TestCreatePreviewSessionFailureDoesNotPublishOrLeaveUploadTemp(t *testing.T) {
+	t.Setenv("WORKER_SHARED_SECRET", "synthetic-preview-worker-secret")
+	t.Setenv("TMPDIR", t.TempDir())
+
+	previousCache := globalPreviewSessions
+	globalPreviewSessions = &previewSessionCache{
+		sessions: make(map[string]*previewWorkerSession),
+		byHash:   make(map[string]string),
+	}
+	t.Cleanup(func() { globalPreviewSessions = previousCache })
+
+	workerCalls := 0
+	mockWorker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerCalls++
+		if r.URL.Path != "/api/v1/render/sessions" || r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer mockWorker.Close()
+	t.Setenv("PDFNEST_WORKER_URL", mockWorker.URL)
+
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	part, err := form.CreateFormFile("file", "failure.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("%PDF-1.4 synthetic backend cleanup")); err != nil {
+		t.Fatal(err)
+	}
+	if err := form.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/upload", &body)
+	req.Header.Set("Content-Type", form.FormDataContentType())
+	if err := req.ParseMultipartForm(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	fileHeader := req.MultipartForm.File["file"][0]
+
+	svc := &ConversionService{}
+	if _, err := svc.CreatePreviewSession(context.Background(), fileHeader, "guest:failure"); err == nil {
+		t.Fatal("worker HTTP 500 unexpectedly published a preview session")
+	}
+	if workerCalls != 1 {
+		t.Fatalf("worker request count = %d, want 1", workerCalls)
+	}
+	if len(globalPreviewSessions.sessions) != 0 || len(globalPreviewSessions.byHash) != 0 {
+		t.Fatal("failed worker creation left a backend preview session published")
+	}
+	entries, err := os.ReadDir(os.Getenv("TMPDIR"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed worker creation left %d backend upload temporary files", len(entries))
+	}
+
+	if _, err := svc.CreatePreviewSession(context.Background(), fileHeader, "  "); err == nil {
+		t.Fatal("preview session creation accepted a missing identity")
+	}
+	if workerCalls != 1 {
+		t.Fatalf("missing identity reached the worker; request count = %d", workerCalls)
 	}
 }

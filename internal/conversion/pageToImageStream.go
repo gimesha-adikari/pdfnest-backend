@@ -3,6 +3,7 @@ package conversion
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -185,6 +187,7 @@ func (s *ConversionService) ConvertPageToImageStream(
 			ctx,
 			workerBaseURL,
 			targetPdfPath,
+			ownerID,
 		)
 		if createErr != nil {
 			return nil, createErr
@@ -227,6 +230,7 @@ func (s *ConversionService) ConvertPageToImageStream(
 		ctx,
 		workerBaseURL,
 		targetPdfPath,
+		ownerID,
 	)
 	if recreateErr != nil {
 		return nil, recreateErr
@@ -364,6 +368,7 @@ func (s *ConversionService) createWorkerPreviewSession(
 	ctx context.Context,
 	workerBaseURL string,
 	pdfPath string,
+	ownerID string,
 ) (previewRenderSessionInfo, error) {
 	var empty previewRenderSessionInfo
 	pdfFile, err := os.Open(pdfPath)
@@ -406,13 +411,15 @@ func (s *ConversionService) createWorkerPreviewSession(
 		_ = pw.Close()
 	}()
 
+	endpoint := strings.TrimRight(workerBaseURL, "/") + "/api/v1/render/sessions"
+	query := url.Values{}
+	query.Set("dedup_scope", previewWorkerDedupScope(ownerID))
+	endpoint += "?" + query.Encode()
+
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
-		strings.TrimRight(
-			workerBaseURL,
-			"/",
-		)+"/api/v1/render/sessions",
+		endpoint,
 		pr,
 	)
 	if err != nil {
@@ -472,6 +479,12 @@ func (s *ConversionService) createWorkerPreviewSession(
 		ID:        response.SessionID,
 		PageCount: response.PageCount,
 	}, nil
+}
+
+func previewWorkerDedupScope(ownerID string) string {
+	mac := hmac.New(sha256.New, []byte(worker.GetWorkerSharedSecret()))
+	_, _ = io.WriteString(mac, "pdfnest.preview-session-dedup.v1\x00"+strings.TrimSpace(ownerID))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 type previewRenderSessionInfo struct {
@@ -613,6 +626,7 @@ func (s *ConversionService) CreatePreviewSession(
 		ctx,
 		workerBaseURL,
 		targetPdfPath,
+		ownerID,
 	)
 	if err != nil {
 		return nil, err

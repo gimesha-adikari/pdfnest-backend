@@ -10,6 +10,7 @@ import (
 	"pdfnest-backend/internal/billing"
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/tasks"
+	"pdfnest-backend/internal/uploads"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -70,11 +71,17 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 	created, createErr := tasks.Registry.SetWithKeyAndBilling(taskId, "PENDING", 0, "", "Preparing R2 OCR job...", userID, reservation.ID, string(billing.ReservationKindDatabase))
 	if createErr != nil || !created {
 		_ = billing.Default.Release(reservation.ID)
-		return c.SendStatus(fiber.StatusServiceUnavailable)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(APIError{
+			Code:    "TASK_STORAGE_UNAVAILABLE",
+			Message: "The task could not be safely registered. Please try again.",
+		})
 	}
 	if err := tasks.Registry.AdmitDurable(context.Background(), taskId, userID, reservation.ID, string(billing.ReservationKindDatabase)); err != nil {
 		_ = billing.Default.Release(reservation.ID)
-		return c.SendStatus(fiber.StatusServiceUnavailable)
+		return c.Status(fiber.StatusServiceUnavailable).JSON(APIError{
+			Code:    "TASK_STORAGE_UNAVAILABLE",
+			Message: "The task could not be safely registered. Please try again.",
+		})
 	}
 
 	go func(id string, refs []R2ImageRef, reservationID, lang string) {
@@ -127,6 +134,15 @@ func (ctrl *Controller) HandleAsyncImageToTextPDFR2(c *fiber.Ctx) error {
 			if taskCtx.Err() == nil {
 				tasks.Registry.Set(id, "FAILED", 0, "", err.Error())
 			}
+			return
+		}
+
+		if _, err := uploads.CheckPDFPageLimit(outPath, "MAX_PAGES_OCR", 150); err != nil {
+			_ = billing.Default.Release(reservationID)
+			if taskCtx.Err() == nil {
+				tasks.Registry.Set(id, "FAILED", 0, "", "The image conversion service did not produce a valid PDF.")
+			}
+			_ = os.Remove(outPath)
 			return
 		}
 

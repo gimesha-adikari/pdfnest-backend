@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"pdfnest-backend/internal/identity"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/redis/go-redis/v9"
@@ -323,6 +325,56 @@ func TestDownloadController_MissingR2Object410(t *testing.T) {
 	}
 }
 
+func TestDownloadController_RejectsNonterminalAndExpiredTasks(t *testing.T) {
+	_, reg, cleanup := setupDownloadTestRedis(t)
+	defer cleanup()
+
+	ownerID := "synthetic-task-owner"
+	app := fiber.New()
+	app.Get("/api/v1/download/:id", func(c *fiber.Ctx) error {
+		c.Locals(identity.LocalIdentityIDKey, c.Get("X-Test-Identity"))
+		return HandleTaskDownload(c)
+	})
+
+	for _, status := range []string{"PENDING", "PROCESSING", "FAILED", "CANCELLED"} {
+		t.Run(status, func(t *testing.T) {
+			taskID := "nonterminal-" + strings.ToLower(status)
+			_, err := reg.SetWithKey(taskID, status, 100, "outputs/should-not-download.pdf", "", ownerID)
+			if err != nil {
+				t.Fatalf("store task state: %v", err)
+			}
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/download/"+taskID, nil)
+			request.Header.Set("X-Test-Identity", ownerID)
+			response, err := app.Test(request)
+			if err != nil {
+				t.Fatalf("request task download: %v", err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != fiber.StatusNotFound {
+				t.Fatalf("nonterminal task must not publish an artifact: status=%d", response.StatusCode)
+			}
+		})
+	}
+
+	_, err := reg.SetWithKey("expired-task", "COMPLETED", 100, "outputs/expired.pdf", "", ownerID)
+	if err != nil {
+		t.Fatalf("store task to expire: %v", err)
+	}
+	if err := reg.client.Expire(context.Background(), TaskKeyPrefix+"expired-task", -time.Second).Err(); err != nil {
+		t.Fatalf("expire task record: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/download/expired-task", nil)
+	request.Header.Set("X-Test-Identity", ownerID)
+	response, err := app.Test(request)
+	if err != nil {
+		t.Fatalf("request expired task download: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("expired task must not publish an artifact: status=%d", response.StatusCode)
+	}
+}
+
 // 9. Comprehensive Security Model Matrix Tests:
 // - Guest trying to download Authenticated User artifact -> DENY (403)
 // - Authenticated User trying to download Guest artifact -> DENY (403)
@@ -551,7 +603,9 @@ func TestDownloadUnavailableArtifactNeverCommitsLegacyBilling(t *testing.T) {
 	reg.client.Set(context.Background(), TaskKeyPrefix+id, data, TaskTTL)
 	app := fiber.New()
 	app.Get("/:id", HandleTaskDownload)
-	response, err := app.Test(httptest.NewRequest("GET", "/"+id, nil))
+	req := httptest.NewRequest("GET", "/"+id, nil)
+	req.Header.Set("X-Download-Token", task.DownloadToken)
+	response, err := app.Test(req)
 	if err != nil {
 		t.Fatal(err)
 	}
