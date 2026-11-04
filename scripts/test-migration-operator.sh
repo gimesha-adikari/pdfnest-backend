@@ -39,7 +39,7 @@
 #  30. Strengthened T-23: full durability migration execution & exact marker, 4 tables, PKs, column, 12 indexes, idempotency
 #  31. Unreviewed SQL file substitution rejection (exit 3, 0 DDL executed)
 #  32. Operator role identity mismatch rejection (exit 5)
-#  33. Python 3.8+ syntax & compatibility qualification (zero backslashes in f-strings)
+#  33. Active-interpreter compilation of the embedded Python parser (no untested-version claims)
 # =============================================================================
 set -euo pipefail
 
@@ -731,38 +731,50 @@ if [ $rc -ne 5 ]; then echo "FAIL: Expected exit 5 for operator mismatch, got $r
 grep -q "Target operator identity mismatch" "$test_root/t32.log"
 echo "PASSED: Operator identity mismatch rejected (exit 5)."
 
-# Test 33: Python 3.8+ syntax & compatibility qualification
-echo "==> [Test 33] Python 3.8+ syntax & compatibility qualification..."
+# Test 33: Execute an actual syntax compilation of the embedded parser under the CI interpreter.
+# This does not claim that Python 3.8-3.11 or 3.13+ was independently executed.
+echo "==> [Test 33] Compile embedded parser using the current CI Python runtime..."
 python3 - "$SCRIPT_PATH" << 'PY'
-import sys, re
+import sys
 
-# 1. Assert running on supported Python 3.8+
-major, minor = sys.version_info[:2]
-assert (major, minor) >= (3, 8), f"Python version {major}.{minor} is older than supported 3.8+"
-
-# 2. Inspect apply-durability-migration.sh to verify zero backslashes in f-strings
-script_path = sys.argv[1]
-with open(script_path, "r", encoding="utf-8") as f:
-    content = f.read()
-
-# Pattern for f-string with backslash in expression: f"{...\\...}"
-fstring_bs_pattern = re.compile(r'f["\'][^"\']*{[^}]*\\[^}]*}[^"\']*["\']')
-matches = fstring_bs_pattern.findall(content)
-assert len(matches) == 0, f"Found incompatible f-string expression containing backslash: {matches}"
-
-# 3. Verify parser logic executes cleanly on complex quoted/unquoted and escaped connection strings
-test_dsns = [
-    "host=localhost port=5432 dbname=test user=usr password='Canary\\'Quote#88!' sslmode=disable",
-    "host=localhost port=5432 dbname=test user=usr password='Canary\\\\Slash#88!' sslmode=disable",
-    "host=localhost port=5432 dbname=test user=usr password=CanaryUnquoted\\!Pass sslmode=disable",
-    "postgresql://usr:CanaryPass@localhost:5432/test?sslmode=disable"
-]
-for dsn in test_dsns:
-    assert len(dsn) > 0
-print("Python 3.8+ compatibility and syntax verified: zero backslashes in f-strings.")
+assert sys.version_info >= (3, 8), "Python version below documented minimum"
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    script = handle.read()
+start = "PARSER_OUTPUT=\"$(python3 - << 'PY'\n"
+end = "\nPY\n)\""
+assert script.count(start) == 1, "Expected exactly one embedded Python parser"
+source = script.split(start, 1)[1].split(end, 1)[0]
+assert source.strip(), "Empty embedded parser"
+compile(source, "<migration-operator-embedded-parser>", "exec")
+print("Embedded parser compiled using Python %s.%s; no assertion about untested interpreter versions." % sys.version_info[:2])
 PY
-echo "PASSED: Python 3.8+ syntax and compatibility qualification succeeded."
+echo "PASSED: Embedded parser compiles on the active Python runtime; authentication vectors run in tests 9-14."
+
+# Test 34: Absent mandatory EXPECTED_DATABASE must block before any connection or DDL.
+echo "==> [Test 34] Missing mandatory EXPECTED_DATABASE fails closed..."
+set +e
+(
+  unset EXPECTED_DATABASE
+  DATABASE_URL="$KV_DSN" CONFIRM_PRODUCTION_MIGRATION="yes" EXPECTED_USER="platen_op_auth" EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="$CLUSTER1_SYSID" "$SCRIPT_PATH"
+) > "$test_root/t34.log" 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 5 ]; then echo "FAIL: Missing EXPECTED_DATABASE returned $rc, not 5"; exit 1; fi
+grep -q "EXPECTED_DATABASE is mandatory" "$test_root/t34.log"
+if grep -q "Verifying connection" "$test_root/t34.log"; then echo "FAIL: Connected without required database pin"; exit 1; fi
+echo "PASSED: Missing mandatory EXPECTED_DATABASE rejected prior to database connection."
+
+# Test 35: Malformed explicit EXPECTED_DATABASE must also fail before connection.
+echo "==> [Test 35] Malformed EXPECTED_DATABASE fails closed..."
+set +e
+EXPECTED_DATABASE="bad database name" DATABASE_URL="$KV_DSN" CONFIRM_PRODUCTION_MIGRATION="yes" EXPECTED_USER="platen_op_auth" EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="$CLUSTER1_SYSID" "$SCRIPT_PATH" > "$test_root/t35.log" 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 5 ]; then echo "FAIL: Malformed EXPECTED_DATABASE returned $rc, not 5"; exit 1; fi
+grep -q "EXPECTED_DATABASE has invalid format" "$test_root/t35.log"
+if grep -q "Verifying connection" "$test_root/t35.log"; then echo "FAIL: Connected with malformed database pin"; exit 1; fi
+echo "PASSED: Malformed EXPECTED_DATABASE rejected prior to database connection."
 
 echo "================================================================================"
-echo "ALL MIGRATION OPERATOR QUALIFICATION TESTS (33/33) PASSED SUCCESSFULLY!"
+echo "ALL MIGRATION OPERATOR QUALIFICATION TESTS (35/35) PASSED SUCCESSFULLY!"
 echo "================================================================================"

@@ -109,14 +109,14 @@ fi
 
 MIGRATION_FILE="$CANONICAL_MIGRATION_FILE"
 
-# Target identity expectations (Mandatory for production migration)
-EXPECTED_DATABASE="${EXPECTED_DATABASE:-railway}"
+# Target identity expectations (mandatory, independently verified; no defaults).
+EXPECTED_DATABASE="${EXPECTED_DATABASE:-}"
 EXPECTED_USER="${EXPECTED_USER:-}"
 EXPECTED_CLUSTER_SYSTEM_IDENTIFIER="${EXPECTED_CLUSTER_SYSTEM_IDENTIFIER:-}"
 
 # Fail closed if EXPECTED_DATABASE is missing, empty, or malformed
 if [ -z "$EXPECTED_DATABASE" ]; then
-  echo "ERROR: EXPECTED_DATABASE is required but not set." >&2
+  echo "ERROR: EXPECTED_DATABASE is mandatory for production migration execution but not set." >&2
   exit 5
 fi
 if ! [[ "$EXPECTED_DATABASE" =~ ^[a-zA-Z0-9_-]{1,63}$ ]]; then
