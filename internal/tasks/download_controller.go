@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"errors"
 	"mime"
 	"os"
 	"path/filepath"
@@ -46,35 +47,80 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 	}
 
 	key := task.ResultKey
+	if durable != nil {
+		if durable.State != "completed" {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"code":    "FILE_NOT_FOUND",
+				"message": "The requested asset is either expired or still processing.",
+			})
+		}
+		key = durable.ResultKey
+		if key == "" {
+			if quarantineErr := Registry.quarantineArtifact(c.UserContext(), id); quarantineErr != nil {
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+					"code":    "TASK_STORAGE_UNAVAILABLE",
+					"message": "Task persistence service is temporarily unavailable.",
+				})
+			}
+			return c.Status(fiber.StatusGone).JSON(fiber.Map{
+				"code":    "ASSET_REMOVED",
+				"message": "The completed output is unavailable and has been retained for recovery.",
+			})
+		}
+	}
 	if key == "" && strings.HasPrefix(task.ResultURL, "r2://") {
 		key = strings.TrimPrefix(task.ResultURL, "r2://")
 	}
 
-	if key != "" && !storage.RemoteStorageEnabled() {
+	if durable == nil && key != "" && !storage.RemoteStorageEnabled() {
 		task.ResultURL = filepath.Join(storage.GetLocalStorageDir(), filepath.FromSlash(key))
 		key = ""
 	}
 
 	if key != "" {
-		r2Store, err := storage.Default()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"code":    "STORAGE_ERROR",
-				"message": "Failed to initialize cloud storage client.",
-			})
-		}
-
 		ext := filepath.Ext(key)
-		tmpPath, err := r2Store.DownloadToTemp(key, "dl-task-", ext)
-		if err != nil {
-			return c.Status(fiber.StatusGone).JSON(fiber.Map{
-				"code":    "ASSET_REMOVED",
-				"message": "The requested asset has expired or is no longer available in cloud storage.",
-			})
+		var tmpPath string
+		if durable != nil {
+			var cleanup func()
+			tmpPath, cleanup, err = storage.ResolveVerifiedArtifact(c.UserContext(), key, durable.ArtifactSHA256, durable.ArtifactBytes)
+			if err != nil {
+				if errors.Is(err, storage.ErrArtifactIntegrity) || errors.Is(err, storage.ErrObjectNotFound) {
+					if quarantineErr := Registry.quarantineArtifact(c.UserContext(), id); quarantineErr != nil {
+						return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+							"code":    "TASK_STORAGE_UNAVAILABLE",
+							"message": "Task persistence service is temporarily unavailable.",
+						})
+					}
+					return c.Status(fiber.StatusGone).JSON(fiber.Map{
+						"code":    "ASSET_REMOVED",
+						"message": "The completed output is unavailable and has been retained for recovery.",
+					})
+				}
+				return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+					"code":    "STORAGE_UNAVAILABLE",
+					"message": "The requested output could not be verified; retry later.",
+				})
+			}
+			defer cleanup()
+		} else {
+			r2Store, storeErr := storage.Default()
+			if storeErr != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"code":    "STORAGE_ERROR",
+					"message": "Failed to initialize cloud storage client.",
+				})
+			}
+			tmpPath, err = r2Store.DownloadToTemp(key, "dl-task-", ext)
+			if err != nil {
+				return c.Status(fiber.StatusGone).JSON(fiber.Map{
+					"code":    "ASSET_REMOVED",
+					"message": "The requested asset has expired or is no longer available in cloud storage.",
+				})
+			}
+			defer func() {
+				_ = os.Remove(tmpPath)
+			}()
 		}
-		defer func() {
-			_ = os.Remove(tmpPath)
-		}()
 
 		if durable == nil && task.ReservationID != "" && (CommitTaskBillingHandlerWithKind != nil || CommitTaskBillingHandler != nil) {
 			if CommitTaskBillingHandlerWithKind != nil {
@@ -104,6 +150,19 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 		c.Set("Content-Type", contentType)
 		c.Attachment(filepath.Base(key))
 		return c.SendFile(tmpPath)
+	}
+
+	if durable != nil {
+		if quarantineErr := Registry.quarantineArtifact(c.UserContext(), id); quarantineErr != nil {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"code":    "TASK_STORAGE_UNAVAILABLE",
+				"message": "Task persistence service is temporarily unavailable.",
+			})
+		}
+		return c.Status(fiber.StatusGone).JSON(fiber.Map{
+			"code":    "ASSET_REMOVED",
+			"message": "The completed output is unavailable and has been retained for recovery.",
+		})
 	}
 
 	// Retain the local fallback while tasks created before object storage migration can expire.

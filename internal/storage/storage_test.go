@@ -2,11 +2,27 @@ package storage
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type cancelAfterArtifactRead struct {
+	cancel context.CancelFunc
+	done   bool
+}
+
+func (reader *cancelAfterArtifactRead) Read(p []byte) (int, error) {
+	if reader.done {
+		return 0, io.EOF
+	}
+	reader.done = true
+	n := copy(p, "synthetic artifact bytes")
+	reader.cancel()
+	return n, nil
+}
 
 func TestSaveLocalStreamRejectsManagedEnvironment(t *testing.T) {
 	t.Setenv("APP_ENV", "production")
@@ -15,6 +31,24 @@ func TestSaveLocalStreamRejectsManagedEnvironment(t *testing.T) {
 	_, _, err := SaveLocalStream(context.Background(), "jobs/test.txt", strings.NewReader("test"))
 	if err == nil || !strings.Contains(err.Error(), "disabled in managed environments") {
 		t.Fatalf("expected managed local-storage guard, got %v", err)
+	}
+}
+
+func TestSaveLocalStreamCancellationDoesNotCommitArtifact(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	storageRoot := t.TempDir()
+	t.Setenv("LOCAL_STORAGE_DIR", storageRoot)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, _, err := SaveLocalStream(ctx, "outputs/tasks/synthetic/cancelled.md", &cancelAfterArtifactRead{cancel: cancel})
+	if err != context.Canceled {
+		t.Fatalf("expected cancellation to prevent artifact commit, got %v", err)
+	}
+	if ObjectExists(context.Background(), "outputs/tasks/synthetic/cancelled.md") {
+		t.Fatal("cancelled upload must not publish its staged object")
+	}
+	entries, err := os.ReadDir(filepath.Join(storageRoot, "outputs", "tasks", "synthetic"))
+	if err == nil && len(entries) != 0 {
+		t.Fatalf("cancelled upload left staging files behind: %v", entries)
 	}
 }
 

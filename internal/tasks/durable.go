@@ -22,6 +22,9 @@ import (
 var ErrSettlementPending = errors.New("artifact settlement requires reconciliation")
 var ErrTaskTerminal = errors.New("task already terminal")
 
+const artifactUnavailableMessage = "Completed output is temporarily unavailable; safe recovery is pending."
+const artifactRecoveryHoldMessage = "Expired output requires manual storage review; no object deletion was attempted."
+
 // SettleTaskBilling must atomically commit database reservations using tx.
 // Guest finalization must return positive outcome evidence on every retry.
 var SettleTaskBilling func(context.Context, *gorm.DB, *models.TaskCompletion) error
@@ -72,7 +75,14 @@ func durableStatus(row *models.TaskCompletion) *TaskStatus {
 	if row.State == "deleting" || row.State == "deleted" {
 		status = "EXPIRED"
 	}
-	return &TaskStatus{ID: row.ID, Status: status, Progress: progress, ResultKey: row.ResultKey, ResultURL: row.ResultURL, OwnerIdentity: row.OwnerIdentity, DownloadToken: row.DownloadToken, ReservationID: row.ReservationID, ReservationKind: row.ReservationKind, Error: row.Error, UpdatedAt: row.UpdatedAt.Unix()}
+	resultKey, resultURL := row.ResultKey, row.ResultURL
+	if row.State == "artifact_unavailable" || row.State == "artifact_recovery_hold" {
+		status = "FAILED"
+		progress = 100
+		resultKey = ""
+		resultURL = ""
+	}
+	return &TaskStatus{ID: row.ID, Status: status, Progress: progress, ResultKey: resultKey, ResultURL: resultURL, OwnerIdentity: row.OwnerIdentity, DownloadToken: row.DownloadToken, ReservationID: row.ReservationID, ReservationKind: row.ReservationKind, Error: row.Error, UpdatedAt: row.UpdatedAt.Unix()}
 }
 
 // PublishArtifact persists the ownership decision BEFORE its first storage
@@ -193,6 +203,8 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 		return errors.New("durable task database unavailable")
 	}
 	var completed *models.TaskCompletion
+	var quarantined *models.TaskCompletion
+	var quarantineCause error
 	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row models.TaskCompletion
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
@@ -200,9 +212,12 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 		}
 		if row.State == "completed" {
 			if !validTaskArtifactKey(row.ID, row.ResultKey) {
-				return ErrSettlementPending
+				return quarantineCompletedArtifact(tx, &row, storage.ErrArtifactIntegrity, &quarantined, &quarantineCause)
 			}
 			if err := storage.VerifyArtifact(ctx, row.ResultKey, row.ArtifactSHA256, row.ArtifactBytes); err != nil {
+				if isPermanentArtifactLoss(err) {
+					return quarantineCompletedArtifact(tx, &row, err, &quarantined, &quarantineCause)
+				}
 				return fmt.Errorf("%w: artifact verification: %w", ErrSettlementPending, err)
 			}
 			completed = &row
@@ -248,15 +263,116 @@ func (r *TaskRegistry) ReconcileCompletion(ctx context.Context, id string) error
 	if err != nil {
 		return err
 	}
+	if quarantined != nil {
+		r.projectDurableStatus(ctx, quarantined)
+		return fmt.Errorf("%w: completed artifact unavailable: %w", ErrSettlementPending, quarantineCause)
+	}
 	// Projection ACK cannot invalidate durable success or authorize deletion.
-	if client := r.getClient(); client != nil {
-		data, err := marshalDurableStatus(completed)
-		if err != nil {
+	r.projectDurableStatus(ctx, completed)
+	return nil
+}
+
+func quarantineCompletedArtifact(tx *gorm.DB, row *models.TaskCompletion, cause error, quarantined **models.TaskCompletion, quarantineCause *error) error {
+	row.State = "artifact_unavailable"
+	row.Error = artifactUnavailableMessage
+	if err := tx.Save(row).Error; err != nil {
+		return err
+	}
+	copy := *row
+	*quarantined = &copy
+	*quarantineCause = cause
+	return nil
+}
+
+func isPermanentArtifactLoss(err error) bool {
+	return errors.Is(err, storage.ErrArtifactIntegrity) || errors.Is(err, storage.ErrObjectNotFound)
+}
+
+func (r *TaskRegistry) quarantineArtifact(ctx context.Context, id string) error {
+	if config.DB == nil {
+		return errors.New("durable task database unavailable")
+	}
+	var row models.TaskCompletion
+	changed := false
+	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
 			return err
 		}
-		if err := client.Set(ctx, TaskKeyPrefix+id, data, time.Until(completed.ExpiresAt)).Err(); err != nil {
-			log.Printf("[TASK PROJECTION] %s: %v", id, err)
+		if row.State != "completed" {
+			return nil
 		}
+		row.State = "artifact_unavailable"
+		row.Error = artifactUnavailableMessage
+		if err := tx.Save(&row).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if changed {
+		r.projectDurableStatus(ctx, &row)
+	}
+	return nil
+}
+
+func (r *TaskRegistry) projectDurableStatus(ctx context.Context, row *models.TaskCompletion) {
+	client := r.getClient()
+	if client == nil || row == nil {
+		return
+	}
+	data, err := marshalDurableStatus(row)
+	if err != nil {
+		log.Printf("[TASK PROJECTION] %s: %v", row.ID, err)
+		return
+	}
+	ttl := time.Until(row.ExpiresAt)
+	if ttl <= 0 {
+		ttl = TaskTTL
+	}
+	if err := client.Set(ctx, TaskKeyPrefix+row.ID, data, ttl).Err(); err != nil {
+		log.Printf("[TASK PROJECTION] %s: %v", row.ID, err)
+	}
+}
+
+func (r *TaskRegistry) recoverUnavailableArtifact(ctx context.Context, observed *models.TaskCompletion) error {
+	if observed == nil || observed.State != "artifact_unavailable" || !validTaskArtifactKey(observed.ID, observed.ResultKey) {
+		return nil
+	}
+	if !observed.ExpiresAt.After(time.Now()) {
+		return r.retireTaskArtifact(ctx, observed.ID, time.Now())
+	}
+	if err := storage.VerifyArtifact(ctx, observed.ResultKey, observed.ArtifactSHA256, observed.ArtifactBytes); err != nil {
+		if isPermanentArtifactLoss(err) {
+			return nil
+		}
+		return err
+	}
+	var restored *models.TaskCompletion
+	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row models.TaskCompletion
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", observed.ID).Error; err != nil {
+			return err
+		}
+		if row.State != "artifact_unavailable" || row.ResultKey != observed.ResultKey || row.ArtifactSHA256 != observed.ArtifactSHA256 || row.ArtifactBytes != observed.ArtifactBytes {
+			return nil
+		}
+		row.State = "completed"
+		row.Error = ""
+		if err := tx.Save(&row).Error; err != nil {
+			return err
+		}
+		copy := row
+		restored = &copy
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if restored != nil {
+		r.projectDurableStatus(ctx, restored)
 	}
 	return nil
 }
@@ -304,7 +420,7 @@ func WithReservationRelease(ctx context.Context, reservationID string, fn func(*
 		if err != nil {
 			return err
 		}
-		if row.ID != "" && (row.State == "publishing" || row.State == "completed" || row.State == "deleting") {
+		if row.ID != "" && (row.State == "publishing" || row.State == "completed" || row.State == "artifact_unavailable" || row.State == "deleting") {
 			return nil
 		}
 		if row.ID != "" && row.State == "active" {
@@ -355,9 +471,10 @@ func transitionDurable(ctx context.Context, id, owner, state, message string) (*
 // If the record exists in PostgreSQL, authorization is verified atomically under the row update lock
 // BEFORE ANY state transition or modification occurs.
 // Returns:
-//   result: "CANCELLED_SUCCESS", "TERMINAL_ALREADY", "UNAUTHORIZED", or "" if not found in DB or DB unavailable
-//   task: the task status representation of the row (or nil)
-//   err: DB error if any
+//
+//	result: "CANCELLED_SUCCESS", "TERMINAL_ALREADY", "UNAUTHORIZED", or "" if not found in DB or DB unavailable
+//	task: the task status representation of the row (or nil)
+//	err: DB error if any
 func cancelDurable(ctx context.Context, id, owner, token string) (string, *TaskStatus, error) {
 	if config.DB == nil {
 		return "", nil, nil
@@ -402,11 +519,13 @@ func (r *TaskRegistry) SweepDurableCompletions(ctx context.Context, now time.Tim
 	var firstErr error
 	// Separate finite queues prevent indefinitely uncertain publication from
 	// starving active recovery or expired completed-artifact reclamation.
-	for _, state := range []string{"active", "publishing", "retained"} {
+	for _, state := range []string{"active", "publishing", "artifact_unavailable", "retained"} {
 		var rows []models.TaskCompletion
 		query := config.DB.WithContext(ctx)
 		if state == "retained" {
-			query = query.Where("state IN ? AND expires_at <= ?", []string{"completed", "deleting"}, now)
+			query = query.Where("state IN ? AND expires_at <= ?", []string{"completed", "artifact_unavailable", "deleting"}, now)
+		} else if state == "artifact_unavailable" {
+			query = query.Where("state = ? AND expires_at > ?", state, now)
 		} else {
 			query = query.Where("state = ?", state)
 		}
@@ -432,6 +551,12 @@ func (r *TaskRegistry) SweepDurableCompletions(ctx context.Context, now time.Tim
 					err = r.reconcileExternalTask(ctx, &row)
 				} else {
 					err = r.ReconcileCompletion(ctx, row.ID)
+				}
+			case "artifact_unavailable":
+				if row.ExpiresAt.After(now) {
+					err = r.recoverUnavailableArtifact(ctx, &row)
+				} else {
+					err = r.retireTaskArtifact(ctx, row.ID, now)
 				}
 			default:
 				err = r.retireTaskArtifact(ctx, row.ID, now)
@@ -591,21 +716,32 @@ func (r *TaskRegistry) reconcileExternalTask(ctx context.Context, row *models.Ta
 
 func (r *TaskRegistry) retireTaskArtifact(ctx context.Context, id string, now time.Time) error {
 	claimed := false
+	var held *models.TaskCompletion
 	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row models.TaskCompletion
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
 			return err
 		}
-		if (row.State != "completed" && row.State != "deleting") || row.ExpiresAt.After(now) {
+		if (row.State != "completed" && row.State != "artifact_unavailable" && row.State != "deleting") || row.ExpiresAt.After(now) {
+			return nil
+		}
+		key := row.ResultKey
+		if !validTaskArtifactKey(id, key) {
+			// Once retention expires, an unknown key cannot authorize deletion.
+			// Stop automatic retries and keep a non-downloadable record for
+			// operator review instead of passing an unvalidated key to storage.
+			row.State = "artifact_recovery_hold"
+			row.Error = artifactRecoveryHoldMessage
+			if err := tx.Save(&row).Error; err != nil {
+				return err
+			}
+			copy := row
+			held = &copy
 			return nil
 		}
 		if row.State == "deleting" {
 			claimed = true
 			return nil
-		}
-		key := row.ResultKey
-		if !validTaskArtifactKey(id, key) {
-			return errors.New("invalid persisted artifact ownership")
 		}
 		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?,81807))", key).Error; err != nil {
 			return err
@@ -653,8 +789,15 @@ func (r *TaskRegistry) retireTaskArtifact(ctx context.Context, id string, now ti
 		claimed = true
 		return nil
 	})
-	if err != nil || !claimed {
+	if err != nil {
 		return err
+	}
+	if held != nil {
+		r.projectDurableStatus(ctx, held)
+		return nil
+	}
+	if !claimed {
+		return nil
 	}
 	return config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row models.TaskCompletion

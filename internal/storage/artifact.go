@@ -264,6 +264,9 @@ func SaveVerifiedArtifact(ctx context.Context, key, source, digest string, size 
 		if store == nil {
 			return errors.New("artifact storage unavailable")
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		_, err = store.client.PutObject(ctx, store.bucket, key, io.LimitReader(artifactReader{ctx, file}, size), size, minio.PutObjectOptions{ContentType: contentType})
 		return err
 	}
@@ -292,6 +295,9 @@ func SaveVerifiedArtifact(ctx context.Context, key, source, digest string, size 
 	}
 	encrypted, err := encryptData(data)
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	_, err = store.client.PutObject(ctx, store.bucket, key, bytes.NewReader(encrypted), int64(len(encrypted)), minio.PutObjectOptions{ContentType: contentType})

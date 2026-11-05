@@ -16,4 +16,7 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	adminGroup.Patch("/users/:id/role", ctrl.UpdateUserRole)
 	adminGroup.Get("/subscriptions", ctrl.ListSubscriptions)
 	adminGroup.Patch("/users/:id/tier", ctrl.UpdateUserTier)
+	adminGroup.Get("/artifact-recovery", ctrl.ListArtifactRecoveryHolds)
+	adminGroup.Get("/artifact-recovery/:id", ctrl.GetArtifactRecoveryHold)
+	adminGroup.Post("/artifact-recovery/:id", ctrl.ResolveArtifactRecoveryHold)
 }
