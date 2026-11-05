@@ -38,6 +38,12 @@ func deleteAccountWithCleanup(ctx context.Context, db *gorm.DB, id string, versi
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&intent).Error; err != nil {
 			return err
 		}
+		// Bearer downloads are independent of login sessions. Revoke durable
+		// capabilities now, even when active or held work must retain its rows,
+		// artifact identity and billing evidence for later safe cleanup.
+		if err := tx.Model(&backendModels.TaskCompletion{}).Where("owner_identity = ?", id).Update("download_token", "").Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&account).Updates(map[string]any{"status": "deleted", "session_version": gorm.Expr("session_version + 1"), "updated_at": now}).Error; err != nil {
 			return err
 		}

@@ -1,13 +1,17 @@
 package tasks
 
 import (
+	"context"
 	"errors"
+	"github.com/google/uuid"
 	"mime"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -188,6 +192,25 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 }
 
 func isAuthorizedOwner(c *fiber.Ctx, task *TaskStatus, requesterID string) bool {
+	// An already-authenticated request may admit a task after the deletion
+	// transaction revoked existing grants. The durable account cleanup intent
+	// also fences those late grants, including an identity cached before delete.
+	// Guests share the UUID format, so rely only on an exact deletion intent,
+	// never infer account status from an identity or a missing user row.
+	if _, err := uuid.Parse(task.OwnerIdentity); err == nil && config.DB != nil {
+		ctx, cancel := context.WithTimeout(c.UserContext(), 3*time.Second)
+		defer cancel()
+		var present bool
+		if err := config.DB.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil {
+			return false
+		}
+		if present {
+			var deleted bool
+			if err := config.DB.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", task.OwnerIdentity).Scan(&deleted).Error; err != nil || deleted {
+				return false
+			}
+		}
+	}
 	if task.OwnerIdentity != "" && task.OwnerIdentity == requesterID {
 		return true
 	}

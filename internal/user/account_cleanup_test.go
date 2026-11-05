@@ -23,6 +23,7 @@ import (
 	"pdfnest-backend/internal/storage"
 	"pdfnest-backend/internal/studio"
 	studioModels "pdfnest-backend/internal/studio/models"
+	"pdfnest-backend/internal/tasks"
 )
 
 func cleanupDB(t *testing.T) *gorm.DB {
@@ -237,4 +238,96 @@ func TestDeleteAccountHTTPUsesAuthenticatedSessionAndFailsClosedWithoutLedger(t 
 	require.Equal(t, 503, response.StatusCode)
 	response.Body.Close()
 	require.NoError(t, db.First(&untouched, "id = ?", other.ID).Error)
+}
+
+func TestDeleteAccountImmediatelyRevokesTaskDownloadCapabilitiesWhileCleanupIsPinned(t *testing.T) {
+	db := cleanupDB(t)
+	previous := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = previous })
+	t.Setenv("JWT_SECRET", "account-delete-download-test-secret")
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	require.NoError(t, db.Exec(`CREATE TABLE backend_durability_schema(version text PRIMARY KEY, applied_at timestamptz NOT NULL); INSERT INTO backend_durability_schema VALUES ('20261105_account_cleanup_v1',now())`).Error)
+	owner := config.User{ID: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Status: "active", EmailVerified: true}
+	require.NoError(t, db.Create(&owner).Error)
+	taskID := uuid.NewString()
+	key := "outputs/tasks/" + taskID + "/result.pdf"
+	size, digest, err := storage.SaveLocalStream(context.Background(), key, strings.NewReader("private account artifact"))
+	require.NoError(t, err)
+	completed := backendModels.TaskCompletion{ID: taskID, OwnerIdentity: owner.ID, DownloadToken: uuid.NewString(), ReservationID: "immutable-billing", State: "completed", ResultKey: key, ArtifactSHA256: digest, ArtifactBytes: size, ExpiresAt: time.Now().Add(time.Hour)}
+	held := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: owner.ID, DownloadToken: uuid.NewString(), ReservationID: "held-billing", State: "artifact_recovery_hold", ResultKey: "retained/evidence.pdf", ArtifactSHA256: strings.Repeat("a", 64), ArtifactBytes: 10}
+	other := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: uuid.NewString(), DownloadToken: uuid.NewString(), State: "completed", ExpiresAt: time.Now().Add(time.Hour)}
+	require.NoError(t, db.Create(&completed).Error)
+	require.NoError(t, db.Create(&held).Error)
+	require.NoError(t, db.Create(&other).Error)
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error { c.Locals("identity_id", c.Get("X-Test-Owner")); return c.Next() })
+	RegisterRoutes(app, NewController())
+	tasks.RegisterRoutes(app)
+	download := func() *http.Response {
+		r := httptest.NewRequest(http.MethodGet, "/v1/download/"+taskID+"?token="+completed.DownloadToken, nil)
+		response, err := app.Test(r)
+		require.NoError(t, err)
+		return response
+	}
+	response := download()
+	require.Equal(t, 200, response.StatusCode)
+	response.Body.Close()
+	token, err := auth.NewService().GenerateToken(owner.ID, owner.Role, owner.SessionVersion)
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodDelete, "/user/account", nil)
+	request.AddCookie(&http.Cookie{Name: "auth_token", Value: token})
+	response, err = app.Test(request)
+	require.NoError(t, err)
+	require.Equal(t, 200, response.StatusCode)
+	response.Body.Close()
+	// No cleanup worker has run, and the hold prevents physical cleanup from draining.
+	response = download()
+	require.Equal(t, 403, response.StatusCode)
+	response.Body.Close()
+	var after backendModels.TaskCompletion
+	for _, before := range []backendModels.TaskCompletion{completed, held} {
+		after = backendModels.TaskCompletion{}
+		require.NoError(t, db.First(&after, "id = ?", before.ID).Error)
+		require.Empty(t, after.DownloadToken)
+		require.Equal(t, before.State, after.State)
+		require.Equal(t, before.ReservationID, after.ReservationID)
+		require.Equal(t, before.ResultKey, after.ResultKey)
+		require.Equal(t, before.ArtifactSHA256, after.ArtifactSHA256)
+		require.Equal(t, before.ArtifactBytes, after.ArtifactBytes)
+	}
+	after = backendModels.TaskCompletion{}
+	require.NoError(t, db.First(&after, "id = ?", other.ID).Error)
+	require.Equal(t, other.DownloadToken, after.DownloadToken)
+	// A request authenticated before deletion can finish admitting a new row
+	// afterwards. Its fresh bearer grant must still be denied by the tombstone.
+	late := completed
+	late.ID = uuid.NewString()
+	late.DownloadToken = uuid.NewString()
+	require.NoError(t, db.Create(&late).Error)
+	for _, path := range []string{"/v1/download/" + late.ID + "?token=" + late.DownloadToken, "/v1/tasks/" + late.ID + "?token=" + late.DownloadToken} {
+		lateRequest := httptest.NewRequest(http.MethodGet, path, nil)
+		lateResponse, err := app.Test(lateRequest)
+		require.NoError(t, err)
+		require.Equal(t, 403, lateResponse.StatusCode)
+		lateResponse.Body.Close()
+		cachedOwner := httptest.NewRequest(http.MethodGet, path, nil)
+		cachedOwner.Header.Set("X-Test-Owner", owner.ID)
+		cachedResponse, err := app.Test(cachedOwner)
+		require.NoError(t, err)
+		require.Equal(t, 403, cachedResponse.StatusCode)
+		cachedResponse.Body.Close()
+	}
+	// A guest UUID without an account deletion intent keeps its bearer grant.
+	guest := completed
+	guest.ID = uuid.NewString()
+	guest.OwnerIdentity = uuid.NewString()
+	guest.DownloadToken = uuid.NewString()
+	require.NoError(t, db.Create(&guest).Error)
+	guestResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/download/"+guest.ID+"?token="+guest.DownloadToken, nil))
+	require.NoError(t, err)
+	require.Equal(t, 200, guestResponse.StatusCode)
+	guestResponse.Body.Close()
 }
