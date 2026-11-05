@@ -117,3 +117,26 @@ func TestBackendDurabilityDraftRollbackRefusesRetainedOwnership(t *testing.T) {
 	}
 	require.NoError(t, runDurabilityScript(pool, backendDurabilityRollbackSQL))
 }
+
+func TestArtifactRecoveryLedgerMigrationIsSeparateIdempotentAndProtectsAudit(t *testing.T) {
+	db, pool := durabilityMigrationFixture(t)
+	createPriorDurabilitySchema(t, db)
+	require.NoError(t, runDurabilityScript(pool, backendDurabilityDraftSQL))
+	require.Error(t, ValidateArtifactRecoverySchema(db), "endpoint schema must fail closed before the operator migration")
+	require.NoError(t, runDurabilityScript(pool, artifactRecoveryMigrationSQL))
+	require.NoError(t, ValidateArtifactRecoverySchema(db))
+	require.NoError(t, runDurabilityScript(pool, artifactRecoveryMigrationSQL), "migration must be idempotent")
+
+	actionID := uuid.NewString()
+	_, err := pool.Exec(`INSERT INTO public.artifact_recovery_actions
+		(id, operation_key, request_fingerprint, task_id, admin_user_id, action, state, reason,
+		 owner_identity, original_result_key, artifact_sha256, artifact_bytes, original_expires_at, attempts)
+		VALUES ($1, 'op-1', repeat('a',64), 'held-task', $2, 'close', 'case_closed_non_destructive',
+		'reviewed hold evidence', 'user:owner', '../invalid', repeat('b',64), 10, now(), 1)`, actionID, uuid.NewString())
+	require.NoError(t, err)
+	require.ErrorContains(t, runDurabilityScript(pool, artifactRecoveryRollbackSQL), "retained artifact recovery audit evidence")
+	require.NoError(t, ValidateArtifactRecoverySchema(db))
+	require.NoError(t, db.Exec("DELETE FROM public.artifact_recovery_actions WHERE id = ?", actionID).Error)
+	require.NoError(t, runDurabilityScript(pool, artifactRecoveryRollbackSQL))
+	require.Error(t, ValidateArtifactRecoverySchema(db))
+}

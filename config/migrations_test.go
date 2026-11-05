@@ -297,7 +297,7 @@ func TestManagedMigrationInitialization(t *testing.T) {
 	require.NotEmpty(t, l.ddl())
 	var tables, versions int
 	require.NoError(t, obs.QueryRow("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'").Scan(&tables))
-	require.Equal(t, 27, tables)
+	require.Equal(t, len(schemaModels())+1, tables, "current managed models plus schema_migrations")
 	require.NoError(t, obs.QueryRow("SELECT count(*) FROM public.schema_migrations WHERE version='20260918_01_admin_subscription_mutation'").Scan(&versions))
 	require.Equal(t, 1, versions)
 	require.NoError(t, ValidateManagedSchema(db))
