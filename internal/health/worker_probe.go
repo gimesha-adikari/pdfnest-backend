@@ -17,7 +17,13 @@ func probeWorkerReadiness(ctx context.Context) (string, map[string]bool, error) 
 	if err != nil {
 		return "", nil, errors.New("worker readiness request could not be created")
 	}
-	resp, err := worker.Client.Do(req)
+	// Readiness is signed for the configured Worker URL. Do not let the generic
+	// Worker client follow a redirect and sign the request for another target.
+	probeClient := *worker.Client
+	probeClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := probeClient.Do(req)
 	if err != nil {
 		return "", nil, errors.New("worker readiness probe failed")
 	}

@@ -59,3 +59,30 @@ func TestWorkerReadinessProbeUsesTheSignedWorkerContract(t *testing.T) {
 		"pdf_to_office":       true,
 	}, capabilities)
 }
+
+func TestWorkerReadinessProbeDoesNotFollowRedirects(t *testing.T) {
+	const secret = "synthetic-readiness-redirect-test-secret"
+	t.Setenv("WORKER_SHARED_SECRET", secret)
+
+	targetRequests := make(chan struct{}, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetRequests <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"status":"ready","capabilities":{"document_processing":true,"ocr":true,"office_to_pdf":true,"pdf_to_office":true}}`)
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/capture", http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	t.Setenv("PDFNEST_WORKER_URL", redirector.URL)
+
+	_, _, err := probeWorkerReadiness(context.Background())
+	require.Error(t, err, "a redirect is not a valid Worker readiness response")
+	select {
+	case <-targetRequests:
+		t.Fatal("signed Worker request was forwarded to a redirect target")
+	default:
+	}
+}
