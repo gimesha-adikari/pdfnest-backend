@@ -4,6 +4,7 @@ package gitquota
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"golang.org/x/sys/unix"
@@ -163,4 +164,15 @@ func TestAuthorityRestartNeverResumesInterruptedLease(t *testing.T) {
 	require.Equal(t, "quarantined", record.Status)
 	require.Equal(t, grant.Token, record.LeaseID)
 	require.True(t, grant.Deadline.Equal(record.Deadline))
+}
+
+func TestQuotaReadBrokerHonorsCallerDeadline(t *testing.T) {
+	helper := filepath.Join(t.TempDir(), "read-only-broker")
+	require.NoError(t, os.WriteFile(helper, []byte("#!/bin/sh\nexec /bin/sleep 30\n"), 0700))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := (helperInspector{helper: helper}).InspectContext(ctx, Slot{})
+	require.Error(t, err)
+	require.Less(t, time.Since(started), time.Second)
 }

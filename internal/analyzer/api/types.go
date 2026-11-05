@@ -88,9 +88,11 @@ type TreeResponse struct {
 
 // AnalyzeRequest triggers the asynchronous full repository analysis.
 type AnalyzeRequest struct {
-	SelectedDomains []string `json:"selectedDomains,omitempty"`
-	DeepAst         bool     `json:"deepAst,omitempty"`
-	EnableAi        bool     `json:"enableAi,omitempty"`
+	// Set only by the controller from verified authentication, never JSON.
+	admissionIdentity string
+	SelectedDomains   []string `json:"selectedDomains,omitempty"`
+	DeepAst           bool     `json:"deepAst,omitempty"`
+	EnableAi          bool     `json:"enableAi,omitempty"`
 }
 
 // AnalyzeResponse contains the dispatched task identifier.

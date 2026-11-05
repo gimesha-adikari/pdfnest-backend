@@ -95,3 +95,20 @@ func TestInvalidSandboxIDs(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxCleanupFailureRemainsVisibleAndCanRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary filesystem permission checks")
+	}
+	sb, err := NewSandbox(t.TempDir(), "cleanup-retry")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sb.scratchPath, "blocked"), []byte("retained"), 0600))
+	require.NoError(t, os.Chmod(sb.scratchPath, 0500))
+	t.Cleanup(func() { _ = os.Chmod(sb.scratchPath, 0700); _ = sb.Cleanup() })
+	require.Error(t, sb.Cleanup(), "interrupted cleanup must be reported")
+	require.True(t, sb.IsClosed(), "new operations must not start after cleanup began")
+	require.DirExists(t, sb.scratchPath)
+	require.NoError(t, os.Chmod(sb.scratchPath, 0700))
+	require.NoError(t, sb.Cleanup(), "restoring access must allow the retained cleanup to finish")
+	require.NoDirExists(t, sb.scratchPath)
+}

@@ -2,6 +2,7 @@ package acquisition
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -73,12 +74,7 @@ type AcquisitionLimits struct {
 
 // DefaultAcquisitionLimits returns the standard production limits (250 MB, 25k files, 100:1 ratio, 300s git timeout).
 func DefaultAcquisitionLimits() AcquisitionLimits {
-	gitTimeout := 300 * time.Second
-	if envSec := os.Getenv("ANALYZER_GIT_TIMEOUT_SECONDS"); envSec != "" {
-		if sec, err := strconv.Atoi(envSec); err == nil && sec > 0 {
-			gitTimeout = time.Duration(sec) * time.Second
-		}
-	}
+	gitTimeout, _ := configuredGitTimeout()
 	return AcquisitionLimits{
 		MaxExtractedBytes:     250 * 1024 * 1024, // 250 MB
 		MaxFileCount:          25000,             // 25,000 files
@@ -99,4 +95,19 @@ type AcquisitionResult struct {
 	TotalFiles            int               `json:"totalFiles"`
 	TotalBytes            int64             `json:"totalBytes"`
 	AcquisitionDurationMs int64             `json:"acquisitionDurationMs"`
+}
+
+// Invalid configuration is refused by validation before DNS or native execution.
+// Keep this accessor total for ZIP callers that do not use Git configuration.
+func configuredGitTimeout() (time.Duration, error) {
+	const fallback = 300 * time.Second
+	value := os.Getenv("ANALYZER_GIT_TIMEOUT_SECONDS")
+	if value == "" {
+		return fallback, nil
+	}
+	sec, err := strconv.Atoi(value)
+	if err != nil || sec < 1 || sec > 3600 || strconv.Itoa(sec) != value {
+		return fallback, fmt.Errorf("%w: ANALYZER_GIT_TIMEOUT_SECONDS must be an integer from 1 to 3600", ErrGitAcquisitionFailed)
+	}
+	return time.Duration(sec) * time.Second, nil
 }

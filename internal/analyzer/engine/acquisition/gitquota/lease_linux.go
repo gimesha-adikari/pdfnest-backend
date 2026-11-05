@@ -53,13 +53,17 @@ type Manager struct {
 type helperInspector struct{ helper, config string }
 
 func (h helperInspector) Inspect(slot Slot) (Usage, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	return h.InspectContext(context.Background(), slot)
+}
+func (h helperInspector) InspectContext(parent context.Context, slot Slot) (Usage, error) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.helper, "inspect", h.config, slot.Path)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+	cmd.WaitDelay = 500 * time.Millisecond
 	output, err := cmd.Output()
 	if err != nil {
-		return Usage{}, fmt.Errorf("trusted quota broker read failed: %w", err)
+		return Usage{}, fmt.Errorf("trusted quota broker read failed: %w", errors.Join(err, ctx.Err()))
 	}
 	if len(output) > 4096 {
 		return Usage{}, fmt.Errorf("invalid broker response")
@@ -200,15 +204,30 @@ func (m *Manager) InspectLocal(path string) (Usage, error) {
 	return Usage{}, unavailable(fmt.Errorf("unapproved slot"))
 }
 
-func (m *Manager) Probe() error {
+func (m *Manager) Probe() error { return m.ProbeContext(context.Background()) }
+func (m *Manager) ProbeContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return unavailable(err)
+	}
 	if m.config.AuthoritySocket == "" {
 		return unavailable(fmt.Errorf("no protected expiration authority"))
 	}
-	if _, err := m.authorityCall(authorityRequest{Operation: "probe"}); err != nil {
+	if _, err := m.authorityCallContext(ctx, authorityRequest{Operation: "probe"}); err != nil {
 		return unavailable(err)
 	}
 	for _, slot := range m.config.Slots {
-		if _, err := m.kernel.Inspect(slot); err != nil {
+		if err := ctx.Err(); err != nil {
+			return unavailable(err)
+		}
+		var err error
+		if reader, ok := m.kernel.(interface {
+			InspectContext(context.Context, Slot) (Usage, error)
+		}); ok {
+			_, err = reader.InspectContext(ctx, slot)
+		} else {
+			_, err = m.kernel.Inspect(slot)
+		}
+		if err != nil {
 			return unavailable(err)
 		}
 	}
@@ -322,9 +341,13 @@ func (m *Manager) clean(slot Slot) error {
 // service implementation holds a cross-process flock until final cleanup. A crash, corrupt
 // journal, changed quota, dirty slot, or retained unlinked allocation quarantines
 // the slot. It never silently recycles an interrupted execution.
-func (m *Manager) Acquire() (*Lease, error) {
+func (m *Manager) Acquire() (*Lease, error) { return m.AcquireContext(context.Background()) }
+func (m *Manager) AcquireContext(ctx context.Context) (*Lease, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, unavailable(err)
+	}
 	if m.config.AuthoritySocket != "" {
-		return m.acquireRemote()
+		return m.acquireRemoteContext(ctx)
 	}
 	return m.acquireLocal()
 }

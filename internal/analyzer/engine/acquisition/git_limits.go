@@ -25,17 +25,31 @@ func isolatedGitEnv(home, temp string) []string {
 // Required mode consumes independent administrator-owned configuration and
 // verifies kernel quota state through the fixed read-only broker before DNS.
 // Monitoring remains a separate defense and is never promoted to a hard quota.
-func checkGitStoragePolicy() error {
+func checkGitStoragePolicy() error { return checkGitStoragePolicyContext(context.Background()) }
+func checkGitStoragePolicyContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Shared in-memory admission supports exactly one worker process. These are
+	// operator declarations, not discovery of the actual deployment topology.
+	for _, key := range []string{"ANALYZER_WORKER_PROCESSES", "ANALYZER_WORKER_REPLICAS", "WEB_CONCURRENCY"} {
+		if value := os.Getenv(key); value != "" && value != "1" {
+			return fmt.Errorf("%w: %s must declare one worker process; distributed Git admission is unavailable", ErrGitAcquisitionFailed, key)
+		}
+	}
+	if _, err := configuredGitTimeout(); err != nil {
+		return err
+	}
 	switch os.Getenv("ANALYZER_GIT_STORAGE_POLICY") {
 	case "", "monitored":
 		return nil
 	case "required":
 		manager, err := gitquota.Load(os.Getenv("ANALYZER_GIT_QUOTA_CONFIG"))
 		if err == nil {
-			err = manager.Probe()
+			err = manager.ProbeContext(ctx)
 		}
 		if err != nil {
-			return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+			return fmt.Errorf("%w: %w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
 		}
 		return nil
 	default:
@@ -105,6 +119,9 @@ func checkGitWorkspace(ctx context.Context, root string, limits AcquisitionLimit
 // finishing between ticks. This is NOT a filesystem quota: writes can overshoot
 // between scans and during termination. A hard scratch ceiling needs OS quotas.
 func runBoundedGit(ctx context.Context, cmd *exec.Cmd, root string, limits AcquisitionLimits) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	limits = effectiveGitLimits(limits)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

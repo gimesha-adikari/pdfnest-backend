@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -289,4 +290,53 @@ func TestNewHardenedExecAllocator(t *testing.T) {
 
 	// Verify cleanup works cleanly without errors
 	allocCancel()
+}
+
+func TestRunner_PreCanceledDoesNotStart(t *testing.T) {
+	marker := t.TempDir() + "/started"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (Runner{}).Run(ctx, time.Second, "/does-not-exist"); !errors.Is(err, ErrProcessCancelled) {
+		t.Fatalf("canceled context attempted process start: %v", err)
+	}
+	_, err := (Runner{}).Run(ctx, time.Second, "/bin/sh", "-c", `touch "$1"`, "sh", marker)
+	if !errors.Is(err, ErrProcessCancelled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("canceled command was launched")
+	}
+}
+
+func TestRunner_SuccessDrainsBackgroundDescendant(t *testing.T) {
+	marker := t.TempDir() + "/child"
+	// The child redirects its output, so pipe closure cannot accidentally supply
+	// the missing lifecycle guarantee when the leader exits successfully.
+	started := time.Now()
+	_, err := (Runner{}).Run(context.Background(), time.Second, "/bin/sh", "-c", `sleep 30 >/dev/null 2>&1 & echo $! > "$1"`, "sh", marker)
+	if err != nil {
+		t.Fatalf("leader failed: %v", err)
+	}
+	if time.Since(started) > 2*time.Second {
+		t.Fatal("cleanup exceeded deadline")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Clean fixture even on the unfixed implementation.
+	defer func() { _ = syscall.Kill(pid, syscall.SIGKILL) }()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if errors.Is(err, os.ErrNotExist) || strings.Contains(string(stat), ") Z ") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("successful command left its background descendant running")
 }

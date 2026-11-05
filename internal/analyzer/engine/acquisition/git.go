@@ -48,14 +48,43 @@ type DNSResolverFunc func(host string) ([]net.IP, error)
 
 // ValidateGitURL strictly inspects a remote Git repository URL for protocol security and SSRF threats.
 func ValidateGitURL(rawURL string) error {
-	return ValidateGitURLWithResolver(rawURL, net.LookupIP)
+	return ValidateGitURLContext(context.Background(), rawURL)
+}
+
+// ValidateGitURLContext bounds DNS work by the acquisition or caller deadline.
+func ValidateGitURLContext(ctx context.Context, rawURL string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	timeout, err := configuredGitTimeout()
+	if err != nil {
+		return err
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err = validateGitURLWithResolver(lookupCtx, rawURL, func(host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(lookupCtx, "ip", host)
+	})
+	if lookupCtx.Err() != nil {
+		return fmt.Errorf("%w: DNS validation interrupted: %w", ErrGitAcquisitionFailed, lookupCtx.Err())
+	}
+	return err
 }
 
 // ValidateGitURLWithResolver validates a Git URL using a custom DNS resolver.
 func ValidateGitURLWithResolver(rawURL string, resolver DNSResolverFunc) error {
+	timeout, err := configuredGitTimeout()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return validateGitURLWithResolver(ctx, rawURL, resolver)
+}
+func validateGitURLWithResolver(ctx context.Context, rawURL string, resolver DNSResolverFunc) error {
 	// Session creation and queued-job validation also resolve DNS through this
 	// boundary, so required storage policy must refuse those paths as well.
-	if err := checkGitStoragePolicy(); err != nil {
+	if err := checkGitStoragePolicyContext(ctx); err != nil {
 		return err
 	}
 	trimmed := strings.TrimSpace(rawURL)
@@ -199,7 +228,7 @@ func CloneGitRepository(
 
 // gitBinary is an internal test seam; public acquisition always uses the system
 // Git and a fixed helper PATH, never an inherited caller-supplied executable.
-func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, limits AcquisitionLimits, gitBinary string) (*AcquisitionResult, error) {
+func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, limits AcquisitionLimits, gitBinary string) (result *AcquisitionResult, cloneErr error) {
 	if sandbox == nil || sandbox.IsClosed() {
 		return nil, ErrSandboxClosed
 	}
@@ -207,28 +236,38 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 	success := false
 	defer func() {
 		if !success {
-			_ = sandbox.Cleanup()
+			if cleanupErr := sandbox.Cleanup(); cleanupErr != nil {
+				result = nil
+				cloneErr = errors.Join(cloneErr, fmt.Errorf("scratch cleanup failed: %w", cleanupErr))
+			}
 		}
 	}()
-	// Check before DNS resolution, guarded transport, or any native process.
-	if err := checkGitStoragePolicy(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := sandbox.admitGitQuota(); err != nil {
+	timeout := limits.GitTimeout
+	if timeout == 0 {
+		timeout, _ = configuredGitTimeout()
+	}
+	if timeout < 0 || timeout > time.Hour {
+		return nil, fmt.Errorf("%w: invalid Git timeout", ErrGitAcquisitionFailed)
+	}
+	cloneCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Check before DNS resolution, guarded transport, or any native process.
+	if err := checkGitStoragePolicyContext(cloneCtx); err != nil {
+		return nil, err
+	}
+	if err := sandbox.admitGitQuotaContext(cloneCtx); err != nil {
 		return nil, err
 	}
 	gitURL = strings.TrimSpace(gitURL)
-	if err := ValidateGitURL(gitURL); err != nil {
+	if err := ValidateGitURLContext(cloneCtx, gitURL); err != nil {
 		return nil, err
 	}
-
-	timeout := limits.GitTimeout
-	if timeout <= 0 {
-		timeout = 45 * time.Second
+	if err := cloneCtx.Err(); err != nil {
+		return nil, err
 	}
-
-	cloneCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	startTime := time.Now()
 
@@ -264,7 +303,6 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 		return nil, err
 	}
 	if err != nil {
-		_ = sandbox.Cleanup()
 		elapsed := time.Since(startTime).Round(time.Millisecond)
 		outStr := strings.TrimSpace(string(output))
 
@@ -275,7 +313,7 @@ func cloneGitRepository(ctx context.Context, gitURL string, sandbox *Sandbox, li
 
 		// 2. Parent Context Cancellation (e.g. user aborted or worker shutting down)
 		if errors.Is(cloneCtx.Err(), context.Canceled) || (ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled)) {
-			return nil, fmt.Errorf("%w: git clone operation canceled", ErrGitAcquisitionFailed)
+			return nil, fmt.Errorf("%w: git clone operation canceled: %w", ErrGitAcquisitionFailed, ctx.Err())
 		}
 
 		// 3. Process Exit Code / Signal Inspection

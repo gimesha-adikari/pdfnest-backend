@@ -85,3 +85,35 @@ preprovisioned slots, the protected running expiration service and broker
 authority are provided. The unprivileged process tests do not qualify the root
 authority service or actual kernel storage limits. No hosting/deployment
 or privileged host modification is implied.
+
+Application admission is separate from storage qualification. Every analyzer
+pipeline in one backend process shares a bounded admission gate before DNS or
+workspace creation. `ANALYZER_MAX_ACTIVE_JOBS` defaults to 4 and
+`ANALYZER_MAX_ACTIVE_JOBS_PER_USER` defaults to 1; each accepts a canonical
+integer from 1 through 16, and the per-user value cannot exceed the global value.
+The controller uses verified account identity, which must match the server-owned
+session row, to select the per-user bucket. Guests and old queued jobs without
+that server field share one anonymous bucket. Admission waits consume no scratch
+workspace and honor cancellation. Pipeline calls without a caller deadline get
+the normal 120-second job deadline; all calls have a one-hour maximum.
+
+This admission gate supports one worker process, not distributed replicas. Git
+validation rejects `ANALYZER_WORKER_PROCESSES`, `ANALYZER_WORKER_REPLICAS`, or
+`WEB_CONCURRENCY` when a nonempty declaration is anything other than `1`.
+These trusted operator declarations do not detect undeclared extra processes.
+The quota authority alone does not provide distributed per-user admission.
+Multiple processes require a shared admission implementation before support can
+be claimed. `ANALYZER_GIT_TIMEOUT_SECONDS` defaults to 300 and accepts canonical
+integer seconds from 1 through 3600; malformed or overflowing values refuse Git
+before DNS rather than silently changing the timeout. Required storage policy
+still refuses unavailable authority or confinement and never falls back to
+monitored mode.
+
+The ordinary process runner observes leader exit without reaping it until
+same-group helpers have received termination, including after successful leader
+exit. This pins process-group identity during cleanup. Captured output and pipe
+draining are bounded. Process groups in monitored mode do not contain a helper
+that escapes into another group; required mode's PID namespace and syscall
+restrictions remain necessary for that stronger boundary. Ordinary sandbox
+cleanup failures remain visible, can be retried after filesystem access is
+restored, and prevent the pipeline from publishing successful completion.
