@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS public.account_storage_cleanups (
  created_at timestamptz,
  updated_at timestamptz
 );
+ALTER TABLE public.studio_storage_object_retirements ADD COLUMN IF NOT EXISTS last_delete_confirmed_at timestamptz;
 CREATE INDEX IF NOT EXISTS idx_account_storage_cleanups_next_attempt_at ON public.account_storage_cleanups(next_attempt_at);
 INSERT INTO public.backend_durability_schema(version,applied_at) VALUES ('20261105_account_cleanup_v1',now()) ON CONFLICT DO NOTHING;
 COMMIT;

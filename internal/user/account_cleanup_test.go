@@ -127,6 +127,17 @@ func TestAccountCleanupLeaseRecoveryAndCrossOwnerPin(t *testing.T) {
 	require.NoError(t, db.Model(&pin).Update("state", "deleted").Error)
 	require.True(t, worker.RunTaskAt(ctx, queued, now.Add(4*time.Hour)))
 	require.Equal(t, 1, calls)
+	var confirmation struct{ LastDeleteConfirmedAt *time.Time }
+	require.NoError(t, db.Table("studio_storage_object_retirements").Select("last_delete_confirmed_at").Where("object_key = ?", key).Scan(&confirmation).Error)
+	require.NotNil(t, confirmation.LastDeleteConfirmedAt, "physical deletion acknowledgement remains durable after retry row is removed")
+	// Baseline Studio cleanup remains compatible before the additive column.
+	require.NoError(t, db.Exec("ALTER TABLE studio_storage_object_retirements DROP COLUMN last_delete_confirmed_at").Error)
+	legacyTasks, err := studio.NewRepository(db).CreateStorageCleanupTasks(ctx, []string{"studio/legacy/" + uuid.NewString() + ".pdf"})
+	require.NoError(t, err)
+	require.Len(t, legacyTasks, 1)
+	require.True(t, worker.RunTaskAt(ctx, legacyTasks[0], now.Add(5*time.Hour)))
+	require.Equal(t, 2, calls)
+
 	require.NoError(t, db.First(&unchanged, "id = ?", task.ID).Error)
 	require.Equal(t, key, unchanged.ResultKey, "immutable artifact and billing evidence survives")
 }

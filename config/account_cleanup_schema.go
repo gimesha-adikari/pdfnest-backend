@@ -74,5 +74,9 @@ func ValidateAccountCleanupSchema(db *gorm.DB) error {
 	if len(expected) != 0 {
 		return fmt.Errorf("account cleanup schema incomplete")
 	}
+	var confirmation bool
+	if err := db.WithContext(ctx).Raw(`SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid='public.studio_storage_object_retirements'::regclass AND attname='last_delete_confirmed_at' AND atttypid='timestamptz'::regtype AND NOT attisdropped)`).Scan(&confirmation).Error; err != nil || !confirmation {
+		return fmt.Errorf("account cleanup deletion confirmation schema missing")
+	}
 	return nil
 }

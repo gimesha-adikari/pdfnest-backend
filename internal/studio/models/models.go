@@ -217,6 +217,9 @@ type StudioStorageCleanupTask struct {
 // are never reused: physical deletion must not race a new catalog reference,
 // including after the retry ledger entry itself has been completed.
 type StudioStorageObjectRetirement struct {
-	ObjectKey string    `gorm:"type:varchar(512);primaryKey" json:"-"`
-	CreatedAt time.Time `json:"-"`
+	// Read-only mapping keeps legacy schemas compatible until the additive
+	// account-cleanup migration installs durable deletion confirmations.
+	LastDeleteConfirmedAt *time.Time `gorm:"->" json:"-"`
+	ObjectKey             string     `gorm:"type:varchar(512);primaryKey" json:"-"`
+	CreatedAt             time.Time  `json:"-"`
 }
