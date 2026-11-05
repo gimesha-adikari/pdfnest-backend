@@ -1,9 +1,14 @@
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+	"log"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
 	"strings"
@@ -220,5 +225,35 @@ func TestRecoveryCopyCollectsLateUploadWithoutDeletingNewAttempt(t *testing.T) {
 	}
 	if !storage.ObjectExists(context.Background(), newer) {
 		t.Fatal("new attempt erased")
+	}
+}
+
+func TestRecoveryCopySQLFailureDoesNotLogPrivateObjectIdentity(t *testing.T) {
+	db := openArtifactRecoveryQualificationDB(t)
+	until := time.Now().Add(time.Minute)
+	action := models.ArtifactRecoveryAction{ID: uuid.NewString(), TaskID: "synthetic-private-" + uuid.NewString(), AdminUserID: uuid.NewString(), OperationKey: uuid.NewString(), RequestFingerprint: strings.Repeat("a", 64), Action: "recover", State: "processing", OwnerIdentity: "synthetic-private-owner", ArtifactSHA256: strings.Repeat("b", 64), ArtifactBytes: 5, OriginalExpiresAt: until, Attempts: 1, LeaseExpiresAt: &until}
+	action.RecoveryKey = recoveryAttemptKey(action.TaskID, action.ID, 1)
+	if err := db.Create(&action).Error; err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		db.Delete(&RecoveryCopyObligation{}, "action_id = ?", action.ID)
+		db.Delete(&models.ArtifactRecoveryAction{}, "id = ?", action.ID)
+	}()
+	var captured bytes.Buffer
+	config.DB = db.Session(&gorm.Session{Logger: logger.New(log.New(&captured, "", 0), logger.Config{LogLevel: logger.Error})})
+	if err := recordRecoveryCopy(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordRecoveryCopy(context.Background(), action); err == nil {
+		t.Fatal("expected duplicate obligation SQL failure")
+	}
+	if captured.Len() != 0 {
+		t.Fatalf("private recovery SQL entered logger: %s", captured.String())
+	}
+	var n int64
+	db.Model(&RecoveryCopyObligation{}).Where("action_id = ?", action.ID).Count(&n)
+	if n != 1 {
+		t.Fatal("SQL failure lost durable obligation")
 	}
 }

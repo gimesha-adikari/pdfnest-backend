@@ -9,7 +9,7 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"pdfnest-backend/config"
+	"gorm.io/gorm/logger"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
 )
@@ -49,14 +49,14 @@ func recoveryCopySchemaReady(db *gorm.DB) error {
 }
 
 func recordRecoveryCopy(ctx context.Context, action models.ArtifactRecoveryAction) error {
-	if err := recoveryCopySchemaReady(config.DB.WithContext(ctx)); err != nil {
+	if err := recoveryCopySchemaReady(recoveryDB(ctx)); err != nil {
 		return err
 	}
 	if action.LeaseExpiresAt == nil || action.RecoveryKey != recoveryAttemptKey(action.TaskID, action.ID, action.Attempts) {
 		return ErrRecoveryInvalidRequest
 	}
 	row := RecoveryCopyObligation{ActionID: action.ID, Attempt: action.Attempts, TaskID: action.TaskID, OwnerIdentity: action.OwnerIdentity, ObjectKey: action.RecoveryKey, Digest: action.ArtifactSHA256, Bytes: action.ArtifactBytes, NextCheck: action.LeaseExpiresAt.Add(time.Minute)}
-	return config.DB.WithContext(ctx).Create(&row).Error
+	return recoveryDB(ctx).Create(&row).Error
 }
 
 // SweepRecoveryCopies is bounded and serializes each key across replicas with a
@@ -65,6 +65,7 @@ func SweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int) error {
 	return sweepRecoveryCopies(ctx, db, limit, storage.DeleteObject)
 }
 func sweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int, remove func(context.Context, string) error) error {
+	db = db.Session(&gorm.Session{Logger: logger.Discard})
 	if limit < 1 || limit > 100 {
 		return ErrRecoveryInvalidRequest
 	}
