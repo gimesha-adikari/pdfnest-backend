@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 	"pdfnest-backend/config"
 	analyzerModels "pdfnest-backend/internal/analyzer/models"
 	"pdfnest-backend/internal/authn"
@@ -20,11 +21,25 @@ import (
 	studioModels "pdfnest-backend/internal/studio/models"
 )
 
+var (
+	errAccountDeletionDeferred = errors.New("ACCOUNT_DELETION_DEFERRED")
+	errAccountCleanupRetry     = errors.New("ACCOUNT_CLEANUP_RETRY_REQUIRED")
+)
+
+// Cleanup handles must never interpolate private keys, bearer grants or raw
+// provider/database failures into SQL traces. Leave the shared API pool alone.
+func quietAccountCleanupDB(db *gorm.DB) *gorm.DB {
+	if db == nil {
+		return nil
+	}
+	return db.Session(&gorm.Session{Logger: logger.Discard})
+}
+
 func deleteAccountWithCleanup(ctx context.Context, db *gorm.DB, id string, version int64) error {
 	if _, err := uuid.Parse(id); err != nil {
 		return authn.ErrInvalid
 	}
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := quietAccountCleanupDB(db).WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var account config.User
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&account, "id = ?", id).Error; err != nil {
 			return err
@@ -49,14 +64,20 @@ func deleteAccountWithCleanup(ctx context.Context, db *gorm.DB, id string, versi
 		}
 		return tx.Delete(&account).Error
 	})
+	if err != nil && !errors.Is(err, authn.ErrInvalid) {
+		return errAccountDeletionDeferred
+	}
+	return err
 }
 
 type AccountCleanupWorker struct{ db *gorm.DB }
 
-func NewAccountCleanupWorker(db *gorm.DB) *AccountCleanupWorker { return &AccountCleanupWorker{db: db} }
+func NewAccountCleanupWorker(db *gorm.DB) *AccountCleanupWorker {
+	return &AccountCleanupWorker{db: quietAccountCleanupDB(db)}
+}
 func StartAccountCleanupWorker(ctx context.Context, db *gorm.DB) {
-	if err := config.ValidateAccountCleanupSchema(db); err != nil {
-		log.Printf("[ACCOUNT CLEANUP] unavailable: %v", err)
+	if err := config.ValidateAccountCleanupSchema(quietAccountCleanupDB(db)); err != nil {
+		log.Print("[ACCOUNT CLEANUP] code=ACCOUNT_CLEANUP_SCHEMA_UNAVAILABLE")
 		return
 	}
 	w := NewAccountCleanupWorker(db)
@@ -70,7 +91,7 @@ func StartAccountCleanupWorker(ctx context.Context, db *gorm.DB) {
 				return
 			case now := <-ticker.C:
 				if err := w.RunOnceAt(ctx, now.UTC()); err != nil {
-					log.Printf("[ACCOUNT CLEANUP] retry required: %v", err)
+					log.Print("[ACCOUNT CLEANUP] code=ACCOUNT_CLEANUP_RETRY_REQUIRED")
 				}
 			}
 		}
@@ -98,14 +119,14 @@ func (w *AccountCleanupWorker) RunOnceAt(ctx context.Context, now time.Time) err
 		return nil
 	})
 	if err != nil {
-		return err
+		return errAccountCleanupRetry
 	}
 	var first error
 	for _, row := range rows {
 		err := w.process(ctx, row, now)
 		if err != nil {
 			if first == nil {
-				first = err
+				first = errAccountCleanupRetry
 			}
 			_ = w.db.WithContext(ctx).Model(&config.AccountStorageCleanup{}).Where("user_id = ? AND lease_token = ?", row.UserID, row.LeaseToken).Updates(map[string]any{"lease_expires_at": nil, "lease_token": nil, "next_attempt_at": now.Add(15 * time.Minute), "attempts": gorm.Expr("attempts + 1"), "last_error": "ownership discovery deferred"}).Error
 		}

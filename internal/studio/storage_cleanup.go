@@ -2,6 +2,8 @@ package studio
 
 import (
 	"context"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"log"
 	"time"
 
@@ -40,6 +42,11 @@ type storageCleanupWorker struct {
 // NewStorageCleanupWorker creates the process-safe retry worker used by the
 // Studio service and backend lifecycle.
 func NewStorageCleanupWorker(repo Repository, deleter StorageObjectDeleter) *storageCleanupWorker {
+	// Background cleanup owns opaque private keys. Suppress expanded SQL only
+	// on its repository clone; ordinary Studio API logging stays unchanged.
+	if backing, ok := repo.(*gormRepository); ok && backing.db != nil {
+		repo = &gormRepository{db: backing.db.Session(&gorm.Session{Logger: logger.Discard})}
+	}
 	if deleter == nil {
 		deleter = StorageObjectDeleterFunc(deleteStudioObject)
 	}
@@ -71,11 +78,11 @@ func (w *storageCleanupWorker) RunOnce(ctx context.Context) {
 
 func (w *storageCleanupWorker) RunOnceAt(ctx context.Context, now time.Time) int {
 	if err := w.repo.EnqueueExpiredStorageCleanup(ctx, now, storageCleanupBatchSize); err != nil {
-		log.Printf("[STUDIO STORAGE CLEANUP] expiry enqueue failed: %v", err)
+		log.Print("[STUDIO STORAGE CLEANUP] code=EXPIRY_ENQUEUE_DEFERRED")
 	}
 	tasks, err := w.repo.ClaimStorageCleanupTasks(ctx, now, storageCleanupBatchSize, storageCleanupLease)
 	if err != nil {
-		log.Printf("[STUDIO STORAGE CLEANUP] claim failed: %v", err)
+		log.Print("[STUDIO STORAGE CLEANUP] code=CLEANUP_CLAIM_DEFERRED")
 		return 0
 	}
 	succeeded := 0
@@ -106,20 +113,20 @@ func (w *storageCleanupWorker) RunTaskAt(ctx context.Context, task models.Studio
 	}
 	if err := w.deleter.DeleteObject(ctx, task.ObjectKey); err == nil {
 		if deleteErr := w.repo.DeleteStorageCleanupTask(ctx, task.ID); deleteErr != nil {
-			log.Printf("[STUDIO STORAGE CLEANUP] task completion failed: %v", deleteErr)
+			log.Print("[STUDIO STORAGE CLEANUP] code=DELETION_CONFIRMATION_DEFERRED")
 			return false
 		}
 		return true
 	} else if storage.IsRetentionLockedError(err) {
 		attempts := task.AttemptCount + 1
 		if rescheduleErr := w.repo.RescheduleStorageCleanupTask(ctx, task.ID, attempts, now.Add(storageCleanupRetentionRetryDelay), storageCleanupRetentionDeferredError); rescheduleErr != nil {
-			log.Printf("[STUDIO STORAGE CLEANUP] retention deferral failed: %v", rescheduleErr)
+			log.Print("[STUDIO STORAGE CLEANUP] code=RETENTION_RETRY_DEFERRED")
 		}
 		return false
 	}
 	attempts := task.AttemptCount + 1
 	if err := w.repo.RescheduleStorageCleanupTask(ctx, task.ID, attempts, now.Add(storageCleanupBackoff(attempts)), "physical storage deletion failed"); err != nil {
-		log.Printf("[STUDIO STORAGE CLEANUP] task reschedule failed: %v", err)
+		log.Print("[STUDIO STORAGE CLEANUP] code=CLEANUP_RETRY_DEFERRED")
 	}
 	return false
 }

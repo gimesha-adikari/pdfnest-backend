@@ -1,10 +1,14 @@
 package user
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm/logger"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -330,4 +334,85 @@ func TestDeleteAccountImmediatelyRevokesTaskDownloadCapabilitiesWhileCleanupIsPi
 	require.NoError(t, err)
 	require.Equal(t, 200, guestResponse.StatusCode)
 	guestResponse.Body.Close()
+}
+
+func TestAccountCleanupSuppressesSQLProviderAndQueueSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	db := cleanupDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const secretKey = "outputs/tasks/synthetic-private-storage-key/result.pdf"
+	const secretToken = "synthetic-private-download-token"
+	owner := config.User{ID: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Status: "active", EmailVerified: true}
+	require.NoError(t, db.Create(&owner).Error)
+	task := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: owner.ID, DownloadToken: secretToken, State: "completed", ResultKey: secretKey}
+	require.NoError(t, db.Create(&task).Error)
+	var captured bytes.Buffer
+	originalLogWriter := log.Writer()
+	log.SetOutput(&captured)
+	t.Cleanup(func() { log.SetOutput(originalLogWriter) })
+	noisyLogger := logger.New(log.New(&captured, "", 0), logger.Config{LogLevel: logger.Info})
+	noisy := db.Session(&gorm.Session{Logger: noisyLogger})
+	// Prove that an unscoped SQL trace would expose the sentinel.
+	require.NoError(t, noisy.Exec("SELECT ?", secretKey).Error)
+	require.Contains(t, captured.String(), secretKey)
+	captured.Reset()
+	assertPrivate := func(err error) {
+		t.Helper()
+		if err != nil {
+			require.NotContains(t, err.Error(), secretKey)
+			require.NotContains(t, err.Error(), secretToken)
+		}
+		require.NotContains(t, captured.String(), secretKey)
+		require.NotContains(t, captured.String(), secretToken)
+		captured.Reset()
+	}
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_delete_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'failure % %', OLD.result_key, OLD.download_token; END $$; CREATE TRIGGER privacy_delete_failure BEFORE UPDATE ON task_completions FOR EACH ROW EXECUTE FUNCTION privacy_delete_failure()`).Error)
+	err := deleteAccountWithCleanup(ctx, noisy, owner.ID, 0)
+	require.Error(t, err)
+	assertPrivate(err)
+	var pending int64
+	require.NoError(t, db.Model(&config.AccountStorageCleanup{}).Where("user_id = ?", owner.ID).Count(&pending).Error)
+	require.Zero(t, pending)
+	var account config.User
+	require.NoError(t, db.First(&account, "id = ?", owner.ID).Error)
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_delete_failure ON task_completions; DROP FUNCTION privacy_delete_failure()`).Error)
+	require.NoError(t, deleteAccountWithCleanup(ctx, noisy, owner.ID, 0))
+	captured.Reset()
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_queue_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'failure % synthetic-private-download-token', NEW.object_key; END $$; CREATE TRIGGER privacy_queue_failure BEFORE INSERT ON studio_storage_cleanup_tasks FOR EACH ROW EXECUTE FUNCTION privacy_queue_failure()`).Error)
+	worker := NewAccountCleanupWorker(noisy)
+	err = worker.RunOnceAt(ctx, now.Add(time.Hour))
+	require.Error(t, err)
+	assertPrivate(err)
+	require.NoError(t, db.Model(&config.AccountStorageCleanup{}).Where("user_id = ?", owner.ID).Count(&pending).Error)
+	require.EqualValues(t, 1, pending)
+	var retained backendModels.TaskCompletion
+	require.NoError(t, db.First(&retained, "id = ?", task.ID).Error)
+	require.Equal(t, "completed", retained.State)
+	require.Equal(t, secretKey, retained.ResultKey)
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_queue_failure ON studio_storage_cleanup_tasks; DROP FUNCTION privacy_queue_failure()`).Error)
+	require.NoError(t, worker.RunOnceAt(ctx, now.Add(2*time.Hour)))
+	assertPrivate(nil)
+	var receipt studioModels.StudioStorageCleanupTask
+	require.NoError(t, db.First(&receipt, "object_key = ?", secretKey).Error)
+	physical := studio.NewStorageCleanupWorker(studio.NewRepository(noisy), studio.StorageObjectDeleterFunc(func(context.Context, string) error {
+		return fmt.Errorf("provider denied %s %s", secretKey, secretToken)
+	}))
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_retry_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'retry % synthetic-private-download-token', NEW.object_key; END $$; CREATE TRIGGER privacy_retry_failure BEFORE UPDATE ON studio_storage_cleanup_tasks FOR EACH ROW EXECUTE FUNCTION privacy_retry_failure()`).Error)
+	require.False(t, physical.RunTaskAt(ctx, receipt, now.Add(3*time.Hour)))
+	require.Contains(t, captured.String(), "code=CLEANUP_RETRY_DEFERRED")
+	assertPrivate(nil)
+	require.NoError(t, db.First(&receipt, "id = ?", receipt.ID).Error, "failed retry acknowledgement must retain physical cleanup receipt")
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_retry_failure ON studio_storage_cleanup_tasks; DROP FUNCTION privacy_retry_failure()`).Error)
+	require.False(t, physical.RunTaskAt(ctx, receipt, now.Add(4*time.Hour)))
+	assertPrivate(nil)
+	require.NoError(t, db.First(&receipt, "id = ?", receipt.ID).Error)
+	require.Equal(t, "physical storage deletion failed", receipt.LastError)
+	var retirement studioModels.StudioStorageObjectRetirement
+	require.NoError(t, db.First(&retirement, "object_key = ?", secretKey).Error)
+	require.Nil(t, retirement.LastDeleteConfirmedAt)
+
+	require.Same(t, noisyLogger, noisy.Logger, "quiet cleanup sessions must not change ordinary API logging")
 }

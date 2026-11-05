@@ -282,7 +282,7 @@ func (ctrl *Controller) DeleteAccount(c *fiber.Ctx) error {
 		return err
 	}
 
-	if config.DB == nil || config.ValidateAccountCleanupSchema(config.DB) != nil {
+	if config.DB == nil || config.ValidateAccountCleanupSchema(quietAccountCleanupDB(config.DB)) != nil {
 		return c.Status(503).JSON(fiber.Map{"error": "Account deletion is temporarily unavailable"})
 	}
 	version, ok := c.Locals("session_version").(int64)
