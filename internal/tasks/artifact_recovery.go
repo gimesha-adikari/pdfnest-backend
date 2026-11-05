@@ -205,7 +205,7 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 			if record.RequestFingerprint != fingerprint || record.TaskID != taskID || record.AdminUserID != adminID {
 				return ErrRecoveryIdempotencyConflict
 			}
-			if action == "recover" && record.RecoveryKey != artifactRecoveryObjectKey(taskID, record.ID) {
+			if action == "recover" && record.RecoveryKey != recoveryAttemptKey(taskID, record.ID, record.Attempts) && record.RecoveryKey != artifactRecoveryObjectKey(taskID, record.ID) {
 				return errors.New("artifact recovery ledger identity mismatch")
 			}
 			if record.State != "processing" {
@@ -236,10 +236,13 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 		if created.RowsAffected != 1 {
 			previousAttempts := record.Attempts
 			record.Attempts++
+			if action == "recover" {
+				record.RecoveryKey = recoveryAttemptKey(taskID, record.ID, record.Attempts)
+			}
 			record.LeaseExpiresAt = &lease
 			updated := tx.Model(&models.ArtifactRecoveryAction{}).
 				Where("id = ? AND task_id = ? AND state = ? AND attempts = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", record.ID, taskID, "processing", previousAttempts, now).
-				Updates(map[string]any{"attempts": record.Attempts, "lease_expires_at": lease, "updated_at": now})
+				Updates(map[string]any{"attempts": record.Attempts, "lease_expires_at": lease, "updated_at": now, "recovery_key": record.RecoveryKey})
 			if updated.Error != nil {
 				return updated.Error
 			}
@@ -276,7 +279,10 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 		return nil, err
 	}
 
-	recoveryKey := artifactRecoveryObjectKey(snapshot.ID, record.ID)
+	if err := recordRecoveryCopy(actionCtx, record); err != nil {
+		return nil, err
+	}
+	recoveryKey := record.RecoveryKey
 	if err := storage.SaveVerifiedArtifact(actionCtx, recoveryKey, source.path, snapshot.ArtifactSHA256, snapshot.ArtifactBytes, "text/markdown; charset=utf-8"); err != nil {
 		return finishRecoveryAction(actionCtx, record, snapshot, "recovery_deferred", source.key, "storage_write_unavailable", recoveryKey)
 	}
@@ -373,6 +379,11 @@ func finishRecoveryAction(ctx context.Context, record models.ArtifactRecoveryAct
 		}
 		if updated.RowsAffected != 1 {
 			return ErrRecoveryLeaseLost
+		}
+		if state == "recovered_pending_retention_decision" {
+			if err := tx.Model(&RecoveryCopyObligation{}).Where("action_id = ? AND attempt = ?", record.ID, record.Attempts).Update("next_check", record.OriginalExpiresAt).Error; err != nil {
+				return err
+			}
 		}
 		return nil
 	})

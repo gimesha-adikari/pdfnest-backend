@@ -230,6 +230,8 @@ func main() {
 	// Start background watchdog for stale task reconciliation and worker unavailability monitoring
 	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
 	tasks.StartDurableCompletionWorker(watchdogCtx, time.Minute)
+	tasks.StartRecoveryCopyCleanupWorker(watchdogCtx, config.DB)
+	user.StartAccountCleanupWorker(watchdogCtx, config.DB)
 	workerClient.StartDurability(watchdogCtx)
 	analyzerService.StartWatchdog(watchdogCtx)
 	studio.StartJobReconciliationWorker(watchdogCtx, studioJobs, 10*time.Second)
