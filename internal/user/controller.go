@@ -282,14 +282,21 @@ func (ctrl *Controller) DeleteAccount(c *fiber.Ctx) error {
 		return err
 	}
 
-	var user config.User
-	if err := config.DB.First(&user, "id = ?", userID).Error; err != nil {
-		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
+	if config.DB == nil || config.ValidateAccountCleanupSchema(config.DB) != nil {
+		return c.Status(503).JSON(fiber.Map{"error": "Account deletion is temporarily unavailable"})
 	}
-
-	if err := config.DB.Delete(&user).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete account"})
+	version, ok := c.Locals("session_version").(int64)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid account session"})
 	}
-
-	return c.JSON(fiber.Map{"status": "success", "message": "Account successfully deleted"})
+	ctx, cancel := context.WithTimeout(c.UserContext(), 10*time.Second)
+	defer cancel()
+	if err := deleteAccountWithCleanup(ctx, config.DB, userID, version); err != nil {
+		if errors.Is(err, authn.ErrInvalid) {
+			return c.Status(401).JSON(fiber.Map{"error": "Session changed. Please sign in again."})
+		}
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to delete account"})
+	}
+	authn.SetSessionCookie(c, "")
+	return c.JSON(fiber.Map{"status": "success", "message": "Account deleted. Stored files are queued for cleanup.", "storage_cleanup": "pending"})
 }
