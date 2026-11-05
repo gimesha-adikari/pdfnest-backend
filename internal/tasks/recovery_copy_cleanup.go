@@ -74,6 +74,10 @@ func sweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int, remove fun
 	for i := 0; i < limit; i++ {
 		found := false
 		err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var now time.Time
+			if err := tx.Raw("SELECT clock_timestamp()").Scan(&now).Error; err != nil {
+				return err
+			}
 			var row RecoveryCopyObligation
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).Where("next_check <= clock_timestamp()").Order("next_check, action_id, attempt").First(&row).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -86,17 +90,17 @@ func sweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int, remove fun
 			var action models.ArtifactRecoveryAction
 			if err := tx.First(&action, "id = ?", row.ActionID).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return tx.Model(&row).Updates(map[string]any{"next_check": time.Now().UTC().Add(24 * time.Hour), "last_error_code": "identity_mismatch"}).Error
+					return tx.Model(&row).Updates(map[string]any{"next_check": now.Add(24 * time.Hour), "last_error_code": "identity_mismatch"}).Error
 				}
 				return err
 			}
 			if row.TaskID != action.TaskID || row.OwnerIdentity != action.OwnerIdentity || row.Digest != action.ArtifactSHA256 || row.Bytes != action.ArtifactBytes || row.Attempt < 1 || row.Attempt > action.Attempts || row.ObjectKey != recoveryAttemptKey(row.TaskID, row.ActionID, row.Attempt) {
-				return tx.Model(&row).Updates(map[string]any{"next_check": time.Now().UTC().Add(24 * time.Hour), "last_error_code": "identity_mismatch"}).Error
+				return tx.Model(&row).Updates(map[string]any{"next_check": now.Add(24 * time.Hour), "last_error_code": "identity_mismatch"}).Error
 			}
 			// Successful copies remain available as evidence until the original retention
 			// deadline. Active attempts are never reclaimed before their lease expires.
-			next := time.Now().UTC().Add(time.Hour)
-			if action.Attempts == row.Attempt && ((action.State == "processing" && action.LeaseExpiresAt != nil && action.LeaseExpiresAt.Add(time.Minute).After(time.Now())) || (action.State == "recovered_pending_retention_decision" && action.OriginalExpiresAt.After(time.Now()))) {
+			next := now.Add(time.Hour)
+			if action.Attempts == row.Attempt && ((action.State == "processing" && action.LeaseExpiresAt != nil && action.LeaseExpiresAt.Add(time.Minute).After(now)) || (action.State == "recovered_pending_retention_decision" && action.OriginalExpiresAt.After(now))) {
 				return tx.Model(&row).Update("next_check", next).Error
 			}
 			var referenced int64
@@ -113,7 +117,7 @@ func sweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int, remove fun
 			if err != nil {
 				updates["last_error_code"] = "storage_delete_deferred"
 			} else {
-				updates["last_delete_confirmed_at"] = time.Now().UTC()
+				updates["last_delete_confirmed_at"] = now
 			}
 			// Even a confirmed absence is not terminal: late uploads remain collectible.
 			return tx.Model(&row).Updates(updates).Error

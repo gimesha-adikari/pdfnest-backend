@@ -150,6 +150,18 @@ func TestRecoveryCopyProtectsActiveLeaseAndRetainedEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// A catalogued reference pins the object even if it belongs to a different
+	// owner; a cleanup action must never authorize deleting that owner's file.
+	pinned := models.TaskCompletion{ID: "pinned-" + uuid.NewString(), OwnerIdentity: "owner-B", ResultKey: action.RecoveryKey, State: "completed", ExpiresAt: future}
+	if err := db.Create(&pinned).Error; err != nil {
+		t.Fatal(err)
+	}
+	defer db.Delete(&models.TaskCompletion{}, "id = ?", pinned.ID)
+	db.Model(&action).Update("state", "recovery_deferred")
+	db.Model(&RecoveryCopyObligation{}).Where("action_id = ?", action.ID).Update("next_check", time.Now().Add(-time.Hour))
+	if err := sweepRecoveryCopies(context.Background(), db, 10, remove); err != nil {
+		t.Fatal(err)
+	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	action.Attempts = 2
