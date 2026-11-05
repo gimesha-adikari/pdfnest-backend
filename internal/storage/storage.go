@@ -103,11 +103,20 @@ func SaveLocalStream(ctx context.Context, key string, r io.Reader) (int64, strin
 	if err != nil {
 		return 0, "", fmt.Errorf("failed to write upload stream: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 
 	if err := tmpFile.Sync(); err != nil {
 		return 0, "", fmt.Errorf("failed to sync staging file: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 	_ = tmpFile.Close()
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 
 	// Atomic rename to final target path
 	if err := os.Rename(tmpPath, targetPath); err != nil {

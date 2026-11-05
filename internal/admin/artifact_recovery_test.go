@@ -159,6 +159,16 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 	status, payload = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, closeKey, `{"action":"close","reason":"close case without deleting or publishing artifacts"}`, &adminUser)
 	require.Equal(t, fiber.StatusOK, status)
 	require.Equal(t, "case_closed_non_destructive", payload["state"])
+	status, payload = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, closeKey, `{"action":"close","reason":"close case without deleting or publishing artifacts"}`, &adminUser)
+	require.Equal(t, fiber.StatusOK, status)
+	require.Equal(t, true, payload["idempotent_replay"], "repeat closure with the same operation key must remain idempotent")
+	status, payload = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, verifyKey, `{"action":"verify","reason":"verify the original owner-matched worker evidence"}`, &adminUser)
+	require.Equal(t, fiber.StatusOK, status)
+	require.Equal(t, true, payload["idempotent_replay"], "completed operation replay must remain available after closure")
+	status, _ = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, "post-close-verify-"+uuid.NewString(), `{"action":"verify","reason":"new verification after terminal closure"}`, &adminUser)
+	require.Equal(t, fiber.StatusConflict, status)
+	status, _ = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, "post-close-recover-"+uuid.NewString(), `{"action":"recover","reason":"new recovery after terminal closure"}`, &adminUser)
+	require.Equal(t, fiber.StatusConflict, status)
 	status, payload = request(http.MethodGet, "/admin/artifact-recovery/"+taskID, "", "", &adminUser)
 	require.Equal(t, fiber.StatusOK, status)
 	require.Equal(t, "closed_non_destructive", payload["case_status"])
@@ -183,6 +193,73 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 		require.Equal(t, ownerIdentity, action.OwnerIdentity)
 		require.Equal(t, row.ResultKey, action.OriginalResultKey)
 	}
+
+	concurrentTaskID := "hold-" + uuid.NewString()
+	concurrentResultKey := "outputs/tasks/" + concurrentTaskID + "/result.md"
+	concurrentContents := []byte("# Synthetic concurrent recovery\n")
+	concurrentDigestBytes := sha256.Sum256(concurrentContents)
+	concurrentDigest := hex.EncodeToString(concurrentDigestBytes[:])
+	_, _, err = storage.SaveLocalStream(context.Background(), concurrentResultKey, bytes.NewReader(concurrentContents))
+	require.NoError(t, err)
+	concurrentRow := models.TaskCompletion{
+		ID: concurrentTaskID, OwnerIdentity: ownerIdentity, DownloadToken: uuid.NewString(), State: "artifact_recovery_hold",
+		ResultKey: concurrentResultKey, ArtifactSHA256: concurrentDigest, ArtifactBytes: int64(len(concurrentContents)), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	require.NoError(t, db.Create(&concurrentRow).Error)
+	start := make(chan struct{})
+	type actionResult struct {
+		status  int
+		payload map[string]any
+		err     error
+	}
+	adminCookie := issue(adminUser)
+	concurrentRequest := func(id, operationKey, body string) actionResult {
+		req := httptest.NewRequest(http.MethodPost, "/admin/artifact-recovery/"+id, bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", operationKey)
+		req.AddCookie(&http.Cookie{Name: adminCookie.Name, Value: adminCookie.Value})
+		resp, err := app.Test(req, 5000)
+		if err != nil {
+			return actionResult{err: err}
+		}
+		defer resp.Body.Close()
+		var payload map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&payload)
+		return actionResult{status: resp.StatusCode, payload: payload}
+	}
+	closeKeyConcurrent := "concurrent-close-" + uuid.NewString()
+	recoverKeyConcurrent := "concurrent-recover-" + uuid.NewString()
+	closeResult := make(chan actionResult, 1)
+	recoverResult := make(chan actionResult, 1)
+	go func() {
+		<-start
+		closeResult <- concurrentRequest(concurrentTaskID, closeKeyConcurrent, `{"action":"close","reason":"close during a concurrent recovery request"}`)
+	}()
+	go func() {
+		<-start
+		recoverResult <- concurrentRequest(concurrentTaskID, recoverKeyConcurrent, `{"action":"recover","reason":"recover verified bytes during closure race"}`)
+	}()
+	close(start)
+	closeOutcome := <-closeResult
+	recoverOutcome := <-recoverResult
+	require.NoError(t, closeOutcome.err)
+	require.NoError(t, recoverOutcome.err)
+	require.Contains(t, []int{fiber.StatusOK, fiber.StatusConflict}, closeOutcome.status)
+	require.Contains(t, []int{fiber.StatusOK, fiber.StatusConflict}, recoverOutcome.status)
+	if recoverOutcome.status == fiber.StatusConflict {
+		require.Equal(t, fiber.StatusOK, closeOutcome.status, "closure must be the winning operation when recovery is rejected")
+	} else {
+		require.Equal(t, fiber.StatusOK, recoverOutcome.status)
+		if closeOutcome.status == fiber.StatusConflict {
+			closeOutcome = concurrentRequest(concurrentTaskID, closeKeyConcurrent, `{"action":"close","reason":"close after the concurrent recovery finished"}`)
+			require.NoError(t, closeOutcome.err)
+		}
+		require.Equal(t, fiber.StatusOK, closeOutcome.status, "closure can retry after an already-running recovery has finished")
+	}
+	require.Equal(t, fiber.StatusOK, closeOutcome.status)
+	status, payload = request(http.MethodPost, "/admin/artifact-recovery/"+concurrentTaskID, "concurrent-post-close-"+uuid.NewString(), `{"action":"verify","reason":"new verification after concurrent terminal closure"}`, &adminUser)
+	require.Equal(t, fiber.StatusConflict, status)
+	require.NotContains(t, payload, "internal")
 }
 
 func mustJSON(value any) []byte {

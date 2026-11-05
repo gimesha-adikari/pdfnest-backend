@@ -65,7 +65,7 @@ func (ctrl *Controller) ResolveArtifactRecoveryHold(c *fiber.Ctx) error {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid recovery action"})
 		case errors.Is(err, tasks.ErrRecoveryCaseNotFound):
 			return c.SendStatus(fiber.StatusNotFound)
-		case errors.Is(err, tasks.ErrRecoveryCaseNotHeld), errors.Is(err, tasks.ErrRecoveryIdempotencyConflict), errors.Is(err, tasks.ErrRecoveryActionInProgress), errors.Is(err, tasks.ErrRecoveryAttemptsExhausted):
+		case errors.Is(err, tasks.ErrRecoveryCaseNotHeld), errors.Is(err, tasks.ErrRecoveryCaseClosed), errors.Is(err, tasks.ErrRecoveryIdempotencyConflict), errors.Is(err, tasks.ErrRecoveryActionInProgress), errors.Is(err, tasks.ErrRecoveryLeaseLost), errors.Is(err, tasks.ErrRecoveryAttemptsExhausted):
 			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Recovery action conflicts with current case state"})
 		default:
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "Artifact recovery service is unavailable"})
