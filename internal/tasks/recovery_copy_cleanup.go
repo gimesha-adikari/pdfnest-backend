@@ -97,10 +97,11 @@ func sweepRecoveryCopies(ctx context.Context, db *gorm.DB, limit int, remove fun
 			if row.TaskID != action.TaskID || row.OwnerIdentity != action.OwnerIdentity || row.Digest != action.ArtifactSHA256 || row.Bytes != action.ArtifactBytes || row.Attempt < 1 || row.Attempt > action.Attempts || row.ObjectKey != recoveryAttemptKey(row.TaskID, row.ActionID, row.Attempt) {
 				return tx.Model(&row).Updates(map[string]any{"next_check": now.Add(24 * time.Hour), "last_error_code": "identity_mismatch"}).Error
 			}
-			// Successful copies remain available as evidence until the original retention
-			// deadline. Active attempts are never reclaimed before their lease expires.
+			// Verified copies await an explicit retention decision. Task download
+			// expiry and non-destructive closure do not authorize erasing that evidence.
+			// Active attempts are never reclaimed before their lease expires.
 			next := now.Add(time.Hour)
-			if action.Attempts == row.Attempt && ((action.State == "processing" && action.LeaseExpiresAt != nil && action.LeaseExpiresAt.Add(time.Minute).After(now)) || (action.State == "recovered_pending_retention_decision" && action.OriginalExpiresAt.After(now))) {
+			if action.Attempts == row.Attempt && ((action.State == "processing" && action.LeaseExpiresAt != nil && action.LeaseExpiresAt.Add(time.Minute).After(now)) || action.State == "recovered_pending_retention_decision") {
 				return tx.Model(&row).Update("next_check", next).Error
 			}
 			var referenced int64

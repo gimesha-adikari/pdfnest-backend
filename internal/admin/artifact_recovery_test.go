@@ -17,6 +17,7 @@ import (
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/tasks"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -156,6 +157,7 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 	var recovery models.ArtifactRecoveryAction
 	require.NoError(t, db.Where("operation_key = ?", recoverKey).First(&recovery).Error)
 	require.NotEmpty(t, recovery.RecoveryKey)
+	require.NoError(t, tasks.SweepRecoveryCopies(context.Background(), db, 100))
 	require.NoError(t, storage.VerifyArtifact(context.Background(), recovery.RecoveryKey, digest, int64(len(contents))))
 	status, replay = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, recoverKey, `{"action":"recover","reason":"restore only verified owner-matched output"}`, &adminUser)
 	require.Equal(t, fiber.StatusOK, status)

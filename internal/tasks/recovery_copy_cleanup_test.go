@@ -150,6 +150,13 @@ func TestRecoveryCopyProtectsActiveLeaseAndRetainedEvidence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Download expiry is not an approved physical retention policy for a
+	// verified recovery copy awaiting the owner's retention decision.
+	db.Model(&action).Updates(map[string]any{"state": "recovered_pending_retention_decision", "original_expires_at": time.Now().Add(-time.Hour)})
+	db.Model(&RecoveryCopyObligation{}).Where("action_id = ?", action.ID).Update("next_check", time.Now().Add(-time.Hour))
+	if err := sweepRecoveryCopies(context.Background(), db, 10, remove); err != nil {
+		t.Fatal(err)
+	}
 	// A catalogued reference pins the object even if it belongs to a different
 	// owner; a cleanup action must never authorize deleting that owner's file.
 	pinned := models.TaskCompletion{ID: "pinned-" + uuid.NewString(), OwnerIdentity: "owner-B", ResultKey: action.RecoveryKey, State: "completed", ExpiresAt: future}
