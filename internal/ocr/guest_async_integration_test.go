@@ -257,7 +257,7 @@ func TestGuestAsyncRequestCancellationReleasesQuota(t *testing.T) {
 	}
 	t.Setenv("BILLING_MODE", "free")
 
-	result, task, err := tasks.Registry.CancelTask(taskID, guestID)
+	result, task, err := tasks.Registry.CancelTaskForIdentity(taskID, guestID, string(identity.TypeGuest), "")
 	if err != nil {
 		t.Fatalf("cancel guest task: %v", err)
 	}

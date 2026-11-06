@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 const (
@@ -162,6 +163,9 @@ local owner = ARGV[1]
 local capability = ARGV[2]
 local now = tonumber(ARGV[3])
 local ttlSeconds = tonumber(ARGV[4]) or 3600
+local authorizationMode = ARGV[5] or 'fallback'
+local expectedOwner = ARGV[6] or ''
+local requiresAccountCheck = ARGV[7] == '1'
 
 local val = redis.call('GET', key)
 if not val or val == '' then
@@ -170,11 +174,21 @@ end
 
 local data = cjson.decode(val)
 local curStatus = data.status
+local taskOwner = data.ownerIdentity or ''
+if taskOwner ~= expectedOwner then
+    return cjson.encode({ result = "TASK_CHANGED", payload = val })
+end
 
-local ownerMatches = data.ownerIdentity and data.ownerIdentity ~= '' and owner and owner ~= '' and data.ownerIdentity == owner
+local ownerMatches = taskOwner ~= '' and owner and owner ~= '' and taskOwner == owner
 local capabilityMatches = data.downloadToken and data.downloadToken ~= '' and capability and capability ~= '' and data.downloadToken == capability
 if not ownerMatches and not capabilityMatches then
     return cjson.encode({ result = "UNAUTHORIZED", payload = val })
+end
+-- A Redis-only account task has no durable row to serialize with account
+-- deletion. It may transition only while the owner's database row is locked
+-- and its deletion ledger has been checked in that transaction.
+if requiresAccountCheck and authorizationMode == 'fallback' then
+    return cjson.encode({ result = "AUTHORIZATION_UNAVAILABLE", payload = val })
 end
 
 if curStatus == 'COMPLETED' or curStatus == 'FAILED' or curStatus == 'CANCELLED' then
@@ -577,46 +591,116 @@ func (r *TaskRegistry) CancelTask(id string, ownerIdentity string, capabilityTok
 	if len(capabilityToken) > 0 {
 		token = strings.TrimSpace(capabilityToken[0])
 	}
+	return r.CancelTaskForIdentity(id, ownerIdentity, "", token)
+}
 
-	result, task, durableErr := cancelDurable(context.Background(), id, ownerIdentity, token)
+// CancelTaskForIdentity carries the trusted request identity type into the
+// durable and Redis state-transition boundaries. CancelTask remains as a
+// compatibility wrapper for internal callers that do not have HTTP identity
+// metadata.
+func (r *TaskRegistry) CancelTaskForIdentity(id, ownerIdentity, requesterType, capabilityToken string) (string, *TaskStatus, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	token := strings.TrimSpace(capabilityToken)
+
+	result, task, durableErr := cancelDurable(ctx, id, ownerIdentity, token, requesterType)
 	if durableErr != nil {
 		return "ERROR", nil, durableErr
 	}
 	if result != "" {
-		if result == "CANCELLED_SUCCESS" {
-			if client := r.getClient(); client != nil {
-				key := TaskKeyPrefix + strings.TrimSpace(id)
-				now := time.Now().Unix()
-				_, _ = client.Eval(context.Background(), atomicCancelTaskLua, []string{key}, ownerIdentity, token, now, int(TaskTTL.Seconds())).Result()
-			}
+		if result == "CANCELLED_SUCCESS" && task != nil {
+			needsAccountCheck := requiresAccountDeletionCheck(task.OwnerIdentity, ownerIdentity, requesterType)
+			_, _, _ = r.evalTaskCancellation(ctx, id, ownerIdentity, token, "durable", task.OwnerIdentity, needsAccountCheck)
 		}
 		return result, task, nil
 	}
+	return r.cancelRedisFallback(ctx, id, ownerIdentity, requesterType, token)
+}
 
+func cancellationGrantMatches(task *TaskStatus, ownerIdentity, capabilityToken string) bool {
+	if task == nil {
+		return false
+	}
+	ownerMatches := task.OwnerIdentity != "" && ownerIdentity != "" && task.OwnerIdentity == ownerIdentity
+	capabilityMatches := task.DownloadToken != "" && capabilityToken != "" && task.DownloadToken == capabilityToken
+	return ownerMatches || capabilityMatches
+}
+
+func (r *TaskRegistry) cancelRedisFallback(ctx context.Context, id, ownerIdentity, requesterType, token string) (string, *TaskStatus, error) {
 	client := r.getClient()
 	if client == nil {
 		return "ERROR", nil, errors.New("redis client not configured")
 	}
+	key := TaskKeyPrefix + strings.TrimSpace(id)
+	serialized, err := client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "NOT_FOUND", nil, nil
+		}
+		return "ERROR", nil, fmt.Errorf("failed to inspect task before cancellation: %w", err)
+	}
+	var cached TaskStatus
+	if err := json.Unmarshal(serialized, &cached); err != nil {
+		return "ERROR", nil, fmt.Errorf("failed to unmarshal cached task before cancellation: %w", err)
+	}
+	if cached.ID != strings.TrimSpace(id) {
+		return "ERROR", nil, errors.New("cached task identity does not match cancellation key")
+	}
+	if !cancellationGrantMatches(&cached, ownerIdentity, token) {
+		return "UNAUTHORIZED", &cached, nil
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	needsAccountCheck := requiresAccountDeletionCheck(cached.OwnerIdentity, ownerIdentity, requesterType)
+	if !needsAccountCheck {
+		return r.evalTaskCancellation(ctx, id, ownerIdentity, token, "fallback", cached.OwnerIdentity, false)
+	}
+	if config.DB == nil {
+		return "AUTHORIZATION_UNAVAILABLE", &cached, nil
+	}
 
+	var result string
+	var task *TaskStatus
+	err = config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		accountAllowed, err := lockActiveAccountForCancellation(ctx, tx, cached.OwnerIdentity, requesterType)
+		if err != nil {
+			return err
+		}
+		if !accountAllowed {
+			result = "UNAUTHORIZED"
+			task = &cached
+			return nil
+		}
+		result, task, err = r.evalTaskCancellation(ctx, id, ownerIdentity, token, "account-locked", cached.OwnerIdentity, true)
+		return err
+	})
+	if err != nil {
+		return "ERROR", nil, err
+	}
+	return result, task, nil
+}
+
+func (r *TaskRegistry) evalTaskCancellation(ctx context.Context, id, ownerIdentity, token, authorizationMode, expectedOwner string, requiresAccountCheck bool) (string, *TaskStatus, error) {
+	client := r.getClient()
+	if client == nil {
+		return "ERROR", nil, errors.New("redis client not configured")
+	}
+	needsAccountCheck := 0
+	if requiresAccountCheck {
+		needsAccountCheck = 1
+	}
 	key := TaskKeyPrefix + strings.TrimSpace(id)
 	now := time.Now().Unix()
-
-	res, err := client.Eval(ctx, atomicCancelTaskLua, []string{key}, ownerIdentity, token, now, int(TaskTTL.Seconds())).Result()
+	res, err := client.Eval(ctx, atomicCancelTaskLua, []string{key}, ownerIdentity, token, now, int(TaskTTL.Seconds()), authorizationMode, expectedOwner, needsAccountCheck).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return "NOT_FOUND", nil, nil
 		}
 		return "ERROR", nil, fmt.Errorf("failed to cancel task in redis: %w", err)
 	}
-
 	valStr, ok := res.(string)
 	if !ok || valStr == "" {
 		return "NOT_FOUND", nil, nil
 	}
-
 	var luaRes cancelLuaResult
 	if err := json.Unmarshal([]byte(valStr), &luaRes); err != nil {
 		return "ERROR", nil, fmt.Errorf("failed to unmarshal cancel response: %w", err)
@@ -675,9 +759,10 @@ func handleCancelTask(c *fiber.Ctx) error {
 	if requesterID == "" {
 		requesterID = c.IP()
 	}
+	requesterType, _ := c.Locals(identity.LocalIdentityType).(string)
 
 	capability := strings.TrimSpace(c.Get("X-Download-Token"))
-	result, task, err := Registry.CancelTask(id, requesterID, capability)
+	result, task, err := Registry.CancelTaskForIdentity(id, requesterID, requesterType, capability)
 	if err != nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"code":    "TASK_STORAGE_UNAVAILABLE",
@@ -693,6 +778,12 @@ func handleCancelTask(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
 			"code":    "FORBIDDEN",
 			"message": "You are not authorized to cancel this task.",
+		})
+	}
+	if result == "AUTHORIZATION_UNAVAILABLE" || result == "TASK_CHANGED" {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"code":    "TASK_STORAGE_UNAVAILABLE",
+			"message": "Task persistence service is temporarily unavailable.",
 		})
 	}
 	if result == "CANCELLED_SUCCESS" && task != nil && task.ReservationID != "" {

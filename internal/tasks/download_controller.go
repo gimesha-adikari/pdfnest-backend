@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"mime"
 	"os"
 	"path/filepath"
@@ -209,9 +210,7 @@ func isAuthorizedOwnerForIdentity(ctx context.Context, task *TaskStatus, request
 	// either its owner identity or its capability token can grant access. The
 	// authenticated request type comes from identity.Resolve; UUID shape alone
 	// cannot distinguish account IDs from guest IDs.
-	guestOwnerMatch := requesterType == string(identity.TypeGuest) && task.OwnerIdentity != "" && task.OwnerIdentity == requesterID
-	needsDeletionCheck := task.OwnerIdentity != "" && (requesterType == string(identity.TypeUser) || !guestOwnerMatch && isUUID(task.OwnerIdentity))
-	if needsDeletionCheck && !accountOwnerNotDeleted(ctx, task.OwnerIdentity) {
+	if requiresAccountDeletionCheck(task.OwnerIdentity, requesterID, requesterType) && !accountOwnerNotDeleted(ctx, task.OwnerIdentity) {
 		return false
 	}
 
@@ -235,23 +234,45 @@ func isUUID(value string) bool {
 	return err == nil
 }
 
-func accountOwnerNotDeleted(ctx context.Context, ownerID string) bool {
-	if config.DB == nil || !isUUID(ownerID) {
+func requiresAccountDeletionCheck(taskOwner, requesterID, requesterType string) bool {
+	if taskOwner == "" {
 		return false
 	}
+	guestOwnerMatch := requesterType == string(identity.TypeGuest) && taskOwner == requesterID
+	return requesterType == string(identity.TypeUser) || !guestOwnerMatch && isUUID(taskOwner)
+}
+
+func accountOwnerNotDeleted(ctx context.Context, ownerID string) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
+	allowed, err := accountOwnerNotDeletedInDB(ctx, config.DB, ownerID)
+	return err == nil && allowed
+}
+
+func accountOwnerNotDeletedInDB(ctx context.Context, db *gorm.DB, ownerID string) (bool, error) {
+	if db == nil {
+		return false, errors.New("account deletion database unavailable")
+	}
+	if !isUUID(ownerID) {
+		return false, errors.New("account task owner is not a UUID")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	var present bool
-	if err := config.DB.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil || !present {
-		return false
+	if err := db.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil {
+		return false, err
+	}
+	if !present {
+		return false, errors.New("account deletion ledger unavailable")
 	}
 	var deleted bool
-	if err := config.DB.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", ownerID).Scan(&deleted).Error; err != nil {
-		return false
+	if err := db.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", ownerID).Scan(&deleted).Error; err != nil {
+		return false, err
 	}
-	return !deleted
+	return !deleted, nil
 }

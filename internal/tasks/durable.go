@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"pdfnest-backend/config"
+	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
 
@@ -475,15 +476,68 @@ func transitionDurable(ctx context.Context, id, owner, state, message string) (*
 //	result: "CANCELLED_SUCCESS", "TERMINAL_ALREADY", "UNAUTHORIZED", or "" if not found in DB or DB unavailable
 //	task: the task status representation of the row (or nil)
 //	err: DB error if any
-func cancelDurable(ctx context.Context, id, owner, token string) (string, *TaskStatus, error) {
+func lockActiveAccountForCancellation(ctx context.Context, tx *gorm.DB, ownerID, requesterType string) (bool, error) {
+	if !isUUID(ownerID) {
+		return false, errors.New("account task owner is not a UUID")
+	}
+	var account config.User
+	err := tx.WithContext(ctx).Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).First(&account, "id = ?", ownerID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		allowed, ledgerErr := accountOwnerNotDeletedInDB(ctx, tx, ownerID)
+		if ledgerErr != nil {
+			return false, ledgerErr
+		}
+		// A UUID without an account row may be a guest identity. A trusted user
+		// identity must still resolve to an active account row.
+		if requesterType == string(identity.TypeUser) {
+			return false, nil
+		}
+		return allowed, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if account.DeletedAt.Valid || account.Status != "active" {
+		return false, nil
+	}
+	return accountOwnerNotDeletedInDB(ctx, tx, ownerID)
+}
+
+func cancelDurable(ctx context.Context, id, owner, token, requesterType string) (string, *TaskStatus, error) {
 	if config.DB == nil {
 		return "", nil, nil
 	}
+	// Account deletion locks the user row before it revokes durable task
+	// capabilities. Read the owner first, then take locks in that same order
+	// (user row, task row) to serialize cancellation without creating a
+	// user/task lock inversion.
+	var observed models.TaskCompletion
+	if err := config.DB.WithContext(ctx).First(&observed, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil, nil
+		}
+		return "ERROR", nil, err
+	}
+	needsAccountCheck := requiresAccountDeletionCheck(observed.OwnerIdentity, owner, requesterType)
 	var row models.TaskCompletion
 	var result string
 	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if needsAccountCheck {
+			allowed, err := lockActiveAccountForCancellation(ctx, tx, observed.OwnerIdentity, requesterType)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				result = "UNAUTHORIZED"
+				return nil
+			}
+		}
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&row, "id = ?", id).Error; err != nil {
 			return err
+		}
+		if row.OwnerIdentity != observed.OwnerIdentity {
+			result = "TASK_CHANGED"
+			return nil
 		}
 		ownerMatches := row.OwnerIdentity != "" && owner != "" && row.OwnerIdentity == owner
 		capabilityMatches := row.DownloadToken != "" && token != "" && row.DownloadToken == token

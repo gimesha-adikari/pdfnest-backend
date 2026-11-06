@@ -69,7 +69,10 @@ func setupTasksPostgresDB(t *testing.T) (*gorm.DB, *TaskRegistry, *miniredis.Min
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 
-	require.NoError(t, db.AutoMigrate(&models.TaskCompletion{}))
+	// Cancellation now verifies account deletion state under an account-row
+	// lock before locking a durable task, matching the production schema and
+	// account-deletion lock order.
+	require.NoError(t, db.AutoMigrate(&models.TaskCompletion{}, &config.User{}))
 
 	oldDB := config.DB
 	config.DB = db
