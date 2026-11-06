@@ -1,10 +1,18 @@
 package tasks
 
 import (
+	"context"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
+)
+
+const (
+	progressRequesterIDLocalKey   = "task_progress_requester_id"
+	progressRequesterTypeLocalKey = "task_progress_requester_type"
+	progressCapabilityLocalKey    = "task_progress_capability"
 )
 
 func RegisterRoutes(router fiber.Router) {
@@ -24,16 +32,31 @@ func RegisterRoutes(router fiber.Router) {
 			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"code": "FORBIDDEN"})
 		}
 		if websocket.IsWebSocketUpgrade(c) {
+			requesterID, requesterType := taskRequesterIdentity(c)
+			token := strings.TrimSpace(c.Query("token"))
+			if token == "" {
+				token = strings.TrimSpace(c.Get("X-Download-Token"))
+			}
+			c.Locals(progressRequesterIDLocalKey, requesterID)
+			c.Locals(progressRequesterTypeLocalKey, requesterType)
+			c.Locals(progressCapabilityLocalKey, token)
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
 	})
 
 	router.Get("/v1/tasks/:id/progress", websocket.New(func(c *websocket.Conn) {
+		defer c.Close()
 		taskId := c.Params("id")
+		requesterID, _ := c.Locals(progressRequesterIDLocalKey).(string)
+		requesterType, _ := c.Locals(progressRequesterTypeLocalKey).(string)
+		token, _ := c.Locals(progressCapabilityLocalKey).(string)
 		for {
-			progressData := getTaskProgress(taskId)
-			err := c.WriteJSON(publicTaskStatus(progressData))
+			progressData, err := Registry.Get(taskId)
+			if err != nil || progressData == nil || !isAuthorizedOwnerForIdentity(context.Background(), progressData, requesterID, requesterType, token) {
+				break
+			}
+			err = c.WriteJSON(publicTaskStatus(progressData))
 			if err != nil {
 				break
 			}

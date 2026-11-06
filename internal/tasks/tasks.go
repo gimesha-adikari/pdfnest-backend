@@ -637,17 +637,6 @@ func (r *TaskRegistry) CancelTask(id string, ownerIdentity string, capabilityTok
 	return luaRes.Result, status, nil
 }
 
-func getTaskProgress(id string) *TaskStatus {
-	task, err := Registry.Get(id)
-	if err != nil {
-		return &TaskStatus{ID: id, Status: "FAILED", Progress: 0, Error: "Task storage service unavailable"}
-	}
-	if task == nil {
-		return &TaskStatus{ID: id, Status: "FAILED", Progress: 0, Error: "Task not found"}
-	}
-	return task
-}
-
 func handleGetTaskStatus(c *fiber.Ctx) error {
 	id := c.Params("id")
 	task, err := Registry.Get(id)
@@ -667,11 +656,17 @@ func handleGetTaskStatus(c *fiber.Ctx) error {
 }
 
 func canReadTask(c *fiber.Ctx, task *TaskStatus) bool {
+	requesterID, _ := taskRequesterIdentity(c)
+	return isAuthorizedOwner(c, task, requesterID)
+}
+
+func taskRequesterIdentity(c *fiber.Ctx) (string, string) {
 	requesterID, _ := c.Locals(identity.LocalIdentityIDKey).(string)
 	if requesterID == "" {
 		requesterID = c.IP()
 	}
-	return isAuthorizedOwner(c, task, requesterID)
+	requesterType, _ := c.Locals(identity.LocalIdentityType).(string)
+	return requesterID, requesterType
 }
 
 func handleCancelTask(c *fiber.Ctx) error {

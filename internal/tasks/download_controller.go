@@ -192,39 +192,66 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 }
 
 func isAuthorizedOwner(c *fiber.Ctx, task *TaskStatus, requesterID string) bool {
-	// An already-authenticated request may admit a task after the deletion
-	// transaction revoked existing grants. The durable account cleanup intent
-	// also fences those late grants, including an identity cached before delete.
-	// Guests share the UUID format, so rely only on an exact deletion intent,
-	// never infer account status from an identity or a missing user row.
-	if _, err := uuid.Parse(task.OwnerIdentity); err == nil && config.DB != nil {
-		ctx, cancel := context.WithTimeout(c.UserContext(), 3*time.Second)
-		defer cancel()
-		var present bool
-		if err := config.DB.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil {
-			return false
-		}
-		if present {
-			var deleted bool
-			if err := config.DB.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", task.OwnerIdentity).Scan(&deleted).Error; err != nil || deleted {
-				return false
-			}
-		}
+	requesterType, _ := c.Locals(identity.LocalIdentityType).(string)
+	token := strings.TrimSpace(c.Query("token"))
+	if token == "" {
+		token = strings.TrimSpace(c.Get("X-Download-Token"))
 	}
+	return isAuthorizedOwnerForIdentity(c.UserContext(), task, requesterID, requesterType, token)
+}
+
+func isAuthorizedOwnerForIdentity(ctx context.Context, task *TaskStatus, requesterID, requesterType, token string) bool {
+	if task == nil {
+		return false
+	}
+
+	// An account task must be checked against the durable deletion ledger before
+	// either its owner identity or its capability token can grant access. The
+	// authenticated request type comes from identity.Resolve; UUID shape alone
+	// cannot distinguish account IDs from guest IDs.
+	guestOwnerMatch := requesterType == string(identity.TypeGuest) && task.OwnerIdentity != "" && task.OwnerIdentity == requesterID
+	needsDeletionCheck := task.OwnerIdentity != "" && (requesterType == string(identity.TypeUser) || !guestOwnerMatch && isUUID(task.OwnerIdentity))
+	if needsDeletionCheck && !accountOwnerNotDeleted(ctx, task.OwnerIdentity) {
+		return false
+	}
+
 	if task.OwnerIdentity != "" && task.OwnerIdentity == requesterID {
 		return true
 	}
 
 	// The capability token is the only authorization for legacy task records
 	// without an owner identity, and remains a fallback for owned tasks when a
-	// client's identity cookie is unavailable.
-	token := strings.TrimSpace(c.Query("token"))
-	if token == "" {
-		token = strings.TrimSpace(c.Get("X-Download-Token"))
-	}
+	// client's identity cookie is unavailable. Owned account tasks reached via
+	// this fallback still passed the deletion-ledger check above.
 	if token != "" && task.DownloadToken != "" && token == task.DownloadToken {
 		return true
 	}
 
 	return false
+}
+
+func isUUID(value string) bool {
+	_, err := uuid.Parse(value)
+	return err == nil
+}
+
+func accountOwnerNotDeleted(ctx context.Context, ownerID string) bool {
+	if config.DB == nil || !isUUID(ownerID) {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	var present bool
+	if err := config.DB.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil || !present {
+		return false
+	}
+	var deleted bool
+	if err := config.DB.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", ownerID).Scan(&deleted).Error; err != nil {
+		return false
+	}
+	return !deleted
 }
