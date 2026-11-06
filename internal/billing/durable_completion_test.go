@@ -37,6 +37,9 @@ func completionFixture(t *testing.T, guest bool) (*gorm.DB, *redis.Client, *mini
 	t.Setenv("STORAGE_MODE", "local")
 	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
 	db := setupTestDB(t)
+	if err := db.AutoMigrate(&config.AccountStorageCleanup{}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.AutoMigrate(&studioModels.StudioStorageObjectRetirement{}, &models.WorkerResultOwnership{}); err != nil {
 		t.Fatal(err)
 	}
