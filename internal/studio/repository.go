@@ -652,8 +652,30 @@ func taskIDs(tasks []models.StudioStorageCleanupTask) []uuid.UUID {
 	return ids
 }
 
+// DeleteStorageCleanupTask acknowledges successful physical deletion. Keep the
+// confirmation on the immutable key tombstone after the retry receipt is gone.
 func (r *gormRepository) DeleteStorageCleanupTask(ctx context.Context, taskID uuid.UUID) error {
-	return r.db.WithContext(ctx).Delete(&models.StudioStorageCleanupTask{}, "id = ?", taskID).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var task models.StudioStorageCleanupTask
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&task, "id = ?", taskID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		// Existing Studio installations remain usable before the independently
+		// approved account-cleanup migration. New account deletion is gated on it.
+		if tx.Migrator().HasColumn(&models.StudioStorageObjectRetirement{}, "last_delete_confirmed_at") {
+			updated := tx.Table("studio_storage_object_retirements").Where("object_key = ?", task.ObjectKey).Update("last_delete_confirmed_at", gorm.Expr("clock_timestamp()"))
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return fmt.Errorf("storage deletion confirmation tombstone missing")
+			}
+		}
+		return tx.Delete(&task).Error
+	})
 }
 
 func (r *gormRepository) RescheduleStorageCleanupTask(ctx context.Context, taskID uuid.UUID, attempts int, nextAttemptAt time.Time, lastError string) error {
@@ -673,13 +695,20 @@ func (r *gormRepository) RescheduleStorageCleanupTask(ctx context.Context, taskI
 // still catalogued by another document/export/job. New writes use fresh opaque
 // keys, so reclamation never transfers an old key to a new owner.
 func (r *gormRepository) StorageObjectReferenced(ctx context.Context, key string) (bool, error) {
-	for _, query := range []*gorm.DB{
+	queries := []*gorm.DB{
 		r.db.WithContext(ctx).Model(&models.StudioAsset{}).Where("r2_key = ?", key),
 		r.db.WithContext(ctx).Model(&models.StudioExport{}).Where("r2_key = ?", key),
 		r.db.WithContext(ctx).Model(&models.StudioJob{}).Where("source_key = ? OR payload_key = ? OR pending_object_keys @> ?::jsonb", key, key, string(mustJSONKey(key))),
 		r.db.WithContext(ctx).Table("task_completions").Where("result_key = ? AND state <> ?", key, "deleted"),
 		r.db.WithContext(ctx).Table("worker_result_ownerships").Where("state <> 'deleted' AND (source_keys::jsonb @> ?::jsonb OR result_key = ? OR metadata_key = ?)", string(mustJSONKey(key)), key, key),
-	} {
+	}
+	if r.db.Migrator().HasTable("analyzer_sessions") {
+		queries = append(queries, r.db.WithContext(ctx).Table("analyzer_sessions").Where("storage_key = ?", key))
+	}
+	if r.db.Migrator().HasTable("artifact_recovery_actions") {
+		queries = append(queries, r.db.WithContext(ctx).Table("artifact_recovery_actions").Where("recovery_key = ? OR source_key = ?", key, key))
+	}
+	for _, query := range queries {
 		var count int64
 		if err := query.Count(&count).Error; err != nil {
 			return true, err

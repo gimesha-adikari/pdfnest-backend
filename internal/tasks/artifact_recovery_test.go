@@ -269,6 +269,7 @@ func TestArtifactRecoveryConcurrentRetryAndRestartHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		_ = db.Delete(&RecoveryCopyObligation{}, "task_id = ?", restartTaskID).Error
 		_ = db.Delete(&models.ArtifactRecoveryAction{}, "task_id = ?", restartTaskID).Error
 		_ = db.Delete(&models.TaskCompletion{}, "id = ?", restartTaskID).Error
 	})
@@ -283,15 +284,29 @@ func TestArtifactRecoveryConcurrentRetryAndRestartHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recovery restart subprocess failed: %v\n%s", err, output)
 	}
-	if err := storage.VerifyArtifact(context.Background(), restartRecoveryKey, digest, int64(len(contents))); err != nil {
+	if err := storage.VerifyArtifact(context.Background(), recoveryAttemptKey(restartTaskID, restartActionID, 2), digest, int64(len(contents))); err != nil {
 		t.Fatalf("restarted process did not replace interrupted copy with verified bytes: %v", err)
 	}
 	var restarted models.ArtifactRecoveryAction
 	if err := db.First(&restarted, "id = ?", restartActionID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if restarted.State != "recovered_pending_retention_decision" || restarted.Attempts != 2 || restarted.RecoveryKey != restartRecoveryKey {
+	if restarted.State != "recovered_pending_retention_decision" || restarted.Attempts != 2 || restarted.RecoveryKey != recoveryAttemptKey(restartTaskID, restartActionID, 2) {
 		t.Fatalf("restarted recovery did not retain deterministic identity and one retry: %+v", restarted)
+	}
+	// The interrupted attempt is independently collectible after restart;
+	// reclaiming it must not remove the verified second attempt.
+	if err := db.Model(&RecoveryCopyObligation{}).Where("action_id = ? AND attempt = 1", restartActionID).Update("next_check", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := SweepRecoveryCopies(context.Background(), db, 100); err != nil {
+		t.Fatal(err)
+	}
+	if storage.ObjectExists(context.Background(), restartRecoveryKey) {
+		t.Fatal("interrupted attempt survived cleanup")
+	}
+	if err := storage.VerifyArtifact(context.Background(), restarted.RecoveryKey, digest, int64(len(contents))); err != nil {
+		t.Fatalf("new attempt erased: %v", err)
 	}
 }
 
@@ -331,6 +346,13 @@ func openArtifactRecoveryQualificationDB(t *testing.T) *gorm.DB {
 	if err := db.Exec(`CREATE TABLE IF NOT EXISTS public.backend_durability_schema(version varchar(64) PRIMARY KEY, applied_at timestamptz NOT NULL);
 		INSERT INTO public.backend_durability_schema(version, applied_at) VALUES
 		('20261029_backend_durability_v1', now()), ('20261105_artifact_recovery_v1', now()) ON CONFLICT DO NOTHING`).Error; err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile("../../config/migrations/20261105_recovery_copies.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(string(migration)).Error; err != nil {
 		t.Fatal(err)
 	}
 	previousDB := config.DB

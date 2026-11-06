@@ -174,16 +174,24 @@ func trustedPathSocket(path string) error {
 	return nil
 }
 func (m *Manager) authorityConnect() (*net.UnixConn, error) {
+	return m.authorityConnectContext(context.Background())
+}
+func (m *Manager) authorityConnectContext(ctx context.Context) (*net.UnixConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, unavailable(err)
+	}
 	if m.config.AuthoritySocket == "" {
 		return nil, unavailable(fmt.Errorf("no protected expiration authority"))
 	}
 	if err := trustedPathSocket(m.config.AuthoritySocket); err != nil {
 		return nil, unavailable(err)
 	}
-	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: m.config.AuthoritySocket, Net: "unix"})
+	dialer := net.Dialer{Timeout: 4 * time.Second}
+	rawConn, err := dialer.DialContext(ctx, "unix", m.config.AuthoritySocket)
 	if err != nil {
 		return nil, unavailable(err)
 	}
+	conn := rawConn.(*net.UnixConn)
 	cred, fd, err := peerIdentity(conn)
 	if fd >= 0 {
 		unix.Close(fd)
@@ -211,15 +219,27 @@ func exchange(conn *net.UnixConn, req authorityRequest) (authorityResponse, erro
 	return reply, nil
 }
 func (m *Manager) authorityCall(req authorityRequest) (authorityResponse, error) {
-	conn, err := m.authorityConnect()
+	return m.authorityCallContext(context.Background(), req)
+}
+func (m *Manager) authorityCallContext(ctx context.Context, req authorityRequest) (authorityResponse, error) {
+	conn, err := m.authorityConnectContext(ctx)
 	if err != nil {
 		return authorityResponse{}, err
 	}
 	defer conn.Close()
-	return exchange(conn, req)
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	reply, err := exchange(conn, req)
+	if ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+	return reply, err
 }
 func (m *Manager) acquireRemote() (*Lease, error) {
-	reply, err := m.authorityCall(authorityRequest{Operation: "acquire"})
+	return m.acquireRemoteContext(context.Background())
+}
+func (m *Manager) acquireRemoteContext(ctx context.Context) (*Lease, error) {
+	reply, err := m.authorityCallContext(ctx, authorityRequest{Operation: "acquire"})
 	if err != nil {
 		return nil, err
 	}

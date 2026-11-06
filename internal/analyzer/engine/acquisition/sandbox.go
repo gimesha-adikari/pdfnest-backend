@@ -1,6 +1,7 @@
 package acquisition
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,10 +17,11 @@ var validIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 // Sandbox represents an isolated ephemeral filesystem workspace bound to a specific analysis session.
 type Sandbox struct {
-	ID        string    `json:"id"`
-	RootPath  string    `json:"rootPath"`
-	CreatedAt time.Time `json:"createdAt"`
-	closed    bool
+	ID         string    `json:"id"`
+	RootPath   string    `json:"rootPath"`
+	CreatedAt  time.Time `json:"createdAt"`
+	closed     bool
+	cleanupErr error
 	// scratchPath owns the repository and auxiliary writes for one execution.
 	// It is not a quota-backed slot or an execution confinement boundary.
 	scratchPath string
@@ -108,26 +110,27 @@ func (s *Sandbox) Cleanup() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
-		return nil
+	if s.closed && (s.cleanupErr == nil || s.quotaLease != nil) {
+		return s.cleanupErr
 	}
-
 	s.closed = true
 	if s.quotaLease != nil {
-		return s.quotaLease.Release()
+		s.cleanupErr = s.quotaLease.Release()
+	} else if s.scratchPath != "" {
+		s.cleanupErr = os.RemoveAll(s.scratchPath)
+	} else if s.RootPath != "" && s.RootPath != "/" {
+		s.cleanupErr = os.RemoveAll(s.RootPath)
 	}
-	if s.scratchPath != "" {
-		return os.RemoveAll(s.scratchPath)
-	}
-	if s.RootPath != "" && s.RootPath != "/" {
-		return os.RemoveAll(s.RootPath)
-	}
-	return nil
+	return s.cleanupErr
 }
 
 // admitGitQuota replaces the as-yet-empty ordinary sandbox with one exclusive
 // preprovisioned project. Ownership survives clone success until final Cleanup.
-func (s *Sandbox) admitGitQuota() error {
+func (s *Sandbox) admitGitQuota() error { return s.admitGitQuotaContext(context.Background()) }
+func (s *Sandbox) admitGitQuotaContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if os.Getenv("ANALYZER_GIT_STORAGE_POLICY") != "required" {
 		return nil
 	}
@@ -141,11 +144,11 @@ func (s *Sandbox) admitGitQuota() error {
 	}
 	manager, err := gitquota.Load(os.Getenv("ANALYZER_GIT_QUOTA_CONFIG"))
 	if err != nil {
-		return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+		return fmt.Errorf("%w: %w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
 	}
-	lease, err := manager.Acquire()
+	lease, err := manager.AcquireContext(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: %w: %v", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
+		return fmt.Errorf("%w: %w: %w", ErrGitAcquisitionFailed, ErrGitStorageUnavailable, err)
 	}
 	if err := os.RemoveAll(s.scratchPath); err != nil {
 		_ = lease.Release()

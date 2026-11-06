@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Task-owned PostgreSQL and Redis only; never use caller databases or services.
 set -euo pipefail
-unset DATABASE_URL REDIS_URL WORKER_DURABILITY_TEST_DSN BACKEND_DURABILITY_TEST_DSN PGSERVICE PGSERVICEFILE PGHOSTADDR PGPASSWORD PGOPTIONS
+unset DATABASE_URL REDIS_URL WORKER_DURABILITY_TEST_DSN BACKEND_DURABILITY_TEST_DSN ARTIFACT_RECOVERY_TEST_DSN PGSERVICE PGSERVICEFILE PGHOSTADDR PGPASSWORD PGOPTIONS
 bindir="$(pg_config --bindir)"
 durability_test_root="$(mktemp -d /tmp/platen-durability-tests.XXXXXXXX)"
 export PGPASSFILE="$durability_test_root/pgpass"
@@ -22,13 +22,14 @@ export REDIS_URL="unix://$durability_test_root/redis.sock?db=0"
 export APP_ENV=test LOCAL=true STORAGE_MODE=local RESEND_API_KEY='' FROM_EMAIL='' GOMAXPROCS=2
 export LOCAL_STORAGE_DIR="$durability_test_root/objects"
 export PDFNEST_WORKER_URL=http://127.0.0.1:1
-for package in config studio billing tasks ocr worker conversion; do
+for package in config studio billing tasks user ocr worker conversion; do
   "$bindir/createdb" -h "$durability_test_root" -p 55448 -U platen_test "durability_$package"
   export DATABASE_URL="host=$durability_test_root port=55448 user=platen_test dbname=durability_$package sslmode=disable"
   export BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL"
+  export ARTIFACT_RECOVERY_TEST_DSN="$DATABASE_URL"
   case "$package" in
     config)
-      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -v -race ./config -run '^(TestBackendDurabilityDraft|TestPreflight_)' -count=1 -timeout=5m ;;
+      BACKEND_DURABILITY_TEST_DSN="$DATABASE_URL" go test -v -race ./config -run '^(TestBackendDurabilityDraft|TestPreflight_|TestAccountCleanup)' -count=1 -timeout=5m ;;
     studio)
       # These are application/DB suites. Rendering benchmarks and stress suites
       # require a separately running native Worker and are qualified separately.

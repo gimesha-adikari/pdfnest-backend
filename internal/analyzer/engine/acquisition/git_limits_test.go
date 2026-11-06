@@ -185,3 +185,59 @@ case "$*" in *rev-parse*) printf 'fixture-commit\n';; esac
 	require.NoError(t, err)
 	require.Len(t, temporaries, 2, "clone and rev-parse must use the accounted temporary root")
 }
+
+func TestGitTimeoutConfigurationFailsBeforeDNS(t *testing.T) {
+	for _, value := range []string{"garbage", "0", "-1", "3601", "9223372036854775807", " 60 "} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("ANALYZER_GIT_TIMEOUT_SECONDS", value)
+			called := false
+			err := ValidateGitURLWithResolver("https://example.test/repo", func(string) ([]net.IP, error) { called = true; return []net.IP{net.ParseIP("8.8.8.8")}, nil })
+			require.ErrorIs(t, err, ErrGitAcquisitionFailed)
+			require.False(t, called)
+		})
+	}
+}
+
+func TestCanceledCloneDoesNotLaunch(t *testing.T) {
+	sandbox, err := NewSandbox(t.TempDir(), "pre-cancel")
+	require.NoError(t, err)
+	marker := filepath.Join(t.TempDir(), "launched")
+	shim := filepath.Join(t.TempDir(), "git")
+	require.NoError(t, os.WriteFile(shim, []byte("#!/bin/sh\n/usr/bin/touch "+shellQuote(marker)+"\n"), 0700))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = cloneGitRepository(ctx, "https://8.8.8.8/repo", sandbox, DefaultAcquisitionLimits(), shim)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NoFileExists(t, marker)
+	require.NoDirExists(t, sandbox.scratchPath)
+}
+
+func TestGitDeclaredMultipleWorkersFailBeforeDNS(t *testing.T) {
+	for _, key := range []string{"ANALYZER_WORKER_PROCESSES", "ANALYZER_WORKER_REPLICAS", "WEB_CONCURRENCY"} {
+		for _, value := range []string{"2", "0", "bad", "-1"} {
+			t.Run(key+value, func(t *testing.T) {
+				t.Setenv(key, value)
+				called := false
+				err := ValidateGitURLWithResolver("https://example.test/repo", func(string) ([]net.IP, error) { called = true; return []net.IP{net.ParseIP("8.8.8.8")}, nil })
+				require.ErrorIs(t, err, ErrGitAcquisitionFailed)
+				require.False(t, called)
+			})
+		}
+	}
+}
+
+func TestCloneFailureIncludesCleanupFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires ordinary filesystem permission checks")
+	}
+	sandbox, err := NewSandbox(t.TempDir(), "cleanup-error")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sandbox.scratchPath, "blocked"), []byte("retained"), 0600))
+	require.NoError(t, os.Chmod(sandbox.scratchPath, 0500))
+	t.Cleanup(func() { _ = os.Chmod(sandbox.scratchPath, 0700); _ = sandbox.Cleanup() })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = cloneGitRepository(ctx, "https://8.8.8.8/repo", sandbox, DefaultAcquisitionLimits(), "/does-not-exist")
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "scratch cleanup failed")
+}

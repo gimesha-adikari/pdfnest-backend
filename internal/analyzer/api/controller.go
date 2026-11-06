@@ -192,6 +192,15 @@ func (ctrl *Controller) UpdateScope(c *fiber.Ctx) error {
 	return c.JSON(resp)
 }
 
+// Only verified middleware identity can select a per-account admission bucket.
+// Caller-provided fingerprint/cookie strings and guest identities share a bucket.
+func authenticatedAdmissionIdentity(c *fiber.Ctx, sessionOwner string) string {
+	if ident, ok := c.Locals(identity.LocalIdentityKey).(identity.Identity); ok && ident.Type == identity.TypeUser && ident.ID != "" && ident.ID == sessionOwner {
+		return ident.ID
+	}
+	return ""
+}
+
 // Analyze handles POST /api/v1/analyzer/sessions/:id/analyze.
 func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 	ownerIdentity := ctrl.resolveIdentityID(c)
@@ -199,6 +208,7 @@ func (ctrl *Controller) Analyze(c *fiber.Ctx) error {
 
 	var req AnalyzeRequest
 	_ = c.BodyParser(&req) // Optional overrides
+	req.admissionIdentity = authenticatedAdmissionIdentity(c, ownerIdentity)
 
 	resp, err := ctrl.service.Analyze(c.Context(), ownerIdentity, sessionID, req)
 	if err != nil {

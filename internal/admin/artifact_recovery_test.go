@@ -17,6 +17,7 @@ import (
 	"pdfnest-backend/internal/auth"
 	"pdfnest-backend/internal/models"
 	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/tasks"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -30,12 +31,17 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 	if dsn == "" {
 		t.Skip("requires isolated PostgreSQL DATABASE_URL")
 	}
+	require.Contains(t, dsn, "host=/tmp/platen-")
+	require.Contains(t, dsn, "user=platen_")
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(&config.User{}, &models.TaskCompletion{}, &models.WorkerResultOwnership{}, &models.ArtifactRecoveryAction{}))
 	require.NoError(t, db.Exec(`CREATE TABLE IF NOT EXISTS public.backend_durability_schema(version varchar(64) PRIMARY KEY, applied_at timestamptz NOT NULL);
 		INSERT INTO public.backend_durability_schema(version, applied_at) VALUES
 		('20261029_backend_durability_v1', now()), ('20261105_artifact_recovery_v1', now()) ON CONFLICT DO NOTHING`).Error)
+	migration, err := os.ReadFile("../../config/migrations/20261105_recovery_copies.up.sql")
+	require.NoError(t, err)
+	require.NoError(t, db.Exec(string(migration)).Error)
 	previousDB := config.DB
 	config.DB = db
 	t.Cleanup(func() {
@@ -56,6 +62,7 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 	require.NoError(t, db.Create(&adminUser).Error)
 	require.NoError(t, db.Create(&regularUser).Error)
 	t.Cleanup(func() {
+		_ = db.Exec("DELETE FROM recovery_copy_obligations WHERE task_id LIKE ?", "hold-%").Error
 		_ = db.Delete(&models.ArtifactRecoveryAction{}, "task_id LIKE ?", "hold-%").Error
 		_ = db.Delete(&models.TaskCompletion{}, "id LIKE ?", "hold-%").Error
 		_ = db.Delete(&models.WorkerResultOwnership{}, "worker_job_id LIKE ?", "hold-%").Error
@@ -150,6 +157,7 @@ func TestArtifactRecoveryAdminWorkflowIsAuthorizedAuditedAndNonDestructive(t *te
 	var recovery models.ArtifactRecoveryAction
 	require.NoError(t, db.Where("operation_key = ?", recoverKey).First(&recovery).Error)
 	require.NotEmpty(t, recovery.RecoveryKey)
+	require.NoError(t, tasks.SweepRecoveryCopies(context.Background(), db, 100))
 	require.NoError(t, storage.VerifyArtifact(context.Background(), recovery.RecoveryKey, digest, int64(len(contents))))
 	status, replay = request(http.MethodPost, "/admin/artifact-recovery/"+taskID, recoverKey, `{"action":"recover","reason":"restore only verified owner-matched output"}`, &adminUser)
 	require.Equal(t, fiber.StatusOK, status)

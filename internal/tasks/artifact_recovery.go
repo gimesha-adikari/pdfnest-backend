@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -59,6 +60,12 @@ type ArtifactRecoveryOutcome struct {
 	IdempotentReplay bool   `json:"idempotent_replay"`
 }
 
+// Recovery SQL contains private object identities. Keep it out of generic SQL
+// traces; endpoints and workers report fixed sanitized outcome/error codes.
+func recoveryDB(ctx context.Context) *gorm.DB {
+	return config.DB.Session(&gorm.Session{Logger: logger.Discard}).WithContext(ctx)
+}
+
 type recoverySource struct {
 	key  string
 	path string
@@ -72,7 +79,7 @@ func ListArtifactRecoveryHolds(ctx context.Context, limit int, before time.Time)
 	if limit < 1 || limit > 100 {
 		return nil, ErrRecoveryInvalidRequest
 	}
-	query := config.DB.WithContext(ctx).Where("state = ?", "artifact_recovery_hold").Order("updated_at DESC, id ASC").Limit(limit)
+	query := recoveryDB(ctx).Where("state = ?", "artifact_recovery_hold").Order("updated_at DESC, id ASC").Limit(limit)
 	if !before.IsZero() {
 		query = query.Where("updated_at < ?", before)
 	}
@@ -88,7 +95,7 @@ func GetArtifactRecoveryHold(ctx context.Context, taskID string) (*ArtifactRecov
 		return nil, err
 	}
 	var row models.TaskCompletion
-	if err := config.DB.WithContext(ctx).Where("id = ? AND state = ?", taskID, "artifact_recovery_hold").First(&row).Error; err != nil {
+	if err := recoveryDB(ctx).Where("id = ? AND state = ?", taskID, "artifact_recovery_hold").First(&row).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrRecoveryCaseNotFound
 		}
@@ -119,7 +126,7 @@ func summarizeRecoveryHolds(ctx context.Context, rows []models.TaskCompletion) (
 		})
 	}
 	var actions []models.ArtifactRecoveryAction
-	if err := config.DB.WithContext(ctx).Where("task_id IN ?", ids).Order("created_at ASC, id ASC").Find(&actions).Error; err != nil {
+	if err := recoveryDB(ctx).Where("task_id IN ?", ids).Order("created_at ASC, id ASC").Find(&actions).Error; err != nil {
 		return nil, err
 	}
 	for _, action := range actions {
@@ -163,7 +170,7 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 	var snapshot models.TaskCompletion
 	replay := false
 	var actionDeadline time.Time
-	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := recoveryDB(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", taskID).First(&snapshot).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrRecoveryCaseNotFound
@@ -205,7 +212,7 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 			if record.RequestFingerprint != fingerprint || record.TaskID != taskID || record.AdminUserID != adminID {
 				return ErrRecoveryIdempotencyConflict
 			}
-			if action == "recover" && record.RecoveryKey != artifactRecoveryObjectKey(taskID, record.ID) {
+			if action == "recover" && record.RecoveryKey != recoveryAttemptKey(taskID, record.ID, record.Attempts) && record.RecoveryKey != artifactRecoveryObjectKey(taskID, record.ID) {
 				return errors.New("artifact recovery ledger identity mismatch")
 			}
 			if record.State != "processing" {
@@ -236,10 +243,13 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 		if created.RowsAffected != 1 {
 			previousAttempts := record.Attempts
 			record.Attempts++
+			if action == "recover" {
+				record.RecoveryKey = recoveryAttemptKey(taskID, record.ID, record.Attempts)
+			}
 			record.LeaseExpiresAt = &lease
 			updated := tx.Model(&models.ArtifactRecoveryAction{}).
 				Where("id = ? AND task_id = ? AND state = ? AND attempts = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?)", record.ID, taskID, "processing", previousAttempts, now).
-				Updates(map[string]any{"attempts": record.Attempts, "lease_expires_at": lease, "updated_at": now})
+				Updates(map[string]any{"attempts": record.Attempts, "lease_expires_at": lease, "updated_at": now, "recovery_key": record.RecoveryKey})
 			if updated.Error != nil {
 				return updated.Error
 			}
@@ -276,7 +286,10 @@ func ExecuteArtifactRecoveryAction(ctx context.Context, taskID, adminID, operati
 		return nil, err
 	}
 
-	recoveryKey := artifactRecoveryObjectKey(snapshot.ID, record.ID)
+	if err := recordRecoveryCopy(actionCtx, record); err != nil {
+		return nil, err
+	}
+	recoveryKey := record.RecoveryKey
 	if err := storage.SaveVerifiedArtifact(actionCtx, recoveryKey, source.path, snapshot.ArtifactSHA256, snapshot.ArtifactBytes, "text/markdown; charset=utf-8"); err != nil {
 		return finishRecoveryAction(actionCtx, record, snapshot, "recovery_deferred", source.key, "storage_write_unavailable", recoveryKey)
 	}
@@ -315,7 +328,7 @@ func artifactRecoveryCaseClosed(tx *gorm.DB, taskID, currentActionID string) (bo
 // storage. The caller also bounds the entire operation context by this lease;
 // finishRecoveryAction repeats the durable attempt/expiry condition after I/O.
 func assertArtifactRecoveryActionLease(ctx context.Context, record models.ArtifactRecoveryAction, snapshot models.TaskCompletion) error {
-	return config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return recoveryDB(ctx).Transaction(func(tx *gorm.DB) error {
 		var current models.TaskCompletion
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", snapshot.ID).First(&current).Error; err != nil {
 			return err
@@ -344,7 +357,7 @@ func assertArtifactRecoveryActionLease(ctx context.Context, record models.Artifa
 }
 
 func finishRecoveryAction(ctx context.Context, record models.ArtifactRecoveryAction, snapshot models.TaskCompletion, state, sourceKey, errorCode string, recoveryKey ...string) (*ArtifactRecoveryOutcome, error) {
-	err := config.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := recoveryDB(ctx).Transaction(func(tx *gorm.DB) error {
 		var current models.TaskCompletion
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", snapshot.ID).First(&current).Error; err != nil {
 			return err
@@ -374,6 +387,11 @@ func finishRecoveryAction(ctx context.Context, record models.ArtifactRecoveryAct
 		if updated.RowsAffected != 1 {
 			return ErrRecoveryLeaseLost
 		}
+		if state == "recovered_pending_retention_decision" {
+			if err := tx.Model(&RecoveryCopyObligation{}).Where("action_id = ? AND attempt = ?", record.ID, record.Attempts).Update("next_check", record.OriginalExpiresAt).Error; err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -396,7 +414,7 @@ func inspectRecoverySource(ctx context.Context, row *models.TaskCompletion) (rec
 		}
 	}
 	var owned models.WorkerResultOwnership
-	if err := config.DB.WithContext(ctx).Where("worker_job_id = ? AND owner_identity = ? AND state = ?", row.ID, row.OwnerIdentity, "terminal").Limit(1).Find(&owned).Error; err != nil {
+	if err := recoveryDB(ctx).Where("worker_job_id = ? AND owner_identity = ? AND state = ?", row.ID, row.OwnerIdentity, "terminal").Limit(1).Find(&owned).Error; err != nil {
 		return recoverySource{}, "evidence_deferred", "ownership_read_unavailable"
 	}
 	var status struct {

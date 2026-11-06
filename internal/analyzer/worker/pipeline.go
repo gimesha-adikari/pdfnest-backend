@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -18,7 +19,9 @@ import (
 )
 
 // ValidateJob validates the integrity and supported boundaries of an incoming analyzer job.
-func ValidateJob(job *AnalyzerJob) error {
+func ValidateJob(job *AnalyzerJob) error { return validateJobContext(context.Background(), job) }
+
+func validateJobContext(ctx context.Context, job *AnalyzerJob) error {
 	if job == nil {
 		return fmt.Errorf("%w: nil job payload", ErrInvalidJob)
 	}
@@ -34,7 +37,7 @@ func ValidateJob(job *AnalyzerJob) error {
 		if job.GitURL == "" {
 			return fmt.Errorf("%w: gitUrl required for source type git", ErrInvalidJob)
 		}
-		if err := acquisition.ValidateGitURL(job.GitURL); err != nil {
+		if err := acquisition.ValidateGitURLContext(ctx, job.GitURL); err != nil {
 			return fmt.Errorf("%w: %w", ErrInvalidJob, err)
 		}
 	case engine.SourceTypeZip:
@@ -64,8 +67,25 @@ func ExecutePipeline(
 	job *AnalyzerJob,
 	sandboxBaseDir string,
 	onProgress ProgressFunc,
-) (*engine.CanonicalAnalysisResult, error) {
-	if err := ValidateJob(job); err != nil {
+) (result *engine.CanonicalAnalysisResult, pipelineErr error) {
+	timeout := time.Hour
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		timeout = DefaultJobTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, fmt.Errorf("%w: nil job payload", ErrInvalidJob)
+	}
+	release, err := pipelineAdmission.acquire(ctx, job.AdmissionIdentity)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	if err := validateJobContext(ctx, job); err != nil {
 		return nil, err
 	}
 
@@ -76,7 +96,12 @@ func ExecutePipeline(
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox: %w", err)
 	}
-	defer sandbox.Cleanup()
+	defer func() {
+		if cleanupErr := sandbox.Cleanup(); cleanupErr != nil {
+			result = nil
+			pipelineErr = errors.Join(pipelineErr, fmt.Errorf("sandbox cleanup failed: %w", cleanupErr))
+		}
+	}()
 
 	// 2. Acquire Source Repository
 	if onProgress != nil {
@@ -337,6 +362,12 @@ func ExecutePipeline(
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := sandbox.Cleanup(); err != nil {
+		return nil, fmt.Errorf("sandbox cleanup failed: %w", err)
+	}
 	if onProgress != nil {
 		onProgress(StatusCompleted, 100, "Repository analysis completed successfully")
 	}

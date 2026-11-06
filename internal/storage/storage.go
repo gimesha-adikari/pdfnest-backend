@@ -191,8 +191,8 @@ func SaveObjectBytes(ctx context.Context, key string, data []byte, contentType s
 }
 
 // DeleteLocalObject removes a canonical object from the local development
-// store. It is used only to roll back a failed database registration after a
-// source file was safely persisted.
+// store. Root confinement applies to rollback and durable cleanup alike; an
+// empty directory is removable, but this operation never recursively deletes.
 func DeleteLocalObject(key string) error {
 	if RemoteStorageEnabled() {
 		return nil
@@ -201,8 +201,30 @@ func DeleteLocalObject(key string) error {
 	if err != nil {
 		return fmt.Errorf("invalid storage key: %w", err)
 	}
-	path := filepath.Join(GetLocalStorageDir(), filepath.FromSlash(sanitizedKey))
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if sanitizedKey != key || strings.Contains(key, "\\") {
+		return fmt.Errorf("invalid canonical storage key")
+	}
+	root, err := os.OpenRoot(GetLocalStorageDir())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	parts := strings.Split(key, "/")
+	// Reject aliases and special files; Root.Remove additionally confines the
+	// actual unlink if a parent is concurrently replaced after these checks.
+	for i := range parts {
+		info, err := root.Lstat(strings.Join(parts[:i+1], "/"))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (i == len(parts)-1 && !info.Mode().IsRegular() && !info.IsDir()) {
+			return fmt.Errorf("unsafe storage deletion target")
+		}
+	}
+	if err := root.Remove(key); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil

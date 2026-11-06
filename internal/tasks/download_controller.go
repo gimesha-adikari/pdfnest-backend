@@ -1,13 +1,18 @@
 package tasks
 
 import (
+	"context"
 	"errors"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 	"mime"
 	"os"
 	"path/filepath"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -188,20 +193,86 @@ func HandleTaskDownload(c *fiber.Ctx) error {
 }
 
 func isAuthorizedOwner(c *fiber.Ctx, task *TaskStatus, requesterID string) bool {
+	requesterType, _ := c.Locals(identity.LocalIdentityType).(string)
+	token := strings.TrimSpace(c.Query("token"))
+	if token == "" {
+		token = strings.TrimSpace(c.Get("X-Download-Token"))
+	}
+	return isAuthorizedOwnerForIdentity(c.UserContext(), task, requesterID, requesterType, token)
+}
+
+func isAuthorizedOwnerForIdentity(ctx context.Context, task *TaskStatus, requesterID, requesterType, token string) bool {
+	if task == nil {
+		return false
+	}
+
+	// An account task must be checked against the durable deletion ledger before
+	// either its owner identity or its capability token can grant access. The
+	// authenticated request type comes from identity.Resolve; UUID shape alone
+	// cannot distinguish account IDs from guest IDs.
+	if requiresAccountDeletionCheck(task.OwnerIdentity, requesterID, requesterType) && !accountOwnerNotDeleted(ctx, task.OwnerIdentity) {
+		return false
+	}
+
 	if task.OwnerIdentity != "" && task.OwnerIdentity == requesterID {
 		return true
 	}
 
 	// The capability token is the only authorization for legacy task records
 	// without an owner identity, and remains a fallback for owned tasks when a
-	// client's identity cookie is unavailable.
-	token := strings.TrimSpace(c.Query("token"))
-	if token == "" {
-		token = strings.TrimSpace(c.Get("X-Download-Token"))
-	}
+	// client's identity cookie is unavailable. Owned account tasks reached via
+	// this fallback still passed the deletion-ledger check above.
 	if token != "" && task.DownloadToken != "" && token == task.DownloadToken {
 		return true
 	}
 
 	return false
+}
+
+func isUUID(value string) bool {
+	_, err := uuid.Parse(value)
+	return err == nil
+}
+
+func requiresAccountDeletionCheck(taskOwner, requesterID, requesterType string) bool {
+	if taskOwner == "" {
+		return false
+	}
+	guestOwnerMatch := requesterType == string(identity.TypeGuest) && taskOwner == requesterID
+	return requesterType == string(identity.TypeUser) || !guestOwnerMatch && isUUID(taskOwner)
+}
+
+func accountOwnerNotDeleted(ctx context.Context, ownerID string) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	allowed, err := accountOwnerNotDeletedInDB(ctx, config.DB, ownerID)
+	return err == nil && allowed
+}
+
+func accountOwnerNotDeletedInDB(ctx context.Context, db *gorm.DB, ownerID string) (bool, error) {
+	if db == nil {
+		return false, errors.New("account deletion database unavailable")
+	}
+	if !isUUID(ownerID) {
+		return false, errors.New("account task owner is not a UUID")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var present bool
+	if err := db.WithContext(ctx).Raw("SELECT to_regclass('public.account_storage_cleanups') IS NOT NULL").Scan(&present).Error; err != nil {
+		return false, err
+	}
+	if !present {
+		return false, errors.New("account deletion ledger unavailable")
+	}
+	var deleted bool
+	if err := db.WithContext(ctx).Raw("SELECT EXISTS(SELECT 1 FROM public.account_storage_cleanups WHERE user_id = ?)", ownerID).Scan(&deleted).Error; err != nil {
+		return false, err
+	}
+	return !deleted, nil
 }

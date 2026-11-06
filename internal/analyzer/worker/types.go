@@ -83,6 +83,9 @@ func (s ScopeConfig) ToExclusionConfig() exclusion.Config {
 
 // AnalyzerJob defines the strongly-typed internal job payload consumed by the analyzer worker.
 type AnalyzerJob struct {
+	// AdmissionIdentity is populated by the trusted API after session ownership
+	// verification. Guests and legacy queued jobs use one shared empty bucket.
+	AdmissionIdentity  string            `json:"admissionIdentity,omitempty"`
 	JobVersion         string            `json:"jobVersion"`
 	TaskID             string            `json:"taskId"`
 	SessionID          string            `json:"sessionId"`

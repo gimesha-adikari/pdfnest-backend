@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"golang.org/x/sys/unix"
 )
 
 type Runner struct {
@@ -29,28 +30,6 @@ func (r Runner) Run(
 // RunCommand applies the same bounded output and process-tree lifecycle to a
 // caller-configured command, preserving its explicit environment and directory.
 func (r Runner) RunCommand(ctx context.Context, timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	// Cap captured subprocess output to 1 MB to prevent a misbehaving
-	// process from growing the Go heap unboundedly.  The tail is
-	// retained for diagnostic value.
-	var outBuf bytes.Buffer
-	lw := &limitedWriter{buf: &outBuf, limit: 1 << 20}
-	cmd.Stdout = lw
-	cmd.Stderr = lw
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProcessStart, err)
-	}
-
-	pgid := cmd.Process.Pid
-	if pgid <= 1 {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("%w: invalid process group ID %d", ErrProcessStart, pgid)
-	}
 
 	var runCtx context.Context
 	var cancel context.CancelFunc
@@ -60,40 +39,86 @@ func (r Runner) RunCommand(ctx context.Context, timeout time.Duration, cmd *exec
 		runCtx, cancel = context.WithCancel(ctx)
 	}
 	defer cancel()
-
-	done := make(chan error, 1)
+	if err := runCtx.Err(); err != nil {
+		reason := ErrProcessCancelled
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = ErrProcessTimeout
+		}
+		return nil, fmt.Errorf("%w: %w", reason, err)
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	// A caller cannot join another group's lifecycle or inherit a foreign PGID.
+	cmd.SysProcAttr.Pgid = 0
+	var outBuf bytes.Buffer
+	lw := &limitedWriter{buf: &outBuf, limit: 1 << 20}
+	cmd.Stdout, cmd.Stderr = lw, lw
+	// Escaped descendants can retain output pipes in monitored mode. This bounds
+	// pipe draining; only the required-mode PID namespace confines all descendants.
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 500 * time.Millisecond
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrProcessStart, err)
+	}
+	pgid := cmd.Process.Pid
+	if pgid <= 1 {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("%w: invalid process group ID %d", ErrProcessStart, pgid)
+	}
+	// Observe exit WITHOUT reaping the leader. Its retained kernel identity pins
+	// the PGID through group cleanup, preventing signals to a recycled PID/PGID.
+	// Calling Cmd.Wait concurrently here would release that safety boundary.
+	exited := make(chan error, 1)
 	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case waitErr := <-done:
-		if waitErr != nil {
-			if ctx.Err() != nil {
-				return outBuf.Bytes(), fmt.Errorf("%w: %v", ErrProcessCancelled, ctx.Err())
+		var status unix.Siginfo
+		for {
+			err := unix.Waitid(unix.P_PID, pgid, &status, unix.WEXITED|unix.WNOWAIT, nil)
+			if errors.Is(err, unix.EINTR) {
+				continue
 			}
-			return outBuf.Bytes(), fmt.Errorf("%w: %w", ErrProcessExit, waitErr)
+			exited <- err
+			return
 		}
-		return outBuf.Bytes(), nil
-
+	}()
+	var reason error
+	var observeErr error
+	select {
+	case observeErr = <-exited:
 	case <-runCtx.Done():
-		var errReason error
+		reason = ErrProcessCancelled
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			errReason = ErrProcessTimeout
-		} else {
-			errReason = ErrProcessCancelled
+			reason = ErrProcessTimeout
 		}
-
 		grace := r.GracePeriod
 		if grace <= 0 {
 			grace = 500 * time.Millisecond
 		}
 		_ = KillProcessGroup(pgid, grace)
-
-		<-done
-
-		return outBuf.Bytes(), fmt.Errorf("%w: %v", errReason, runCtx.Err())
+		observeErr = <-exited
 	}
+	// The leader is still an unreaped child. Terminate same-group background
+	// helpers even after a successful leader exit, before removing its identity.
+	if observeErr == nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	waitErr := cmd.Wait()
+	if reason != nil {
+		return outBuf.Bytes(), fmt.Errorf("%w: %w", reason, runCtx.Err())
+	}
+	if observeErr != nil {
+		return outBuf.Bytes(), fmt.Errorf("%w: observe process exit: %v", ErrProcessExit, observeErr)
+	}
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return outBuf.Bytes(), fmt.Errorf("%w: %w", ErrProcessCancelled, ctx.Err())
+		}
+		return outBuf.Bytes(), fmt.Errorf("%w: %w", ErrProcessExit, waitErr)
+	}
+	return outBuf.Bytes(), nil
 }
 
 // KillProcessGroup safely terminates a Linux process group.

@@ -1,0 +1,418 @@
+package user
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm/logger"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"pdfnest-backend/internal/auth"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"pdfnest-backend/config"
+	analyzerModels "pdfnest-backend/internal/analyzer/models"
+	backendModels "pdfnest-backend/internal/models"
+	"pdfnest-backend/internal/storage"
+	"pdfnest-backend/internal/studio"
+	studioModels "pdfnest-backend/internal/studio/models"
+	"pdfnest-backend/internal/tasks"
+)
+
+func cleanupDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := os.Getenv("BACKEND_DURABILITY_TEST_DSN")
+	if dsn == "" {
+		t.Skip("requires explicit private BACKEND_DURABILITY_TEST_DSN")
+	}
+	require.Contains(t, dsn, "host=/tmp/platen-")
+	require.Contains(t, dsn, "user=platen_")
+	root, err := sql.Open("pgx", dsn)
+	require.NoError(t, err)
+	var address sql.NullString
+	require.NoError(t, root.QueryRow("SELECT inet_server_addr()::text").Scan(&address))
+	require.False(t, address.Valid)
+	name := "account_cleanup_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	_, err = root.Exec(`CREATE DATABASE "` + name + `"`)
+	require.NoError(t, err)
+	fields := strings.Fields(dsn)
+	for i, field := range fields {
+		if strings.HasPrefix(field, "dbname=") {
+			fields[i] = "dbname=" + name
+		}
+	}
+	db, err := gorm.Open(postgres.Open(strings.Join(fields, " ")), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, config.RunSchemaMigrations(db))
+	require.NoError(t, db.AutoMigrate(&config.AccountStorageCleanup{}))
+	t.Cleanup(func() {
+		pool, _ := db.DB()
+		_ = pool.Close()
+		_, _ = root.Exec(`DROP DATABASE "` + name + `" WITH (FORCE)`)
+		_ = root.Close()
+	})
+	return db
+}
+
+func TestAccountDeletionOutboxRollsBackAndRetainsActiveOwnership(t *testing.T) {
+	db := cleanupDB(t)
+	ctx := context.Background()
+	id := uuid.NewString()
+	u := config.User{ID: id, Email: id + "@example.invalid", Status: "active", EmailVerified: true}
+	require.NoError(t, db.Create(&u).Error)
+	task := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: id, DownloadToken: "token", State: "active", ResultKey: "outputs/tasks/a/result.pdf"}
+	require.NoError(t, db.Create(&task).Error)
+	require.NoError(t, db.Exec(`CREATE OR REPLACE FUNCTION fail_cleanup_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected'; END $$`).Error)
+	require.NoError(t, db.Exec(`CREATE TRIGGER fail_cleanup_test BEFORE INSERT ON account_storage_cleanups FOR EACH ROW EXECUTE FUNCTION fail_cleanup_test()`).Error)
+	err := deleteAccountWithCleanup(ctx, db, id, 0)
+	require.Error(t, err)
+	var persisted config.User
+	require.NoError(t, db.First(&persisted, "id = ?", id).Error)
+	require.NoError(t, db.Exec(`DROP TRIGGER fail_cleanup_test ON account_storage_cleanups`).Error)
+	require.NoError(t, db.Exec(`DROP FUNCTION fail_cleanup_test()`).Error)
+	require.NoError(t, deleteAccountWithCleanup(ctx, db, id, 0))
+	require.ErrorIs(t, db.First(&persisted, "id = ?", id).Error, gorm.ErrRecordNotFound)
+	var intent config.AccountStorageCleanup
+	require.NoError(t, db.First(&intent, "user_id = ?", id).Error)
+	w := NewAccountCleanupWorker(db)
+	require.Error(t, w.RunOnceAt(ctx, time.Now().Add(time.Hour)))
+	var check backendModels.TaskCompletion
+	require.NoError(t, db.First(&check, "id = ?", task.ID).Error)
+	require.Equal(t, "active", check.State)
+	require.NoError(t, db.Model(&task).Update("state", "completed").Error)
+	require.NoError(t, w.RunOnceAt(ctx, time.Now().Add(2*time.Hour)))
+	require.NoError(t, db.First(&check, "id = ?", task.ID).Error)
+	require.Equal(t, "deleted", check.State)
+	var physical []studioModels.StudioStorageCleanupTask
+	require.NoError(t, db.Where("object_key = ?", task.ResultKey).Find(&physical).Error)
+	require.Len(t, physical, 1)
+	require.NoError(t, w.RunOnceAt(ctx, time.Now().Add(3*time.Hour)))
+	require.NoError(t, db.Where("object_key = ?", task.ResultKey).Find(&physical).Error)
+	require.Len(t, physical, 1)
+}
+
+func TestAccountCleanupLeaseRecoveryAndCrossOwnerPin(t *testing.T) {
+	db := cleanupDB(t)
+	ctx := context.Background()
+	id := uuid.NewString()
+	other := uuid.NewString()
+	now := time.Now().UTC()
+	key := "outputs/tasks/" + uuid.NewString() + "/result.pdf"
+	require.NoError(t, db.Create(&config.User{ID: id, Email: id + "@example.invalid", Status: "active", EmailVerified: true}).Error)
+	task := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: id, DownloadToken: "token", State: "completed", ResultKey: key}
+	require.NoError(t, db.Create(&task).Error)
+	pin := backendModels.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", OwnerIdentity: other, SubmitPath: "/internal/ocr/v2/jobs", SourceKeys: `["` + key + `"]`, State: "active", NextAttemptAt: now}
+	require.NoError(t, db.Create(&pin).Error)
+	require.NoError(t, deleteAccountWithCleanup(ctx, db, id, 0))
+	future := now.Add(time.Hour)
+	require.NoError(t, db.Model(&config.AccountStorageCleanup{}).Where("user_id = ?", id).Updates(map[string]any{"lease_token": uuid.NewString(), "lease_expires_at": future}).Error)
+	w := NewAccountCleanupWorker(db)
+	require.NoError(t, w.RunOnceAt(ctx, now.Add(time.Minute)))
+	var unchanged backendModels.TaskCompletion
+	require.NoError(t, db.First(&unchanged, "id = ?", task.ID).Error)
+	require.Equal(t, "completed", unchanged.State)
+	require.NoError(t, w.RunOnceAt(ctx, now.Add(2*time.Hour)))
+	var queued studioModels.StudioStorageCleanupTask
+	require.NoError(t, db.First(&queued, "object_key = ?", key).Error)
+	calls := 0
+	worker := studio.NewStorageCleanupWorker(studio.NewRepository(db), studio.StorageObjectDeleterFunc(func(context.Context, string) error { calls++; return nil }))
+	require.False(t, worker.RunTaskAt(ctx, queued, now.Add(3*time.Hour)))
+	require.Zero(t, calls)
+	require.NoError(t, db.Model(&pin).Update("state", "deleted").Error)
+	require.True(t, worker.RunTaskAt(ctx, queued, now.Add(4*time.Hour)))
+	require.Equal(t, 1, calls)
+	var confirmation struct{ LastDeleteConfirmedAt *time.Time }
+	require.NoError(t, db.Table("studio_storage_object_retirements").Select("last_delete_confirmed_at").Where("object_key = ?", key).Scan(&confirmation).Error)
+	require.NotNil(t, confirmation.LastDeleteConfirmedAt, "physical deletion acknowledgement remains durable after retry row is removed")
+	// Baseline Studio cleanup remains compatible before the additive column.
+	require.NoError(t, db.Exec("ALTER TABLE studio_storage_object_retirements DROP COLUMN last_delete_confirmed_at").Error)
+	legacyTasks, err := studio.NewRepository(db).CreateStorageCleanupTasks(ctx, []string{"studio/legacy/" + uuid.NewString() + ".pdf"})
+	require.NoError(t, err)
+	require.Len(t, legacyTasks, 1)
+	require.True(t, worker.RunTaskAt(ctx, legacyTasks[0], now.Add(5*time.Hour)))
+	require.Equal(t, 2, calls)
+
+	require.NoError(t, db.First(&unchanged, "id = ?", task.ID).Error)
+	require.Equal(t, key, unchanged.ResultKey, "immutable artifact and billing evidence survives")
+}
+
+func TestAccountCleanupDiscoversStudioAnalyzerWorkerAndUnregisteredUploads(t *testing.T) {
+	db := cleanupDB(t)
+	ctx := context.Background()
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	require.NoError(t, db.Create(&config.User{ID: id, Email: id + "@example.invalid", Status: "active", EmailVerified: true}).Error)
+	uid := uuid.MustParse(id)
+	docID := uuid.New()
+	versionID := uuid.New()
+	sessionID := uuid.New()
+	prefix := "studio/test/" + uuid.NewString() + "/"
+	doc := studioModels.StudioDocument{ID: docID, OriginalFileName: "source.pdf", FileSize: 1, InitialPageCount: 1}
+	asset := studioModels.StudioAsset{ID: uuid.NewString(), DocumentID: docID, AssetType: "source_pdf", R2Key: prefix + "source.pdf", ByteSize: 1, MimeType: "application/pdf"}
+	version := studioModels.StudioVersion{ID: versionID, DocumentID: docID, VersionNumber: 1, Status: "ready", OperationType: "initial", VirtualModel: studioModels.JSON(`{}`), CreatedAt: now}
+	session := studioModels.StudioSession{ID: sessionID, UserID: &uid, DocumentID: docID, ActiveVersionID: versionID, CreatedAt: now, LastAccessedAt: now, ExpiresAt: now.Add(time.Hour)}
+	repo := studio.NewRepository(db)
+	require.NoError(t, repo.CreateDocumentWithInitialVersion(ctx, &doc, &asset, &version, &session))
+	job := studioModels.StudioJob{ID: uuid.New(), DocumentID: docID, SessionID: sessionID, BaseVersionID: versionID, WorkerJobID: uuid.NewString(), JobType: "test", Status: "failed", IdempotencyKey: uuid.NewString(), Parameters: studioModels.JSON(`{}`), SourceKey: prefix + "job-source.pdf", PayloadKey: prefix + "payload.json", PendingObjectKeys: studioModels.JSON(`["` + prefix + `pending.pdf"]`), CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(&job).Error)
+	exp := studioModels.StudioExport{ID: uuid.New(), DocumentID: docID, VersionID: versionID, ExportFormat: "pdf", R2Key: prefix + "export.pdf", ByteSize: 1, ExpiresAt: now.Add(time.Hour), CreatedAt: now}
+	require.NoError(t, db.Create(&exp).Error)
+	analyzerKey := "owned/legacy/" + uuid.NewString() + ".zip"
+	as := analyzerModels.AnalyzerSession{ID: uuid.NewString(), OwnerIdentity: id, SourceType: "zip", StorageKey: &analyzerKey, RepositoryName: "repository", Status: "COMPLETED"}
+	require.NoError(t, db.Create(&as).Error)
+	worker := backendModels.WorkerResultOwnership{ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "hash", OwnerIdentity: id, SubmitPath: "/internal/ocr/v2/jobs", SourceKeys: `["` + prefix + `worker-source.pdf"]`, State: "terminal", ResultKey: prefix + "worker-result.pdf", MetadataKey: prefix + "metadata.json", NextAttemptAt: now}
+	require.NoError(t, db.Create(&worker).Error)
+	orphan := storage.NewOwnedKey(id, "image_to_text_pdf", ".png")
+	_, _, err := storage.SaveLocalStream(ctx, orphan, strings.NewReader("image"))
+	require.NoError(t, err)
+	// Include already soft-deleted sessions; their graph must not become orphaned.
+	require.NoError(t, db.Delete(&session).Error)
+	require.NoError(t, deleteAccountWithCleanup(ctx, db, id, 0))
+	require.NoError(t, NewAccountCleanupWorker(db).RunOnceAt(ctx, now.Add(time.Hour)))
+	var keys []string
+	require.NoError(t, db.Model(&studioModels.StudioStorageCleanupTask{}).Pluck("object_key", &keys).Error)
+	require.ElementsMatch(t, []string{asset.R2Key, job.SourceKey, job.PayloadKey, prefix + "pending.pdf", exp.R2Key, analyzerKey, prefix + "worker-source.pdf", worker.ResultKey, worker.MetadataKey, orphan}, keys)
+	var remaining int64
+	require.NoError(t, db.Model(&studioModels.StudioDocument{}).Where("id = ?", docID).Count(&remaining).Error)
+	require.Zero(t, remaining)
+	require.NoError(t, db.Model(&analyzerModels.AnalyzerSession{}).Where("id = ?", as.ID).Count(&remaining).Error)
+	require.Zero(t, remaining)
+}
+
+func TestDeleteAccountHTTPUsesAuthenticatedSessionAndFailsClosedWithoutLedger(t *testing.T) {
+	db := cleanupDB(t)
+	previous := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = previous })
+	t.Setenv("JWT_SECRET", "account-delete-controller-test-secret")
+	require.NoError(t, db.Exec(`CREATE TABLE backend_durability_schema(version text PRIMARY KEY, applied_at timestamptz NOT NULL); INSERT INTO backend_durability_schema VALUES ('20261105_account_cleanup_v1',now())`).Error)
+	makeUser := func() config.User {
+		u := config.User{ID: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Status: "active", EmailVerified: true}
+		require.NoError(t, db.Create(&u).Error)
+		return u
+	}
+	owner, other := makeUser(), makeUser()
+	token, err := auth.NewService().GenerateToken(owner.ID, owner.Role, owner.SessionVersion)
+	require.NoError(t, err)
+	app := fiber.New()
+	RegisterRoutes(app, NewController())
+	request := func(token string) *http.Response {
+		r := httptest.NewRequest(http.MethodDelete, "/user/account?user_id="+other.ID, nil)
+		if token != "" {
+			r.AddCookie(&http.Cookie{Name: "auth_token", Value: token})
+		}
+		response, err := app.Test(r)
+		require.NoError(t, err)
+		return response
+	}
+	response := request("")
+	require.Equal(t, 401, response.StatusCode)
+	response.Body.Close()
+	response = request(token)
+	require.Equal(t, 200, response.StatusCode)
+	var payload map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&payload))
+	response.Body.Close()
+	require.Equal(t, "pending", payload["storage_cleanup"])
+	var intent config.AccountStorageCleanup
+	require.NoError(t, db.First(&intent, "user_id = ?", owner.ID).Error)
+	var untouched config.User
+	require.NoError(t, db.First(&untouched, "id = ?", other.ID).Error)
+	response = request(token)
+	require.Equal(t, 401, response.StatusCode)
+	response.Body.Close()
+	token, err = auth.NewService().GenerateToken(other.ID, other.Role, other.SessionVersion)
+	require.NoError(t, err)
+	require.NoError(t, db.Exec("DROP TABLE account_storage_cleanups").Error)
+	response = request(token)
+	require.Equal(t, 503, response.StatusCode)
+	response.Body.Close()
+	require.NoError(t, db.First(&untouched, "id = ?", other.ID).Error)
+}
+
+func TestDeleteAccountImmediatelyRevokesTaskDownloadCapabilitiesWhileCleanupIsPinned(t *testing.T) {
+	db := cleanupDB(t)
+	previous := config.DB
+	config.DB = db
+	t.Cleanup(func() { config.DB = previous })
+	t.Setenv("JWT_SECRET", "account-delete-download-test-secret")
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	require.NoError(t, db.Exec(`CREATE TABLE backend_durability_schema(version text PRIMARY KEY, applied_at timestamptz NOT NULL); INSERT INTO backend_durability_schema VALUES ('20261105_account_cleanup_v1',now())`).Error)
+	owner := config.User{ID: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Status: "active", EmailVerified: true}
+	require.NoError(t, db.Create(&owner).Error)
+	taskID := uuid.NewString()
+	key := "outputs/tasks/" + taskID + "/result.pdf"
+	size, digest, err := storage.SaveLocalStream(context.Background(), key, strings.NewReader("private account artifact"))
+	require.NoError(t, err)
+	completed := backendModels.TaskCompletion{ID: taskID, OwnerIdentity: owner.ID, DownloadToken: uuid.NewString(), ReservationID: "immutable-billing", State: "completed", ResultKey: key, ArtifactSHA256: digest, ArtifactBytes: size, ExpiresAt: time.Now().Add(time.Hour)}
+	held := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: owner.ID, DownloadToken: uuid.NewString(), ReservationID: "held-billing", State: "artifact_recovery_hold", ResultKey: "retained/evidence.pdf", ArtifactSHA256: strings.Repeat("a", 64), ArtifactBytes: 10}
+	other := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: uuid.NewString(), DownloadToken: uuid.NewString(), State: "completed", ExpiresAt: time.Now().Add(time.Hour)}
+	require.NoError(t, db.Create(&completed).Error)
+	require.NoError(t, db.Create(&held).Error)
+	require.NoError(t, db.Create(&other).Error)
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error { c.Locals("identity_id", c.Get("X-Test-Owner")); return c.Next() })
+	RegisterRoutes(app, NewController())
+	tasks.RegisterRoutes(app)
+	download := func() *http.Response {
+		r := httptest.NewRequest(http.MethodGet, "/v1/download/"+taskID+"?token="+completed.DownloadToken, nil)
+		response, err := app.Test(r)
+		require.NoError(t, err)
+		return response
+	}
+	response := download()
+	require.Equal(t, 200, response.StatusCode)
+	response.Body.Close()
+	token, err := auth.NewService().GenerateToken(owner.ID, owner.Role, owner.SessionVersion)
+	require.NoError(t, err)
+	request := httptest.NewRequest(http.MethodDelete, "/user/account", nil)
+	request.AddCookie(&http.Cookie{Name: "auth_token", Value: token})
+	response, err = app.Test(request)
+	require.NoError(t, err)
+	require.Equal(t, 200, response.StatusCode)
+	response.Body.Close()
+	// No cleanup worker has run, and the hold prevents physical cleanup from draining.
+	response = download()
+	require.Equal(t, 403, response.StatusCode)
+	response.Body.Close()
+	var after backendModels.TaskCompletion
+	for _, before := range []backendModels.TaskCompletion{completed, held} {
+		after = backendModels.TaskCompletion{}
+		require.NoError(t, db.First(&after, "id = ?", before.ID).Error)
+		require.Empty(t, after.DownloadToken)
+		require.Equal(t, before.State, after.State)
+		require.Equal(t, before.ReservationID, after.ReservationID)
+		require.Equal(t, before.ResultKey, after.ResultKey)
+		require.Equal(t, before.ArtifactSHA256, after.ArtifactSHA256)
+		require.Equal(t, before.ArtifactBytes, after.ArtifactBytes)
+	}
+	after = backendModels.TaskCompletion{}
+	require.NoError(t, db.First(&after, "id = ?", other.ID).Error)
+	require.Equal(t, other.DownloadToken, after.DownloadToken)
+	// A request authenticated before deletion can finish admitting a new row
+	// afterwards. Its fresh bearer grant must still be denied by the tombstone.
+	late := completed
+	late.ID = uuid.NewString()
+	late.DownloadToken = uuid.NewString()
+	require.NoError(t, db.Create(&late).Error)
+	for _, path := range []string{"/v1/download/" + late.ID + "?token=" + late.DownloadToken, "/v1/tasks/" + late.ID + "?token=" + late.DownloadToken} {
+		lateRequest := httptest.NewRequest(http.MethodGet, path, nil)
+		lateResponse, err := app.Test(lateRequest)
+		require.NoError(t, err)
+		require.Equal(t, 403, lateResponse.StatusCode)
+		lateResponse.Body.Close()
+		cachedOwner := httptest.NewRequest(http.MethodGet, path, nil)
+		cachedOwner.Header.Set("X-Test-Owner", owner.ID)
+		cachedResponse, err := app.Test(cachedOwner)
+		require.NoError(t, err)
+		require.Equal(t, 403, cachedResponse.StatusCode)
+		cachedResponse.Body.Close()
+	}
+	// A guest UUID without an account deletion intent keeps its bearer grant.
+	guest := completed
+	guest.ID = uuid.NewString()
+	guest.OwnerIdentity = uuid.NewString()
+	guest.DownloadToken = uuid.NewString()
+	require.NoError(t, db.Create(&guest).Error)
+	guestResponse, err := app.Test(httptest.NewRequest(http.MethodGet, "/v1/download/"+guest.ID+"?token="+guest.DownloadToken, nil))
+	require.NoError(t, err)
+	require.Equal(t, 200, guestResponse.StatusCode)
+	guestResponse.Body.Close()
+}
+
+func TestAccountCleanupSuppressesSQLProviderAndQueueSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "test")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", t.TempDir())
+	db := cleanupDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const secretKey = "outputs/tasks/synthetic-private-storage-key/result.pdf"
+	const secretToken = "synthetic-private-download-token"
+	owner := config.User{ID: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Status: "active", EmailVerified: true}
+	require.NoError(t, db.Create(&owner).Error)
+	task := backendModels.TaskCompletion{ID: uuid.NewString(), OwnerIdentity: owner.ID, DownloadToken: secretToken, State: "completed", ResultKey: secretKey}
+	require.NoError(t, db.Create(&task).Error)
+	var captured bytes.Buffer
+	originalLogWriter := log.Writer()
+	log.SetOutput(&captured)
+	t.Cleanup(func() { log.SetOutput(originalLogWriter) })
+	noisyLogger := logger.New(log.New(&captured, "", 0), logger.Config{LogLevel: logger.Info})
+	noisy := db.Session(&gorm.Session{Logger: noisyLogger})
+	// Prove that an unscoped SQL trace would expose the sentinel.
+	require.NoError(t, noisy.Exec("SELECT ?", secretKey).Error)
+	require.Contains(t, captured.String(), secretKey)
+	captured.Reset()
+	assertPrivate := func(err error) {
+		t.Helper()
+		if err != nil {
+			require.NotContains(t, err.Error(), secretKey)
+			require.NotContains(t, err.Error(), secretToken)
+		}
+		require.NotContains(t, captured.String(), secretKey)
+		require.NotContains(t, captured.String(), secretToken)
+		captured.Reset()
+	}
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_delete_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'failure % %', OLD.result_key, OLD.download_token; END $$; CREATE TRIGGER privacy_delete_failure BEFORE UPDATE ON task_completions FOR EACH ROW EXECUTE FUNCTION privacy_delete_failure()`).Error)
+	err := deleteAccountWithCleanup(ctx, noisy, owner.ID, 0)
+	require.Error(t, err)
+	assertPrivate(err)
+	var pending int64
+	require.NoError(t, db.Model(&config.AccountStorageCleanup{}).Where("user_id = ?", owner.ID).Count(&pending).Error)
+	require.Zero(t, pending)
+	var account config.User
+	require.NoError(t, db.First(&account, "id = ?", owner.ID).Error)
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_delete_failure ON task_completions; DROP FUNCTION privacy_delete_failure()`).Error)
+	require.NoError(t, deleteAccountWithCleanup(ctx, noisy, owner.ID, 0))
+	captured.Reset()
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_queue_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'failure % synthetic-private-download-token', NEW.object_key; END $$; CREATE TRIGGER privacy_queue_failure BEFORE INSERT ON studio_storage_cleanup_tasks FOR EACH ROW EXECUTE FUNCTION privacy_queue_failure()`).Error)
+	worker := NewAccountCleanupWorker(noisy)
+	err = worker.RunOnceAt(ctx, now.Add(time.Hour))
+	require.Error(t, err)
+	assertPrivate(err)
+	require.NoError(t, db.Model(&config.AccountStorageCleanup{}).Where("user_id = ?", owner.ID).Count(&pending).Error)
+	require.EqualValues(t, 1, pending)
+	var retained backendModels.TaskCompletion
+	require.NoError(t, db.First(&retained, "id = ?", task.ID).Error)
+	require.Equal(t, "completed", retained.State)
+	require.Equal(t, secretKey, retained.ResultKey)
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_queue_failure ON studio_storage_cleanup_tasks; DROP FUNCTION privacy_queue_failure()`).Error)
+	require.NoError(t, worker.RunOnceAt(ctx, now.Add(2*time.Hour)))
+	assertPrivate(nil)
+	var receipt studioModels.StudioStorageCleanupTask
+	require.NoError(t, db.First(&receipt, "object_key = ?", secretKey).Error)
+	physical := studio.NewStorageCleanupWorker(studio.NewRepository(noisy), studio.StorageObjectDeleterFunc(func(context.Context, string) error {
+		return fmt.Errorf("provider denied %s %s", secretKey, secretToken)
+	}))
+	require.NoError(t, db.Exec(`CREATE FUNCTION privacy_retry_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'retry % synthetic-private-download-token', NEW.object_key; END $$; CREATE TRIGGER privacy_retry_failure BEFORE UPDATE ON studio_storage_cleanup_tasks FOR EACH ROW EXECUTE FUNCTION privacy_retry_failure()`).Error)
+	require.False(t, physical.RunTaskAt(ctx, receipt, now.Add(3*time.Hour)))
+	require.Contains(t, captured.String(), "code=CLEANUP_RETRY_DEFERRED")
+	assertPrivate(nil)
+	require.NoError(t, db.First(&receipt, "id = ?", receipt.ID).Error, "failed retry acknowledgement must retain physical cleanup receipt")
+	require.NoError(t, db.Exec(`DROP TRIGGER privacy_retry_failure ON studio_storage_cleanup_tasks; DROP FUNCTION privacy_retry_failure()`).Error)
+	require.False(t, physical.RunTaskAt(ctx, receipt, now.Add(4*time.Hour)))
+	assertPrivate(nil)
+	require.NoError(t, db.First(&receipt, "id = ?", receipt.ID).Error)
+	require.Equal(t, "physical storage deletion failed", receipt.LastError)
+	var retirement studioModels.StudioStorageObjectRetirement
+	require.NoError(t, db.First(&retirement, "object_key = ?", secretKey).Error)
+	require.Nil(t, retirement.LastDeleteConfirmedAt)
+
+	require.Same(t, noisyLogger, noisy.Logger, "quiet cleanup sessions must not change ordinary API logging")
+}

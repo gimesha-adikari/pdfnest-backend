@@ -78,7 +78,7 @@ func (s *Service) CreateSession(ctx context.Context, ownerIdentity string, req C
 		if req.GitURL == "" {
 			return nil, fmt.Errorf("gitUrl is required for git source type")
 		}
-		if err := acquisition.ValidateGitURL(req.GitURL); err != nil {
+		if err := acquisition.ValidateGitURLContext(ctx, req.GitURL); err != nil {
 			return nil, fmt.Errorf("git url validation failed: %w", err)
 		}
 		cleanURL := strings.TrimSpace(req.GitURL)
@@ -297,7 +297,13 @@ func (s *Service) Analyze(ctx context.Context, ownerIdentity, sessionID string, 
 		stagedPath = *session.StorageKey
 	}
 
+	admissionIdentity := ""
+	// The caller authentication must agree with the server-owned session row.
+	if req.admissionIdentity != "" && req.admissionIdentity == session.OwnerIdentity {
+		admissionIdentity = "user:" + session.OwnerIdentity
+	}
 	job := worker.AnalyzerJob{
+		AdmissionIdentity: admissionIdentity,
 		JobVersion:        worker.JobVersion1,
 		TaskID:            taskID,
 		SessionID:         session.ID,

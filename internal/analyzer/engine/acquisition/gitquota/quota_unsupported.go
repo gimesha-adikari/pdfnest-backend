@@ -2,7 +2,10 @@
 
 package gitquota
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 var ErrUnavailable = errors.New("hard Git quotas require Linux amd64")
 
@@ -18,3 +21,6 @@ func (*Lease) ConfigPath() string         { return "" }
 func (*Lease) Release() error             { return ErrUnavailable }
 
 func (*Lease) Token() string { return "" }
+
+func (*Manager) ProbeContext(context.Context) error             { return ErrUnavailable }
+func (*Manager) AcquireContext(context.Context) (*Lease, error) { return nil, ErrUnavailable }
