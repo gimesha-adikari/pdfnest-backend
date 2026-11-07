@@ -33,6 +33,25 @@ func TestArtifactSnapshotProtectsHashUploadFromSourceMutation(t *testing.T) {
 	require.ErrorIs(t, SaveVerifiedArtifact(t.Context(), "outputs/tasks/test/other.txt", path, digest, size, "text/plain"), ErrArtifactIntegrity)
 }
 
+func TestLocalVerifiedArtifactUsesPlaintextPublisherIdentityWithEncryptionKey(t *testing.T) {
+	studioStorageLocal(t)
+	t.Setenv("FILE_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef")
+
+	plain := []byte("# Local Markdown result\n\nSynthetic output.\n")
+	source := filepath.Join(t.TempDir(), "result.md")
+	require.NoError(t, os.WriteFile(source, plain, 0600))
+	digest := artifactDigest(plain)
+	key := "outputs/tasks/local-markdown/result.md"
+
+	require.NoError(t, SaveVerifiedArtifact(t.Context(), key, source, digest, int64(len(plain)), "text/markdown; charset=utf-8"))
+	resolved, cleanup, err := ResolveVerifiedArtifact(t.Context(), key, digest, int64(len(plain)))
+	require.NoError(t, err, "local publisher stores the exact verified plaintext identity")
+	defer cleanup()
+	data, err := os.ReadFile(resolved)
+	require.NoError(t, err)
+	require.Equal(t, plain, data)
+}
+
 func TestArtifactCanonicalStoreOnlyAndBounds(t *testing.T) {
 	root := studioStorageLocal(t)
 	key := "outputs/tasks/test/result.txt"
