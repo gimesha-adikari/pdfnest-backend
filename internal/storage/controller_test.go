@@ -350,3 +350,122 @@ func TestLocalOCRPresignGatePreservesRemoteAdapter(t *testing.T) {
 		})
 	}
 }
+
+func TestRepositoryAnalyzerPresignInLocalModeRequiresDirectUpload(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("R2_BUCKET", "synthetic-test-bucket")
+	t.Setenv("R2_ACCESS_KEY", "synthetic-test-access")
+	t.Setenv("R2_SECRET_KEY", "synthetic-test-secret")
+	t.Setenv("R2_ENDPOINT", "http://127.0.0.1:1")
+
+	previousStore, previousErr := defaultStore, defaultErr
+	defaultStore, defaultErr = nil, nil
+	once = sync.Once{}
+	t.Cleanup(func() {
+		defaultStore, defaultErr = previousStore, previousErr
+		once = sync.Once{}
+		if previousStore != nil || previousErr != nil {
+			once.Do(func() {})
+		}
+	})
+
+	h := localUploadTestApp(t)
+	reqBody, err := json.Marshal(PresignRequest{
+		Purpose: "repository_analyzer",
+		Files:   []PresignFile{{Name: "synthetic.zip", Size: 128, Type: "application/zip"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/storage/r2/presign", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Test-User", "user:alice")
+	resp, err := h.app.Test(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != fiber.StatusConflict {
+		var apiError APIError
+		_ = json.Unmarshal(responseBody, &apiError)
+		t.Fatalf("local analyzer presign status=%d code=%s, want=%d", resp.StatusCode, apiError.Code, fiber.StatusConflict)
+	}
+	if strings.Contains(string(responseBody), "uploadUrl") || strings.Contains(string(responseBody), "127.0.0.1:1") {
+		t.Fatal("local analyzer presign returned a remote upload destination")
+	}
+	var result APIError
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Code != "LOCAL_ANALYZER_DIRECT_UPLOAD_REQUIRED" {
+		t.Fatalf("unexpected local analyzer presign code: %q", result.Code)
+	}
+	if defaultStore != nil || defaultErr != nil {
+		t.Fatal("local analyzer presign initialized the remote storage client")
+	}
+}
+
+func TestRepositoryAnalyzerPresignRetainsManagedRemoteMode(t *testing.T) {
+	client, err := minio.New("127.0.0.1:1", &minio.Options{Creds: credentials.NewStaticV4("unit-test", "unit-test", ""), Secure: false, Region: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousStore, previousErr := defaultStore, defaultErr
+	defaultStore, defaultErr = &Store{client: client, bucket: "synthetic-unit-test"}, nil
+	once = sync.Once{}
+	once.Do(func() {})
+	t.Cleanup(func() {
+		defaultStore, defaultErr = previousStore, previousErr
+		once = sync.Once{}
+		if previousStore != nil || previousErr != nil {
+			once.Do(func() {})
+		}
+	})
+
+	for _, tc := range []struct{ appEnv, storageMode string }{
+		{appEnv: "development", storageMode: "r2"},
+		{appEnv: "canary", storageMode: "local"},
+		{appEnv: "staging", storageMode: "local"},
+		{appEnv: "production", storageMode: "local"},
+	} {
+		t.Run(tc.appEnv+"/"+tc.storageMode, func(t *testing.T) {
+			h := localUploadTestApp(t)
+			t.Setenv("APP_ENV", tc.appEnv)
+			t.Setenv("STORAGE_MODE", tc.storageMode)
+			body, err := json.Marshal(PresignRequest{
+				Purpose: "repository_analyzer",
+				Files:   []PresignFile{{Name: "synthetic.zip", Size: 128, Type: "application/zip"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest("POST", "/api/storage/r2/presign", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Test-User", "user:alice")
+			resp, err := h.app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != fiber.StatusOK {
+				responseBody, _ := io.ReadAll(resp.Body)
+				t.Fatalf("remote analyzer presign status=%d: %s", resp.StatusCode, responseBody)
+			}
+			var result PresignResponse
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Files) != 1 || !strings.HasPrefix(result.Files[0].UploadURL, "http://127.0.0.1:1/") || !strings.Contains(result.Files[0].UploadURL, "X-Amz-Signature=") {
+				t.Fatal("managed remote mode did not preserve the mocked presign contract")
+			}
+			if !IsOwnedKey(result.Files[0].Key, "user:alice", "repository_analyzer") {
+				t.Fatal("remote analyzer key is not owner-scoped")
+			}
+		})
+	}
+}

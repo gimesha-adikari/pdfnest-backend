@@ -85,6 +85,15 @@ func (ctrl *Controller) PresignUploads(c *fiber.Ctx) error {
 		}
 		return c.JSON(PresignResponse{Files: items})
 	}
+	// Analyzer archives use the authenticated Backend multipart route in local
+	// filesystem mode. Do not initialize the remote adapter here: stale R2
+	// environment variables must never turn a local upload into a provider PUT.
+	if req.Purpose == "repository_analyzer" && !RemoteStorageEnabled() {
+		return c.Status(fiber.StatusConflict).JSON(APIError{
+			Code:    "LOCAL_ANALYZER_DIRECT_UPLOAD_REQUIRED",
+			Message: "Local storage mode requires the Backend analyzer upload route.",
+		})
+	}
 
 	store, err := Default()
 	if err != nil {
