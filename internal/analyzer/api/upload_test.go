@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -41,7 +42,13 @@ func createValidZipBuffer(t *testing.T) []byte {
 
 func TestUploadArchive_AtomicIngestionAndSessionCreation(t *testing.T) {
 	tempStorageDir := t.TempDir()
-	t.Setenv("ANALYZER_STORAGE_DIR", tempStorageDir)
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("LOCAL_STORAGE_DIR", tempStorageDir)
+	t.Setenv("R2_BUCKET", "synthetic-test-bucket")
+	t.Setenv("R2_ACCESS_KEY", "synthetic-test-access")
+	t.Setenv("R2_SECRET_KEY", "synthetic-test-secret")
+	t.Setenv("R2_ENDPOINT", "http://127.0.0.1:1")
 
 	mr, err := miniredis.Run()
 	require.NoError(t, err)
@@ -109,6 +116,12 @@ func TestUploadArchive_AtomicIngestionAndSessionCreation(t *testing.T) {
 	assert.Equal(t, "my-app", upData.RepositoryName)
 	assert.NotEmpty(t, upData.SHA256)
 	assert.Equal(t, int64(len(zipData)), upData.Size)
+	assert.True(t, storage.IsOwnedKey(upData.StorageKey, "guest:test-user", "repository_analyzer"))
+	assert.False(t, storage.IsOwnedKey(upData.StorageKey, "guest:another-user", "repository_analyzer"))
+	storedPath := filepath.Join(tempStorageDir, filepath.FromSlash(upData.StorageKey))
+	storedZip, err := os.ReadFile(storedPath)
+	require.NoError(t, err)
+	assert.Equal(t, zipData, storedZip)
 
 	// 3. Create Session with the verified StorageKey -> Must succeed with 200 OK
 	validSessionReq := CreateSessionRequest{
@@ -129,6 +142,30 @@ func TestUploadArchive_AtomicIngestionAndSessionCreation(t *testing.T) {
 	assert.NotEmpty(t, sessResp.SessionID)
 	assert.Equal(t, upData.StorageKey, sessResp.StorageKey)
 	assert.Equal(t, "my-app", sessResp.RepositoryName)
+
+	crossOwnerBody, err := json.Marshal(CreateSessionRequest{
+		SourceType:     engine.SourceTypeZip,
+		StorageKey:     upData.StorageKey,
+		RepositoryName: upData.RepositoryName,
+	})
+	require.NoError(t, err)
+	crossOwnerReq := httptest.NewRequest(http.MethodPost, "/api/v1/analyzer/sessions", bytes.NewReader(crossOwnerBody))
+	crossOwnerReq.Header.Set("Content-Type", "application/json")
+	crossOwnerReq.Header.Set("X-Platen-Fingerprint", "another-user")
+	crossOwnerResp, err := app.Test(crossOwnerReq)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusForbidden, crossOwnerResp.StatusCode)
+
+	resolveReq := httptest.NewRequest(http.MethodGet, "/api/v1/analyzer/sessions/"+sessResp.SessionID, nil)
+	resolveReq.Header.Set("X-Platen-Fingerprint", "test-user")
+	resolveResp, err := app.Test(resolveReq)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resolveResp.StatusCode)
+	otherOwnerReq := httptest.NewRequest(http.MethodGet, "/api/v1/analyzer/sessions/"+sessResp.SessionID, nil)
+	otherOwnerReq.Header.Set("X-Platen-Fingerprint", "another-user")
+	otherOwnerResp, err := app.Test(otherOwnerReq)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, otherOwnerResp.StatusCode)
 }
 
 func TestUploadArchive_InvalidFileFormatRejection(t *testing.T) {
