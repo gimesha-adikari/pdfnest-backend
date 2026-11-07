@@ -94,6 +94,17 @@ func (ctrl *Controller) PresignUploads(c *fiber.Ctx) error {
 			Message: "Local storage mode requires the Backend analyzer upload route.",
 		})
 	}
+	// This route creates remote presigned destinations. In filesystem mode,
+	// only the explicit local OCR grant above is supported; other local upload
+	// flows must use their authenticated local handler or fail closed. In
+	// particular, a generic Studio request must not initialize R2 merely because
+	// stale provider configuration is present in a developer's environment.
+	if !RemoteStorageEnabled() {
+		return c.Status(fiber.StatusConflict).JSON(APIError{
+			Code:    "LOCAL_UPLOAD_UNSUPPORTED_IN_FILESYSTEM_MODE",
+			Message: "This upload purpose is not supported by the local filesystem presign route.",
+		})
+	}
 
 	store, err := Default()
 	if err != nil {
