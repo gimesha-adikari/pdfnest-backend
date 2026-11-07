@@ -314,7 +314,7 @@ func TestLocalOCRGrantExpiresBeforePublication(t *testing.T) {
 	}
 }
 
-func TestLocalOCRPresignGatePreservesRemoteAdapter(t *testing.T) {
+func TestLocalOCRPresignGatePreservesManagedAndExplicitRemoteAdapter(t *testing.T) {
 	h := localUploadTestApp(t)
 	// Signing only: no HTTP connection or production credentials are involved.
 	client, err := minio.New("127.0.0.1:1", &minio.Options{Creds: credentials.NewStaticV4("unit-test", "unit-test", ""), Secure: false, Region: "auto"})
@@ -333,9 +333,8 @@ func TestLocalOCRPresignGatePreservesRemoteAdapter(t *testing.T) {
 	})
 	body := imageFixture(t, "png")
 	for _, tc := range []struct{ env, mode string }{
-		{"", "local"}, {"unknown", "local"}, {"preview", "local"},
 		{"canary", "local"}, {"staging", "local"}, {"production", "local"},
-		{"development", "r2"}, {"development", ""}, {"test", "remote"},
+		{"development", "r2"}, {"test", "remote"},
 	} {
 		t.Run(tc.env+"/"+tc.mode, func(t *testing.T) {
 			t.Setenv("APP_ENV", tc.env)
@@ -407,6 +406,87 @@ func TestRepositoryAnalyzerPresignInLocalModeRequiresDirectUpload(t *testing.T) 
 	}
 	if defaultStore != nil || defaultErr != nil {
 		t.Fatal("local analyzer presign initialized the remote storage client")
+	}
+}
+
+func TestFilesystemModeNeverFallsBackToRemotePresigns(t *testing.T) {
+	// Deliberately provide a syntactically valid but unusable R2 endpoint. A
+	// filesystem-mode request must be resolved or rejected before the remote
+	// adapter is initialized, regardless of stale provider configuration.
+	t.Setenv("STORAGE_MODE", "local")
+	t.Setenv("R2_BUCKET", "synthetic-test-bucket")
+	t.Setenv("R2_ACCESS_KEY", "synthetic-test-access")
+	t.Setenv("R2_SECRET_KEY", "synthetic-test-secret")
+	t.Setenv("R2_ENDPOINT", "http://127.0.0.1:1")
+
+	previousStore, previousErr := defaultStore, defaultErr
+	defaultStore, defaultErr = nil, nil
+	once = sync.Once{}
+	t.Cleanup(func() {
+		defaultStore, defaultErr = previousStore, previousErr
+		once = sync.Once{}
+		if previousStore != nil || previousErr != nil {
+			once.Do(func() {})
+		}
+	})
+
+	h := localUploadTestApp(t)
+	fixture := imageFixture(t, "png")
+	for _, tc := range []struct {
+		name, appEnv, purpose, wantCode string
+		wantLocalOCR                    bool
+	}{
+		{name: "analyzer requires its authenticated local upload route", appEnv: "development", purpose: "repository_analyzer", wantCode: "LOCAL_ANALYZER_DIRECT_UPLOAD_REQUIRED"},
+		{name: "studio source cannot fall through to R2", appEnv: "development", purpose: "studio_source", wantCode: "LOCAL_UPLOAD_UNSUPPORTED_IN_FILESYSTEM_MODE"},
+		{name: "OCR uses its dedicated local grant", appEnv: "development", purpose: "image_to_text_pdf", wantLocalOCR: true},
+		{name: "OCR fails closed outside the local grant environment", appEnv: "", purpose: "image_to_text_pdf", wantCode: "LOCAL_UPLOAD_UNSUPPORTED_IN_FILESYSTEM_MODE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("APP_ENV", tc.appEnv)
+			defaultStore, defaultErr = nil, nil
+			once = sync.Once{}
+
+			body, err := json.Marshal(PresignRequest{
+				Purpose: tc.purpose,
+				Files:   []PresignFile{{Name: "synthetic-input", Size: int64(len(fixture)), Type: "image/png"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest("POST", "/api/storage/r2/presign", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Test-User", "user:alice")
+			resp, err := h.app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.wantLocalOCR {
+				var result PresignResponse
+				if resp.StatusCode != fiber.StatusOK || json.Unmarshal(responseBody, &result) != nil || len(result.Files) != 1 {
+					t.Fatalf("local OCR presign status=%d body=%s", resp.StatusCode, responseBody)
+				}
+				if !strings.Contains(result.Files[0].UploadURL, "/api/storage/local-ocr-image?") || strings.Contains(result.Files[0].UploadURL, "X-Amz-Signature=") {
+					t.Fatalf("local OCR returned non-local destination %q", result.Files[0].UploadURL)
+				}
+			} else {
+				var apiError APIError
+				if resp.StatusCode != fiber.StatusConflict || json.Unmarshal(responseBody, &apiError) != nil || apiError.Code != tc.wantCode {
+					t.Fatalf("presign status=%d code=%q body=%s want status=%d code=%q", resp.StatusCode, apiError.Code, responseBody, fiber.StatusConflict, tc.wantCode)
+				}
+				if strings.Contains(string(responseBody), "uploadUrl") || strings.Contains(string(responseBody), "127.0.0.1:1") || strings.Contains(string(responseBody), "X-Amz-Signature") {
+					t.Fatalf("local presign returned remote destination: %s", responseBody)
+				}
+			}
+			if defaultStore != nil || defaultErr != nil {
+				t.Fatal("filesystem-mode presign initialized the remote storage adapter")
+			}
+		})
 	}
 }
 
