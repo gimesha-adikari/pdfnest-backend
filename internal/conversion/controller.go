@@ -899,8 +899,12 @@ func (ctrl *Controller) HandleAsyncMarkdownToPDF(c *fiber.Ctx) error {
 
 		// Preserve the reviewed Markdown fail-closed storage admission.
 		if store, err := storage.Default(); err != nil || store == nil {
-			releaseBilling()
 			_, _ = tasks.Registry.SetWithKey(id, "FAILED", 0, "", "Completed document storage is unavailable.", owner)
+			// Persist the specific terminal task outcome before releasing its
+			// reservation. The durable release guard marks still-active tasks as
+			// failed, so releasing first would replace this diagnostic with its
+			// generic reservation-release message.
+			releaseBilling()
 			return
 		}
 		key := fmt.Sprintf("outputs/tasks/%s/compiled.pdf", id)
