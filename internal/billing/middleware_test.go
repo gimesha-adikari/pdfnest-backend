@@ -5,12 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"pdfnest-backend/config"
 	"pdfnest-backend/internal/identity"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gofiber/fiber/v2"
+	recovermw "github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +39,45 @@ func TestGuestOwnershipIsolationPreservesQuota(t *testing.T) {
 		require.Equal(t, 200, resp.StatusCode)
 	}
 	t.Fatal("changing guest ownership must not reset shared anonymous quota")
+}
+
+func TestBillingMiddlewareKeepsGuestQuotaAcrossInheritedIdentityResolvers(t *testing.T) {
+	t.Setenv("BILLING_MODE", "normal")
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	oldQuota, oldStore, oldDB := GuestQuota, identity.DefaultStore, config.DB
+	t.Cleanup(func() {
+		GuestQuota = oldQuota
+		identity.DefaultStore = oldStore
+		config.DB = oldDB
+		_ = client.Close()
+	})
+	GuestQuota = NewGuestQuotaStore(client, 90*24*time.Hour)
+	identityStore := identity.NewStore(client, 0)
+	config.DB = nil
+
+	app := fiber.New()
+	app.Use(recovermw.New())
+	apiGroup := app.Group("/api")
+	toolGroup := apiGroup.Group("", identity.Resolve(identityStore))
+	toolGroup.Get("/tools/example", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusNoContent) })
+	apiGroup.Post("/v2/ocr/text/jobs", identity.Resolve(identityStore), Use(Tool{
+		Name:     "identity_repeated_guest_test",
+		Estimate: EstimateNone(),
+	}), func(c *fiber.Ctx) error {
+		ident, ok := identity.FromContext(c)
+		if !ok || ident.Type != identity.TypeGuest {
+			return c.SendStatus(http.StatusUnauthorized)
+		}
+		return c.SendStatus(http.StatusAccepted)
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v2/ocr/text/jobs", nil)
+	request.Header.Set("User-Agent", "synthetic-billing-identity-test")
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusAccepted, response.StatusCode, "guest billing must use Redis quota, not database account reservations")
 }
 
 func TestBillingMiddleware_Unauthorized(t *testing.T) {

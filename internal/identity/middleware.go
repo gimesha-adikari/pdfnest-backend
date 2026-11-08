@@ -16,6 +16,23 @@ import (
 
 func Resolve(store *Store) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Routers may apply both prefix-level and route-level identity middleware.
+		// Preserve an identity already resolved during this request; guest
+		// identities also populate LocalUserIDKey for legacy owner scoping, so a
+		// second pass must not mistake that compatibility value for authentication.
+		if ident, ok := FromContext(c); ok && strings.TrimSpace(ident.ID) != "" {
+			switch ident.Type {
+			case TypeGuest, TypeUser:
+				c.Locals(LocalIdentityIDKey, ident.ID)
+				c.Locals(LocalIdentityType, string(ident.Type))
+				c.Locals(LocalUserIDKey, ident.ID)
+				if ident.Type == TypeUser {
+					c.Locals(LocalUserRoleKey, ident.Role)
+				}
+				return c.Next()
+			}
+		}
+
 		id, role, ok, authErr := resolveAuthenticatedUser(c)
 		if authErr != nil {
 			if errors.Is(authErr, authn.ErrUnavailable) {

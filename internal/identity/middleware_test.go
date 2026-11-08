@@ -48,3 +48,39 @@ func TestGuestIdentityRequiresCredentialForRecovery(t *testing.T) {
 		require.Equal(t, first.ID, continued.ID, "a valid guest cookie preserves ownership")
 	}
 }
+
+func TestResolveDoesNotUpgradeGuestWhenAppliedTwice(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewStore(client, 0)
+
+	app := fiber.New()
+	apiGroup := app.Group("/api")
+	// main.go creates the tool group with identity middleware, then registers
+	// OCR V2 routes on apiGroup with their own identity middleware.
+	toolGroup := apiGroup.Group("", Resolve(store))
+	toolGroup.Get("/tools/example", func(c *fiber.Ctx) error { return c.SendStatus(http.StatusNoContent) })
+	apiGroup.Get("/v2/ocr/text/jobs", Resolve(store), func(c *fiber.Ctx) error {
+		ident, ok := FromContext(c)
+		if !ok {
+			return c.SendStatus(http.StatusInternalServerError)
+		}
+		return c.JSON(fiber.Map{"identity_type": ident.Type, "identity_id": ident.ID})
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/ocr/text/jobs", nil)
+	request.Header.Set("User-Agent", "synthetic-identity-test")
+	response, err := app.Test(request)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusOK, response.StatusCode)
+
+	var result struct {
+		IdentityType Type   `json:"identity_type"`
+		IdentityID   string `json:"identity_id"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+	require.Equal(t, TypeGuest, result.IdentityType, "a repeated middleware pass must preserve the guest identity")
+	require.NotEmpty(t, result.IdentityID)
+}
