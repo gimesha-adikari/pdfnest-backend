@@ -57,6 +57,15 @@ type editorCompileRequest struct {
 	SourceName   string `json:"source_name,omitempty"`
 }
 
+type wordEditCompileWorkerRequest struct {
+	EditProtocol    string     `json:"edit_protocol"`
+	SourceTracker   string     `json:"source_tracker"`
+	ExtractionJobID string     `json:"extraction_job_id"`
+	BaselineDigest  string     `json:"baseline_digest"`
+	Edits           []WordEdit `json:"edits"`
+	SourceName      string     `json:"source_name,omitempty"`
+}
+
 func workerBaseURL() string {
 	base := os.Getenv("PDFNEST_WORKER_URL")
 	if base == "" {
@@ -140,6 +149,17 @@ func (s *service) CompileLayout(sourceKey string, pagesJSONKey string, sourceNam
 		SourceKey:    sourceKey,
 		PagesJSONKey: pagesJSONKey,
 		SourceName:   sourceName,
+	})
+}
+
+func (s *service) CompileWordEdits(request WordEditRequest, sourceName string) (*WorkerJobSubmission, error) {
+	return postJSON(workerBaseURL()+"/api/v1/editor/compile-word-edits", wordEditCompileWorkerRequest{
+		EditProtocol:    request.EditProtocol,
+		SourceTracker:   request.SourceTracker,
+		ExtractionJobID: request.ExtractionJobID,
+		BaselineDigest:  request.BaselineDigest,
+		Edits:           request.Edits,
+		SourceName:      sourceName,
 	})
 }
 

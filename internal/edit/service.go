@@ -10,6 +10,13 @@ type Service interface {
 	GetJobDownload(jobID string) (*http.Response, error)
 }
 
+// WordEditCompileService is an optional standalone General Editor capability.
+// It is deliberately separate from CompileLayout so Studio and legacy callers
+// keep their existing request contract.
+type WordEditCompileService interface {
+	CompileWordEdits(request WordEditRequest, sourceName string) (*WorkerJobSubmission, error)
+}
+
 type EditorLanguageRequest struct {
 	Mode      string   `json:"language_mode"`
 	Languages []string `json:"languages"`

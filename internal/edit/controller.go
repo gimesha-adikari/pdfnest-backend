@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"pdfnest-backend/internal/identity"
 	"pdfnest-backend/internal/storage"
@@ -156,6 +157,16 @@ func parseEditorLanguage(mode string, rawLanguages string) (EditorLanguageReques
 
 func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 	payloadBytes := c.Body()
+	if !utf8.Valid(payloadBytes) {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": "Request JSON is not valid UTF-8"})
+	}
+	wordRequest, isWordRequest, wordErr := decodeWordEditRequest(payloadBytes)
+	if wordErr != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": wordErr.Error(), "code": "INVALID_WORD_EDIT_REQUEST"})
+	}
+	if isWordRequest {
+		return cr.handleWordEditCompile(c, wordRequest)
+	}
 
 	var tracker struct {
 		SourceTracker string `json:"source_tracker"`
@@ -199,6 +210,38 @@ func (cr *Controller) HandleCompilePDF(c *fiber.Ctx) error {
 		})
 	}
 
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success":    true,
+		"job_id":     submission.JobID,
+		"status":     submission.Status,
+		"queue_name": submission.QueueName,
+	})
+}
+
+func (cr *Controller) handleWordEditCompile(c *fiber.Ctx, request WordEditRequest) error {
+	owner := identity.MustFromContext(c).ID
+	if !storage.IsOwnedKey(request.SourceTracker, owner, "editor_source") {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Original PDF does not belong to this editor session; upload it again."})
+	}
+	capability, ok := cr.service.(WordEditCompileService)
+	if !ok {
+		return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "Word edit transport is unavailable", "code": "WORD_EDIT_TRANSPORT_UNAVAILABLE"})
+	}
+	extraction, err := cr.service.GetJobStatus(request.ExtractionJobID)
+	if err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": "Trusted extraction baseline is unavailable or expired", "code": "WORD_EDIT_BASELINE_UNAVAILABLE"})
+	}
+	if err := validateWordEditsAgainstBaseline(request, extraction); err != nil {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "WORD_EDIT_BASELINE_MISMATCH"})
+	}
+	sourceName, _ := extraction.Payload["source_name"].(string)
+	if sourceName == "" {
+		sourceName = "document.pdf"
+	}
+	submission, err := capability.CompileWordEdits(request, sourceName)
+	if err != nil {
+		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "WORD_EDIT_WORKER_SUBMISSION_FAILED"})
+	}
 	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
 		"success":    true,
 		"job_id":     submission.JobID,
