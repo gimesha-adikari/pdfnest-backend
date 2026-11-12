@@ -63,7 +63,6 @@ type wordEditCompileWorkerRequest struct {
 	ExtractionJobID string     `json:"extraction_job_id"`
 	BaselineDigest  string     `json:"baseline_digest"`
 	Edits           []WordEdit `json:"edits"`
-	SourceName      string     `json:"source_name,omitempty"`
 }
 
 func workerBaseURL() string {
@@ -152,14 +151,13 @@ func (s *service) CompileLayout(sourceKey string, pagesJSONKey string, sourceNam
 	})
 }
 
-func (s *service) CompileWordEdits(request WordEditRequest, sourceName string) (*WorkerJobSubmission, error) {
+func (s *service) CompileWordEdits(request WordEditRequest) (*WorkerJobSubmission, error) {
 	return postJSON(workerBaseURL()+"/api/v1/editor/compile-word-edits", wordEditCompileWorkerRequest{
 		EditProtocol:    request.EditProtocol,
 		SourceTracker:   request.SourceTracker,
 		ExtractionJobID: request.ExtractionJobID,
 		BaselineDigest:  request.BaselineDigest,
 		Edits:           request.Edits,
-		SourceName:      sourceName,
 	})
 }
 

@@ -234,11 +234,7 @@ func (cr *Controller) handleWordEditCompile(c *fiber.Ctx, request WordEditReques
 	if err := validateWordEditsAgainstBaseline(request, extraction); err != nil {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "WORD_EDIT_BASELINE_MISMATCH"})
 	}
-	sourceName, _ := extraction.Payload["source_name"].(string)
-	if sourceName == "" {
-		sourceName = "document.pdf"
-	}
-	submission, err := capability.CompileWordEdits(request, sourceName)
+	submission, err := capability.CompileWordEdits(request)
 	if err != nil {
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{"success": false, "error": err.Error(), "code": "WORD_EDIT_WORKER_SUBMISSION_FAILED"})
 	}

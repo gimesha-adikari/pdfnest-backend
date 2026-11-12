@@ -14,7 +14,7 @@ type Service interface {
 // It is deliberately separate from CompileLayout so Studio and legacy callers
 // keep their existing request contract.
 type WordEditCompileService interface {
-	CompileWordEdits(request WordEditRequest, sourceName string) (*WorkerJobSubmission, error)
+	CompileWordEdits(request WordEditRequest) (*WorkerJobSubmission, error)
 }
 
 type EditorLanguageRequest struct {

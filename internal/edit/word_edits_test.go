@@ -18,7 +18,6 @@ type wordEditCompileService struct {
 	Service
 	extraction *WorkerJobRecord
 	forwarded  *WordEditRequest
-	sourceName string
 	wordCalls  int
 	lineCalls  int
 }
@@ -27,10 +26,9 @@ func (s *wordEditCompileService) GetJobStatus(string) (*WorkerJobRecord, error) 
 	return s.extraction, nil
 }
 
-func (s *wordEditCompileService) CompileWordEdits(request WordEditRequest, sourceName string) (*WorkerJobSubmission, error) {
+func (s *wordEditCompileService) CompileWordEdits(request WordEditRequest) (*WorkerJobSubmission, error) {
 	s.wordCalls++
 	s.forwarded = &request
-	s.sourceName = sourceName
 	return &WorkerJobSubmission{JobID: "word-job-1", Status: "queued", QueueName: "editor"}, nil
 }
 
@@ -105,7 +103,6 @@ func TestWordCompileValidatesOwnedBaselineAndForwardsExactUnicodeSnapshot(t *tes
 	require.Equal(t, 202, resp.StatusCode)
 	require.Equal(t, 1, service.wordCalls)
 	require.Zero(t, service.lineCalls)
-	require.Equal(t, "scan.pdf", service.sourceName)
 	require.Equal(t, "platen_word_edits.v1", service.forwarded.EditProtocol)
 	require.Equal(t, "extract-01", service.forwarded.ExtractionJobID)
 	require.Equal(t, source, service.forwarded.SourceTracker)

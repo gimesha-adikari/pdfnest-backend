@@ -38,7 +38,7 @@ func TestCompileWordEditsSendsVersionedEnvelopeToDedicatedWorkerRoute(t *testing
 			StyleOverride: nil, FitPolicy: "preserve_neighbors",
 		}},
 	}
-	submission, err := NewService().(WordEditCompileService).CompileWordEdits(request, "scan.pdf")
+	submission, err := NewService().(WordEditCompileService).CompileWordEdits(request)
 	require.NoError(t, err)
 	require.Equal(t, "worker-job", submission.JobID)
 	require.Equal(t, map[string]any{
@@ -46,7 +46,6 @@ func TestCompileWordEditsSendsVersionedEnvelopeToDedicatedWorkerRoute(t *testing
 		"source_tracker":    request.SourceTracker,
 		"extraction_job_id": request.ExtractionJobID,
 		"baseline_digest":   request.BaselineDigest,
-		"source_name":       "scan.pdf",
 		"edits": []any{map[string]any{
 			"page_num":               float64(1),
 			"element_id":             "line-1",
