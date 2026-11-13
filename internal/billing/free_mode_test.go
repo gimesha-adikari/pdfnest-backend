@@ -378,7 +378,7 @@ func setupGIM6IsolatedTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Skipf("explicitly configured isolated local PostgreSQL is unavailable: %v", err)
 	}
-	require.NoError(t, db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}))
+	require.NoError(t, db.AutoMigrate(&models.TaskCompletion{}, &config.User{}, &config.Subscription{}, &config.BillingReservation{}, &config.UsageLog{}, &config.AccountStorageCleanup{}))
 	previousDB := config.DB
 	config.DB = db
 	t.Cleanup(func() { config.DB = previousDB })
