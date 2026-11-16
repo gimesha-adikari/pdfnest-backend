@@ -219,6 +219,48 @@ func TestDurabilityPollingAndRedisExpiryFallbackPreservesOwnerAndDownload(t *tes
 		}
 	}
 }
+
+func TestWorkerStatusUsesSeparateBoundedEnvelopeForLargeEditorLayouts(t *testing.T) {
+	db := durabilityDB(t)
+	t.Setenv("APP_ENV", "test")
+	jobID := uuid.NewString()
+	row := models.WorkerResultOwnership{
+		ID: uuid.NewString(), RequestID: uuid.NewString(), RequestHash: "synthetic",
+		WorkerJobID: jobID, OwnerIdentity: "user:owned", SubmitPath: "/internal/ocr/v2/jobs",
+		SourceKeys: `[]`, State: "active", NextAttemptAt: time.Now(),
+	}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"id":"` + jobID + `","status":"succeeded","owner_identity":"user:owned","result":{"layout":"` + strings.Repeat("x", int(workerJSONLimit)+1024) + `"}}`)
+	s := &DurabilityStore{DB: db}
+	c := testDurableClient(t, s, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/jobs/"+jobID {
+			t.Errorf("unexpected worker path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	})
+	req, err := http.NewRequest(http.MethodGet, s.BaseURL+"/api/v1/jobs/"+jobID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("large successful worker status was rejected: %v", err)
+	}
+	got := readResponse(t, resp)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, body) {
+		t.Fatalf("large worker status changed: status=%d bytes=%d want=%d", resp.StatusCode, len(got), len(body))
+	}
+	var stored models.WorkerResultOwnership
+	if err := db.First(&stored, "worker_job_id = ?", jobID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != "terminal" || stored.StatusJSON != string(body) {
+		t.Fatalf("large status snapshot was not durably recorded: state=%s bytes=%d", stored.State, len(stored.StatusJSON))
+	}
+}
 func TestDurabilityCleanupRetryRestartAndDuplicate(t *testing.T) {
 	db := durabilityDB(t)
 	now := time.Now().UTC()

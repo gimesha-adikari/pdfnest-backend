@@ -27,6 +27,10 @@ import (
 )
 
 const workerJSONLimit int64 = 8 << 20
+// Editor status snapshots can include large but bounded OCR layouts. Keep
+// dispatch requests and acknowledgements on workerJSONLimit; only status reads
+// receive the larger envelope.
+const workerStatusLimit int64 = 32 << 20
 const WorkerResultRetention = 24 * time.Hour
 
 var ErrDurabilityUnavailable = errors.New("worker ownership ledger unavailable")
@@ -258,7 +262,7 @@ func (s *DurabilityStore) durableRoundTrip(req *http.Request, base http.RoundTri
 		}
 	}
 	if kind == "status" && resp.StatusCode == http.StatusOK {
-		data, e := readBounded(resp.Body, workerJSONLimit)
+		data, e := readBounded(resp.Body, workerStatusLimit)
 		_ = resp.Body.Close()
 		if e != nil {
 			return nil, e
@@ -618,7 +622,11 @@ func (s *DurabilityStore) runOnce(ctx context.Context, now time.Time) error {
 			var resp *http.Response
 			resp, err = client.Do(req)
 			if err == nil {
-				data, readErr := readBounded(resp.Body, workerJSONLimit)
+				limit := workerJSONLimit
+				if method == http.MethodGet {
+					limit = workerStatusLimit
+				}
+				data, readErr := readBounded(resp.Body, limit)
 				_ = resp.Body.Close()
 				err = readErr
 				if err == nil && resp.StatusCode == http.StatusOK {
