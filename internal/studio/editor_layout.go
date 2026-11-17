@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +28,7 @@ type EditorPage struct {
 	PageNum           int             `json:"page_num"`
 	Width             float64         `json:"width"`
 	Height            float64         `json:"height"`
+	Rotation          pageRotation    `json:"rotation,omitempty"`
 	Elements          []EditorElement `json:"elements"`
 	Kind              string          `json:"kind"`
 	HasSelectableText bool            `json:"has_selectable_text"`
@@ -39,6 +41,18 @@ type EditorPage struct {
 	ReadingOrder      []string        `json:"reading_order,omitempty"`
 	Capabilities      []string        `json:"capabilities,omitempty"`
 }
+
+type pageRotation int
+
+func (rotation *pageRotation) UnmarshalJSON(raw []byte) error {
+	degrees, err := strconv.Atoi(string(raw))
+	if err != nil {
+		return fmt.Errorf("page rotation must be an integer: %w", err)
+	}
+	*rotation = pageRotation(degrees)
+	return nil
+}
+
 type EditorElement struct {
 	ID              string               `json:"id"`
 	Text            string               `json:"text"`
@@ -129,7 +143,7 @@ func validateEditorLayout(layout EditorLayout) error {
 		}
 	}
 	for index, page := range layout.Pages {
-		if page.PageNum != index+1 || seenPages[page.PageNum] || !finitePositive(page.Width) || !finitePositive(page.Height) {
+		if page.PageNum != index+1 || seenPages[page.PageNum] || !finitePositive(page.Width) || !finitePositive(page.Height) || !validPageRotation(int(page.Rotation)) {
 			return ErrInvalidJob
 		}
 		seenPages[page.PageNum] = true
@@ -161,6 +175,15 @@ func validateEditorLayout(layout EditorLayout) error {
 		return ErrInvalidJob
 	}
 	return nil
+}
+
+func validPageRotation(rotation int) bool {
+	switch rotation {
+	case 0, 90, 180, 270:
+		return true
+	default:
+		return false
+	}
 }
 
 func validEditorStyle(style *EditorElementStyle) bool {
@@ -201,7 +224,7 @@ func validateEditedEditorLayout(base EditorLayout, edited EditorLayout) error {
 		return ErrInvalidJob
 	}
 	for i := range base.Pages {
-		if base.Pages[i].PageNum != edited.Pages[i].PageNum || base.Pages[i].Width != edited.Pages[i].Width || base.Pages[i].Height != edited.Pages[i].Height || len(base.Pages[i].Elements) != len(edited.Pages[i].Elements) {
+		if base.Pages[i].PageNum != edited.Pages[i].PageNum || base.Pages[i].Width != edited.Pages[i].Width || base.Pages[i].Height != edited.Pages[i].Height || base.Pages[i].Rotation != edited.Pages[i].Rotation || len(base.Pages[i].Elements) != len(edited.Pages[i].Elements) {
 			return ErrInvalidJob
 		}
 		for j := range base.Pages[i].Elements {

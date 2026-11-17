@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -87,6 +88,83 @@ func TestEditorLayoutValidationRequiresStableIDsAndFiniteGeometry(t *testing.T) 
 	invalidPage := bytes.Replace(valid, []byte(`"page_num":1`), []byte(`"page_num":2`), 1)
 	_, _, err = decodeEditorLayout(invalidPage)
 	assert.ErrorIs(t, err, ErrInvalidJob)
+}
+
+func editorLayoutWithRotation(t *testing.T, rotation any, includeRotation, legacy bool, extraPageFields map[string]any) []byte {
+	t.Helper()
+
+	page := map[string]any{
+		"page_num": 1,
+		"width":    800,
+		"height":   600,
+		"kind":     "scanned",
+		"elements": []map[string]any{{
+			"id": "p1-ocr-v2-line-1", "text": "Phase Eight Alpha Bravo", "original_text": "Phase Eight Alpha Bravo",
+			"x": 60, "y": 110, "width": 300, "height": 28, "size": 32.2, "font": "tiro",
+		}},
+	}
+	if includeRotation {
+		page["rotation"] = rotation
+	}
+	for key, value := range extraPageFields {
+		page[key] = value
+	}
+
+	document := map[string]any{"success": true, "pages": []map[string]any{page}}
+	if !legacy {
+		document["schema_version"] = "ocr_v2_editor_layout.v1"
+		document["ocr_v2"] = true
+		document["geometry_space"] = "studio_visible"
+	}
+	raw, err := json.Marshal(document)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestEditorLayoutPreservesWorkerPageRotation(t *testing.T) {
+	for _, expected := range []int{0, 90, 180, 270} {
+		t.Run(fmt.Sprintf("accepts_%d_degrees", expected), func(t *testing.T) {
+			layout, canonical, err := decodeEditorLayout(editorLayoutWithRotation(t, expected, true, false, nil))
+			require.NoError(t, err, "the Studio worker's rotation metadata is part of its public layout contract")
+			assert.Equal(t, expected, int(layout.Pages[0].Rotation))
+			assert.Equal(t, float64(800), layout.Pages[0].Width)
+			assert.Equal(t, float64(600), layout.Pages[0].Height)
+			if expected != 0 {
+				assert.Contains(t, string(canonical), fmt.Sprintf(`"rotation":%d`, expected))
+			}
+		})
+	}
+
+	t.Run("legacy_layout_without_rotation_defaults_to_zero", func(t *testing.T) {
+		layout, canonical, err := decodeEditorLayout(editorLayoutWithRotation(t, nil, false, true, nil))
+		require.NoError(t, err, "pre-rotation Studio layouts remain valid")
+		assert.Zero(t, layout.Pages[0].Rotation)
+		assert.NotContains(t, string(canonical), `"rotation"`)
+	})
+
+	for name, value := range map[string]any{
+		"unsupported_45": 45, "unsupported_360": 360, "unsupported_negative": -90,
+		"fraction": 90.5, "string": "90", "boolean": true, "null": nil,
+		"array": []any{90}, "object": map[string]any{"degrees": 90},
+	} {
+		t.Run("rejects_"+name, func(t *testing.T) {
+			_, _, err := decodeEditorLayout(editorLayoutWithRotation(t, value, true, false, nil))
+			assert.ErrorIs(t, err, ErrInvalidJob, "malformed or unsupported page rotations remain fail-closed")
+		})
+	}
+
+	t.Run("unrelated_worker_fields_remain_rejected", func(t *testing.T) {
+		_, _, err := decodeEditorLayout(editorLayoutWithRotation(t, 90, true, false, map[string]any{"unexpected_field": true}))
+		assert.ErrorIs(t, err, ErrInvalidJob, "the strict Studio layout decoder remains closed to unrelated fields")
+	})
+
+	t.Run("edited_layout_cannot_change_source_rotation", func(t *testing.T) {
+		base, _, err := decodeEditorLayout(editorLayoutWithRotation(t, 90, true, false, nil))
+		require.NoError(t, err)
+		edited, _, err := decodeEditorLayout(editorLayoutWithRotation(t, 180, true, false, nil))
+		require.NoError(t, err)
+		assert.ErrorIs(t, validateEditedEditorLayout(base, edited), ErrInvalidJob, "source page rotation is immutable across layout edits")
+	})
 }
 
 func TestEditorLayoutAcceptsStudioVisibleGeometrySpace(t *testing.T) {
