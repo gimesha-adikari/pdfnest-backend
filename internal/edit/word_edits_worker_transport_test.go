@@ -6,8 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/stretchr/testify/require"
 	"pdfnest-backend/internal/worker"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestCompileWordEditsSendsVersionedEnvelopeToDedicatedWorkerRoute(t *testing.T) {
