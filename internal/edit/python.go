@@ -2,6 +2,7 @@ package edit
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ type WorkerJobRecord struct {
 }
 
 type editorExtractRequest struct {
+	RequestID    string   `json:"request_id,omitempty"`
 	SourceKey    string   `json:"source_key"`
 	FilePassword string   `json:"file_password,omitempty"`
 	SourceName   string   `json:"source_name,omitempty"`
@@ -74,12 +76,16 @@ func workerBaseURL() string {
 }
 
 func postJSON(url string, payload any) (*WorkerJobSubmission, error) {
+	return postJSONWithContext(context.Background(), url, payload)
+}
+
+func postJSONWithContext(ctx context.Context, url string, payload any) (*WorkerJobSubmission, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode request json: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
@@ -106,6 +112,23 @@ func postJSON(url string, payload any) (*WorkerJobSubmission, error) {
 	}
 
 	return &submission, nil
+}
+
+type trackedExtractionService interface {
+	extractTracked(context.Context, string, string, string, string, *EditorLanguageRequest) (*WorkerJobSubmission, error)
+}
+
+func (s *service) extractTracked(ctx context.Context, sourceKey, password, sourceName, requestID string, language *EditorLanguageRequest) (*WorkerJobSubmission, error) {
+	request := editorExtractRequest{
+		RequestID: requestID, SourceKey: sourceKey, FilePassword: password, SourceName: sourceName,
+		Consumer: "legacy_editor",
+	}
+	if language != nil {
+		policy := normalizedEditorLanguage(*language)
+		request.Consumer, request.OCRV2 = "general_editor", true
+		request.LanguageMode, request.Languages = policy.Mode, policy.Languages
+	}
+	return postJSONWithContext(ctx, workerBaseURL()+workerExtractPath, request)
 }
 
 func (s *service) ExtractLayout(sourceKey string, filePassword string, sourceName string) (*WorkerJobSubmission, error) {

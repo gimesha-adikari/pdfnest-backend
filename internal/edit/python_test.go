@@ -1,10 +1,12 @@
 package edit
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -58,4 +60,38 @@ func TestServiceExposesBothEditorV2Seams(t *testing.T) {
 	var _ GeneralEditorOCRV2LanguageService = (*service)(nil)
 	var _ StudioEditorLanguageService = (*service)(nil)
 	var _ LegacyEditorService = (*service)(nil)
+}
+
+func TestTrackedExtractionCarriesDurableRequestIdentityAndDeadline(t *testing.T) {
+	seen := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		seen <- payload
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	originalClient := worker.Client
+	worker.Client = server.Client()
+	t.Cleanup(func() { worker.Client = originalClient })
+	t.Setenv("PDFNEST_WORKER_URL", server.URL)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	_, err := (&service{}).extractTracked(ctx, "owned/source.pdf", "", "source.pdf", "dispatch-id",
+		&EditorLanguageRequest{Mode: "AUTO", Languages: []string{"eng", "sin", "tam"}})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	select {
+	case payload := <-seen:
+		require.Equal(t, "dispatch-id", payload["request_id"])
+		require.Equal(t, "owned/source.pdf", payload["source_key"])
+		require.Equal(t, true, payload["ocr_v2"])
+		require.Equal(t, "general_editor", payload["consumer"])
+		require.Equal(t, "AUTO", payload["language_mode"])
+	default:
+		t.Fatal("worker did not receive the tracked extraction")
+	}
 }
