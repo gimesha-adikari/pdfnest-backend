@@ -136,6 +136,18 @@ func (ctrl *Controller) RasterizePdfUniversal(c *fiber.Ctx) error {
 	return c.SendFile(zipOutputPath)
 }
 
+func previewRequestFailed(c *fiber.Ctx, err error, fallbackCode string) error {
+	var admission *previewAdmissionError
+	if errors.As(err, &admission) {
+		c.Set("Cache-Control", "no-store")
+		if admission.status == fiber.StatusTooManyRequests {
+			c.Set("Retry-After", "1")
+		}
+		return c.Status(admission.status).JSON(fiber.Map{"code": admission.code, "message": admission.message})
+	}
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"code": fallbackCode, "message": err.Error()})
+}
+
 func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
@@ -167,10 +179,7 @@ func (cc *Controller) StreamPagePreviewHandler(c *fiber.Ctx) error {
 
 	imgBytes, err := cc.service.ConvertPageToImageStream(c.UserContext(), upload.Header, pageNum, scale, ownerID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"code":    "RASTER_ENGINE_CRASH",
-			"message": err.Error(),
-		})
+		return previewRequestFailed(c, err, "RASTER_ENGINE_CRASH")
 	}
 
 	c.Set("Content-Type", "image/jpeg")
@@ -203,10 +212,7 @@ func (cc *Controller) CreatePreviewSessionHandler(c *fiber.Ctx) error {
 		ownerID,
 	)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{
-			"code":    "PREVIEW_SESSION_CREATE_FAILED",
-			"message": err.Error(),
-		})
+		return previewRequestFailed(c, err, "PREVIEW_SESSION_CREATE_FAILED")
 	}
 
 	return c.Status(200).JSON(session)
@@ -270,10 +276,7 @@ func (cc *Controller) StreamPreviewSessionPageHandler(c *fiber.Ctx) error {
 			})
 		}
 
-		return c.Status(500).JSON(fiber.Map{
-			"code":    "PREVIEW_SESSION_PAGE_FAILED",
-			"message": err.Error(),
-		})
+		return previewRequestFailed(c, err, "PREVIEW_SESSION_PAGE_FAILED")
 	}
 
 	c.Set("Content-Type", "image/jpeg")

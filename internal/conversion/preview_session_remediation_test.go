@@ -57,6 +57,12 @@ func TestPreviewSessionRemediation_WorkerErrorMapping(t *testing.T) {
 					"message": "Page number 999 out of range",
 				},
 			})
+		case "/api/v1/render/sessions/valid_session/page/2":
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"detail":{"code":"RENDER_SESSION_STORAGE_BUSY"}}`)
+		case "/api/v1/render/sessions/valid_session/page/3":
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = io.WriteString(w, `{"detail":{"code":"RENDER_SESSION_STORAGE_LIMIT"}}`)
 		case "/api/v1/render/sessions/valid_session/page/1":
 			w.Header().Set("Content-Type", "image/jpeg")
 			w.WriteHeader(http.StatusOK)
@@ -159,6 +165,30 @@ func TestPreviewSessionRemediation_WorkerErrorMapping(t *testing.T) {
 			t.Fatalf("Expected Content-Type image/jpeg, got %s", resp.Header.Get("Content-Type"))
 		}
 	})
+
+	for _, tc := range []struct {
+		page, status int
+		code, retry  string
+	}{
+		{2, http.StatusTooManyRequests, "RENDER_SESSION_STORAGE_BUSY", "1"},
+		{3, http.StatusRequestEntityTooLarge, "RENDER_SESSION_STORAGE_LIMIT", ""},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			req := httptest.NewRequest("GET", fmt.Sprintf("/conversion/preview/session/valid_session/page/%d", tc.page), nil)
+			resp, err := app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var body map[string]string
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tc.status || body["code"] != tc.code || resp.Header.Get("Retry-After") != tc.retry {
+				t.Fatalf("status=%d code=%s retry=%q", resp.StatusCode, body["code"], resp.Header.Get("Retry-After"))
+			}
+		})
+	}
 
 	t.Run("Direct_renderWorkerSessionPage_ErrorTypes", func(t *testing.T) {
 		ctx := context.Background()

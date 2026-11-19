@@ -364,6 +364,42 @@ func (s *ConversionService) preparePreviewPdf(
 	return tempFilePath, targetPdfPath, cleanup, nil
 }
 
+type previewAdmissionError struct {
+	status  int
+	code    string
+	message string
+}
+
+func (e *previewAdmissionError) Error() string { return e.message }
+
+// Preserve only known admission responses from the signed render service.
+func previewAdmissionFailure(status int, body []byte) error {
+	var payload struct {
+		Detail struct {
+			Code string `json:"code"`
+		} `json:"detail"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return nil
+	}
+	code := payload.Detail.Code
+	switch status {
+	case http.StatusTooManyRequests:
+		switch code {
+		case "RENDER_SESSION_STORAGE_BUSY", "RENDER_QUEUE_FULL", "RENDER_QUEUE_TIMEOUT", "SESSION_METADATA_BUSY":
+			return &previewAdmissionError{status, code, "Preview rendering is temporarily busy. Retry shortly."}
+		}
+	case http.StatusRequestEntityTooLarge:
+		switch code {
+		case "RENDER_INPUT_TOO_LARGE":
+			return &previewAdmissionError{status, code, "PDF exceeds the supported preview size."}
+		case "RENDER_SESSION_STORAGE_LIMIT":
+			return &previewAdmissionError{status, code, "Preview storage limit reached. Close unused documents or try a smaller PDF."}
+		}
+	}
+	return nil
+}
+
 func (s *ConversionService) createWorkerPreviewSession(
 	ctx context.Context,
 	workerBaseURL string,
@@ -445,7 +481,10 @@ func (s *ConversionService) createWorkerPreviewSession(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		if capacityErr := previewAdmissionFailure(resp.StatusCode, body); capacityErr != nil {
+			return empty, capacityErr
+		}
 
 		return empty, fmt.Errorf(
 			"render session creation failed: status=%s body=%s",
@@ -537,7 +576,10 @@ func (s *ConversionService) renderWorkerSessionPage(
 		if resp.StatusCode == http.StatusBadRequest {
 			return nil, ErrPreviewInvalidPage
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		if capacityErr := previewAdmissionFailure(resp.StatusCode, body); capacityErr != nil {
+			return nil, capacityErr
+		}
 
 		return nil, fmt.Errorf(
 			"page render failed: status=%s body=%s",
