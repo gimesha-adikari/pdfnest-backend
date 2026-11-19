@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"pdfnest-backend/internal/identity"
@@ -55,6 +56,25 @@ func NewController(s Service) *Controller {
 }
 
 func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
+	owner := identity.MustFromContext(c).ID
+	dispatchID := ""
+	if key := c.Get("Idempotency-Key"); key != "" {
+		attempt, err := extractAttemptID(key)
+		if err != nil {
+			return err
+		}
+		receipt, err := readExtractionReceipt(c.UserContext(), owner, attempt)
+		if err != nil {
+			return err
+		}
+		if receipt.State != "not_found" {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+				"code": "EXTRACTION_REQUEST_EXISTS", "message": "Check the existing extraction request.",
+			})
+		}
+		dispatchID = extractionDispatchID(owner, attempt)
+	}
 	upload, err := uploads.MustPDFFile(c, "file")
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -78,7 +98,7 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 		contentType = "application/pdf"
 	}
 
-	sourceKey := storage.NewOwnedKey(identity.MustFromContext(c).ID, "editor_source", filepath.Ext(upload.Header.Filename))
+	sourceKey := storage.NewOwnedKey(owner, "editor_source", filepath.Ext(upload.Header.Filename))
 	if err := cr.persistSource(upload.Path, sourceKey, contentType); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -87,7 +107,30 @@ func (cr *Controller) HandleExtractHTML(c *fiber.Ctx) error {
 	}
 
 	var submission *WorkerJobSubmission
-	if strings.EqualFold(strings.TrimSpace(c.FormValue("ocr_v2")), "true") {
+	useOCRV2 := strings.EqualFold(strings.TrimSpace(c.FormValue("ocr_v2")), "true")
+	if dispatchID != "" {
+		tracked, ok := cr.service.(trackedExtractionService)
+		if !ok {
+			return fiber.ErrServiceUnavailable
+		}
+		var language *EditorLanguageRequest
+		if useOCRV2 {
+			policy, validationErr := parseEditorLanguage(c.FormValue("language_mode"), c.FormValue("languages"))
+			if validationErr != nil {
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"success": false, "error": validationErr.Error()})
+			}
+			language = &policy
+		}
+		ctx, cancel := context.WithTimeout(c.UserContext(), 40*time.Second)
+		defer cancel()
+		submission, err = tracked.extractTracked(ctx, sourceKey, filePassword, upload.Header.Filename, dispatchID, language)
+		if err != nil {
+			// An already admitted dispatch may still publish its receipt.
+			return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
+				"code": "EXTRACTION_ACKNOWLEDGMENT_UNAVAILABLE", "message": "Check the extraction request before uploading again.",
+			})
+		}
+	} else if useOCRV2 {
 		v2, ok := cr.service.(GeneralEditorOCRV2LanguageService)
 		if !ok {
 			return c.Status(fiber.StatusNotImplemented).JSON(fiber.Map{"success": false, "error": "OCR V2 editor extraction is unavailable"})
@@ -247,6 +290,7 @@ func (cr *Controller) handleWordEditCompile(c *fiber.Ctx, request WordEditReques
 }
 
 func (cr *Controller) HandleJobStatus(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderCacheControl, "no-store")
 	jobID := c.Params("job_id")
 	job, err := cr.service.GetJobStatus(jobID)
 	if err != nil {

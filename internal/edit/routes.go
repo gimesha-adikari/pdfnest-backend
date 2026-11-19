@@ -11,6 +11,7 @@ func RegisterRoutes(router fiber.Router, ctrl *Controller) {
 	editGroup := router.Group("/edit", uploads.Prepare())
 
 	editGroup.Post("/extract", billing.Use(billing.PDFEditExtract), ctrl.HandleExtractHTML)
+	editGroup.Get("/extract/requests/:request_id", ctrl.HandleExtractionReceipt)
 	editGroup.Post("/compile", billing.Use(billing.PDFEditCompile), ctrl.HandleCompilePDF)
 
 	editGroup.Get("/jobs/:job_id", ctrl.HandleJobStatus)
